@@ -74,7 +74,7 @@ years later reproduces the reading in force at the time — not today's.
 **Where ACPIR is silent and this engine therefore follows IFRS 9 by election:** subsequent
 changes in cash flows (B5.4.5 / B5.4.6 — [§6](#6-event-treatments)); modification versus
 derecognition ([§6.4](#64-modification-versus-derecognition)); the negative fee list
-(B5.4.3 — [§3.2](#32-classification)); the probable-drawdown condition on commitment fees; the
+(B5.4.3 — [§3.2](#32-fee-and-cost-classification)); the probable-drawdown condition on commitment fees; the
 next-repricing-date shortcut (B5.4.4 — [§5.6](#56-the-b544-next-repricing-date-shortcut));
 liability-side symmetry ([§11](#11-liabilities)); hedge basis adjustment amortisation
 ([§12](#12-hedge-accounting-interaction)).
@@ -480,6 +480,49 @@ reset. Two consequences worth stating:
 The 1,408.29 carried across the reset under full-expected-life is the same figure as
 [Case 2](reference-cases/case-02-full-prepayment.md)'s prepayment acceleration and as invariant
 INV-4 at month 12 — three routes to one number, which is a useful engine cross-check.
+
+---
+
+### 5.7 Rounding and residue policy
+
+**Where rounding happens.** Once per persisted figure, at currency scale, `HALF_UP`. Rolling balances
+are carried at working precision **and** at presentation scale; the presented balance is derived from
+the presented components so that the published table adds up. A published movement schedule whose
+columns do not sum is a defect even when every figure is individually correct — controllers reconcile
+from the published numbers, not from the working ones.
+
+**Terminal residue on the EIR leg.** Invariant TR-1: on a contract run to contractual maturity with
+no events, the closing gross carrying amount on the **EIR leg** is exactly zero. It is exactly zero
+because the rate was solved against that same flow vector. Any non-zero terminal balance on the EIR
+leg means the solve and the roll-forward disagreed about the flows — failure mode
+[01 §11 #9](01-domain-primer.md#11-common-failure-modes).
+
+**Residue on the contractual leg is real and is not a defect.** In
+[Case 1](reference-cases/case-01-emi-loan-with-fees.md) the true annuity payment is 47,073.472223 and
+the billed EMI is 47,073.47; over 24 periods that 0.002223 monthly shortfall compounds to a
+**0.059969** residue. Every real lender resolves this somewhere, and the engine must follow whatever
+the core banking system does rather than invent its own answer:
+
+| Policy | Behaviour |
+|---|---|
+| `LMS_AUTHORITATIVE` *(strongly preferred)* | Consume the schedule the CBS actually billed; do not derive one. |
+| `FINAL_PERIOD_PLUG` | The last instalment absorbs the residue. Final EMI becomes 47,073.53. |
+| `FIRST_PERIOD_PLUG` | The first instalment absorbs it. |
+| `SPREAD_LAST_N` | Spread over the final `n` instalments. |
+
+`LMS_AUTHORITATIVE` is preferred in production and is why the projector accepts an externally-supplied
+schedule as a first-class input (FR-102, [ADR-0004](adr/0004-delta-over-contractual-ledger.md)).
+Deriving a schedule the CBS did not bill guarantees a reconciliation break every month, which turns
+control C-14 into noise. The plug policies exist for instruments where no external schedule is
+available.
+
+Under any plug policy the residue lands in the contractual leg only; it never touches the EIR leg.
+Invariant INV-3 is stated against the **actual billed flows**, so it holds regardless of which policy
+is in force.
+
+**Residue is never resolved by tolerance.** A tolerance hides exactly the class of defect this system
+exists to prevent — see [ADR-0002](adr/0002-precision-policy.md). Where a difference exists, a rule
+accounts for it.
 
 ---
 

@@ -52,7 +52,7 @@ likely to be noticed.
   on a non-terminating expansion — a footgun, so division is centralised in `eir-domain`.
 - API clients must parse decimal strings. Documented, and worth the friction.
 - The terminal-residue question cannot be resolved by tolerance and needs an explicit policy
-  ([03 §7.3](../03-calculation-spec.md)).
+  ([03 §5.7](../03-calculation-spec.md#57-rounding-and-residue-policy)).
 
 ## Alternatives rejected
 

@@ -242,7 +242,7 @@ approximation. Bending them into an annuity shape to reuse code produces a numbe
 
 `ExternalScheduleProjector` is preferred in production wherever the CBS can supply the billed
 schedule, because a derived schedule the CBS did not bill guarantees a monthly reconciliation break
-([03 §7.3](03-calculation-spec.md)).
+([03 §5.7](03-calculation-spec.md#57-rounding-and-residue-policy)).
 
 ### 4.4 Money and precision
 

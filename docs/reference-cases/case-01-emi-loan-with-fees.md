@@ -111,6 +111,6 @@ The billed EMI of 47,073.47 is the true annuity payment of 47,073.472223 rounded
 *contractual* leg — visible as the 0.06 standing in the unamortised-fee column at period 24.
 
 The EIR leg is unaffected and amortises to exactly zero. The residue is resolved by the
-rounding-residue policy at [03 §7](../03-calculation-spec.md), preferably
+rounding-residue policy at [03 §5.7](../03-calculation-spec.md#57-rounding-and-residue-policy), preferably
 `LMS_AUTHORITATIVE` — consume the schedule the core banking system actually billed rather than
 deriving one, because a derived schedule guarantees a monthly reconciliation break.

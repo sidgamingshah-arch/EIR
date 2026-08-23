@@ -219,7 +219,7 @@ The 0.06 left standing at period 24 is not an error in the EIR leg — that leg 
 exactly zero. It is the *contractual* leg's rounding residue: the billed EMI of 47,073.47 is
 the true annuity payment of 47,073.472223 rounded down to paise, and 24 periods of that
 shortfall accumulate to 0.059969. Real, unavoidable, and it has to go somewhere by rule
-rather than by tolerance — see [03 § rounding residue](03-calculation-spec.md#7-rounding-and-residue-policy).
+rather than by tolerance — see [03 §5.7](03-calculation-spec.md#57-rounding-and-residue-policy).
 
 ## 5. When the schedule changes
 
