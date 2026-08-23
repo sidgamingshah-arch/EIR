@@ -1,13 +1,22 @@
 # 01 — Domain Primer
 
-The accounting this engine implements. Written for the engineer who will build it and needs
-to know *why* the rules have their shape, not only what they are. Paragraph references are
-to IFRS 9; Ind AS 109 is converged on all points used here, and divergences are noted where
-they exist.
+The accounting this engine implements. Written for the engineer who will build it and needs to
+know *why* the rules have their shape, not only what they are.
 
-> Standard references are given so that behaviour can be traced to authority. They are a
-> map, not a substitute for the standard or for the entity's own accounting policy, which
-> is what the engine is ultimately configured against.
+**Regulatory anchor: RBI ACPIR 2026**, effective 1 April 2027. ACPIR carries only nine operative EIR
+paragraphs, so most of the *mechanics* below come from IFRS 9 — adopted as an **interpretive source**
+where ACPIR is silent, under the hierarchy at
+[03 §2](03-calculation-spec.md#2-interpretive-hierarchy). References of the form `ACPIR 51` are to
+the Directions; `B5.4.6` to IFRS 9 application guidance.
+
+> Two places where ACPIR **overrides** IFRS 9 rather than being silent, and both change the
+> engine's behaviour: **Stage 3 income is not recognised at all** (§6), and **penal charges are
+> hard-excluded** from every EIR stream (§2). Read those two sections even if you skip the rest.
+>
+> Standard references are a map, not a substitute for the Directions or for the bank's own
+> Board-approved accounting policy, which is what the engine is ultimately configured against. The
+> full domain treatment — silence map, 38-product matrix, divergence register — is the
+> [ACPIR 2026 application reference](reference/acpir-2026-eir-application-reference.md).
 
 ---
 
@@ -105,6 +114,41 @@ This classification is a **policy decision with judgement in it**, applied to fe
 originate in other systems and change without notice. It therefore belongs in a versioned,
 maker–checker-controlled rule set — not scattered through code. See
 [FR-2xx](02-functional-spec.md#22-fee-and-cost-classification-fr-2xx).
+
+### The ACPIR overlay on fees
+
+Three India-specific points sit on top of the IFRS 9 framing above.
+
+**ACPIR 52 states only the positive limb.** Origination fees and commitment fees to originate a loan
+are integral. There is **no negative list** — the B5.4.3 catalogue of what is *not* integral has no
+ACPIR equivalent, so without policy a bank has no principled basis to keep any fee out. The engine
+adopts B5.4.2 and B5.4.3 in full as configured policy.
+
+**ACPIR 52 also drops the "probable drawdown" condition** on commitment fees. Read literally, every
+commitment fee defers — including on facilities that were never going to draw. The engine restores the
+condition and requires a numeric `drawdown_probability` assessment per product, evidenced by
+historical drawdown rates.
+
+**ACPIR 53 draws the line at *selling*, not *processing*.** Fees and commission paid to agents
+"including employees acting as selling agents" are capitalisable transaction costs. Salary of the
+credit-appraisal team is internal administrative cost, explicitly excluded. So a branch-staff
+incentive for *sourcing* a loan capitalises; the cost of *assessing* it does not. Source HR and
+cost-centre data is structured along neither line, which makes this an early data-sourcing
+workstream rather than a late accounting one — and the longest-lead item in the programme
+([08 §0](08-roadmap.md#0-the-sequencing-argument)).
+
+### Penal charges: excluded entirely, by Direction
+
+Under RBI's 2023 penal charges framework these are **charges**, not penal *interest*: they are not
+capitalised and they bear no further interest. They therefore cannot enter the amortisation schedule
+or the gross carrying amount at all.
+
+This has no IFRS 9 analogue, and it is implemented as a **filter at the ingestion boundary rather
+than a judgement in the rule set** — a posting classified `EXCLUDED_BY_DIRECTION` is rejected from
+every EIR stream, and the rejection is logged as a positive assertion for the period (invariant
+PC-1, control C-03). The reason it is an assertion rather than an assumption: legacy core banking
+systems routinely book penal amounts into the interest ledger, so the engine has to prove the
+exclusion held rather than trust that it did.
 
 ### The trap: contingent fees are not integral
 
@@ -256,30 +300,85 @@ attribute so both views can be reported; it does not attempt to reconcile the tw
 automatically. Flagged in the [roadmap](08-roadmap.md) as a phase-3 regulatory-reporting
 concern.
 
-## 6. Impairment: the Stage 3 switch
+## 6. Impairment: Stage 3, where India diverges
 
-Interest revenue is calculated (IFRS 9 5.4.1) by applying the effective interest rate to:
+Under IFRS 9 5.4.1 interest revenue is calculated by applying the EIR to:
 
 - the **gross carrying amount** — Stage 1 and Stage 2;
-- the **amortised cost**, i.e. net of the loss allowance — Stage 3, once the asset has
-  become credit-impaired.
+- the **amortised cost**, net of the loss allowance — Stage 3, once credit-impaired.
 
-[Reference Case 5](reference-cases/case-05-stage-3-net-basis.md), with a 40% allowance:
-gross-basis interest would be 5,506.79; the Stage 3 amount is **3,304.08** on the net
-317,044.39. The 2,202.72 difference is not recognised as interest at all.
+**ACPIR does not follow the second limb. Income is not recognised on Stage 3 at all**, and the
+Seventh Amendment Directions protect that treatment from an auditor qualification on the basis that
+the standard permits postponement where collectability is significantly uncertain. Functionally it is
+a non-accrual regime, closer to US practice than to IFRS 9 — which is a defensible framing rather
+than an embarrassment.
 
-Three consequences that implementations routinely miss:
+But the engine cannot simply stop computing, because **ACPIR 50 makes the EIR the ECL discount
+rate**. Expected credit loss is a present-value measure, so its discount unwinds mechanically every
+period whether or not anything is recognised. The engine must compute the unwind and keep it out of
+the P&L.
 
-1. **The rate does not change.** Only the base does. Stage transfer is not an EIR event.
-2. **The Stage 3 amount is still interest income.** It is the unwinding of the discount and
-   it is presented within interest revenue — not netted into the impairment line.
-3. **It reverses.** If the asset ceases to be credit-impaired, recognition returns to the
-   gross basis **prospectively** from that point. No catch-up for the interest not recognised
-   while in Stage 3.
+### The decomposition
 
-Because the allowance moves every period, Stage 3 interest depends on an ECL output. That
-dependency is why the engine records the ECL input version it consumed (§ [ADR-0003](adr/0003-event-sourced-recompute.md)):
-without it, a replay produces a different answer and determinism is lost.
+[Reference Case 5](reference-cases/case-05-stage-3-acpir-suppression.md), with a 40% allowance on a
+528,407.32 gross carrying amount:
+
+| | Quantity | Amount |
+|---|---|---:|
+| (a) | Gross-basis interest, `GCA × EIR` — what Stage 1/2 would recognise | 5,506.79 |
+| (b) | IFRS 9 Stage 3 net-basis interest, `AC × EIR` | 3,304.08 |
+| (c) | ECL discount unwind, `allowance × EIR` | 2,202.72 |
+| | **Recognised in P&L under ACPIR** | **0.00** |
+
+**(b) + (c) = (a), exactly.** 3,304.08 + 2,202.72 = 5,506.79.
+
+That identity is the single most useful fact in this section. The ECL discount unwind is *precisely*
+the interest the gross basis would have earned on the allowance portion of the balance — so there is
+no separate unwind model to build. The engine computes one gross-basis figure and decomposes it.
+IFRS 9 recognises (b) and books (c) inside impairment; ACPIR recognises neither.
+
+### What the engine therefore maintains
+
+Four parallel quantities per Stage 3 contract per period, all reconciled (control C-04):
+
+1. **Gross carrying amount** — continues rolling forward on the gross basis.
+2. **Shadow EIR unwind** — 2,202.72 here. Retained for the ECL roll-forward. Never P&L.
+3. **Interest-in-suspense** — the contractual interest billed but not recognised, 5,298.16 here. A
+   **first-class ledger object**, not a memorandum note. The Hong Kong precedent is that a suspense
+   regime reconciles to accounting EIR only when the suspense ledger is a real object.
+4. **Recognised interest income** — zero.
+
+**ACPIR does not say where the unwind goes.** IFRS practice debates whether it is interest revenue or
+an impairment-line movement; India needs a third answer, because it is neither recognised as income
+nor released. This is an open question the bank must close by Board-approved policy, and it is a
+legitimate candidate for a collective industry clarification request.
+
+### Three consequences implementations routinely miss
+
+1. **The rate does not change.** Staging is not an EIR event. Only what happens to the *result*
+   changes.
+2. **The gross carrying amount does not change either.** ACPIR 6(12) keeps it gross; the allowance
+   sits separately, and Stage 1/2 provisions are presented separately rather than netted from gross
+   advances.
+3. **Cure is prospective.** Recognition resumes on the gross basis from that point, with **no
+   catch-up** for interest not recognised while in Stage 3. Booking one would recognise income that
+   was correctly never recognised.
+
+### The card-book problem
+
+Account-level suspension analysis is impractical for credit cards and KCC at volume — ACPIR
+46(2)(iii) simultaneously mandates behavioural analysis of default patterns, drawdown behaviour and
+the effectiveness of limit actions. ACPIR provides no portfolio carve-out for suspension, so one must
+come from policy; the HKMA's explicit portfolio treatment for portfolio-managed products is the
+available precedent.
+
+### Why this couples the two engines
+
+Stage 3 measurement depends on an allowance that moves every period and is an ECL engine output. The
+engine therefore records the **ECL input version it consumed** — without it a replay computes a
+different answer and determinism is lost for reasons that have nothing to do with this engine. That
+dependency, plus ACPIR 50 making the EIR the ECL discount rate, is why EIR must be sequenced
+*upstream* of the ECL build ([08 §0](08-roadmap.md#0-the-sequencing-argument)).
 
 ## 7. POCI: the credit-adjusted EIR
 
@@ -362,28 +461,59 @@ Two asymmetries worth encoding:
 
 ## 11. Common failure modes
 
-Collected from the domain because they translate directly into test cases. Each is an
-acceptance test in [02 — Functional Specification](02-functional-spec.md).
+Collected from the domain because they translate directly into test cases. Each is an acceptance test
+in [02 §4](02-functional-spec.md#4-acceptance-tests-derived-from-known-failure-modes).
+
+### Universal
 
 | # | Error | Effect |
 |---|---|---|
-| 1 | Straight-lining integral fees instead of EIR amortisation | Timing error every period; understates early income on a declining-balance asset |
-| 2 | Treating a B5.4.6 revision prospectively | Omits the catch-up; misstates P&L in the event period |
-| 3 | Treating a B5.4.5 reset with a catch-up | Fabricates a P&L adjustment that should not exist |
-| 4 | Contingent fees folded into the EIR projection at inception | Overstates yield across the book |
-| 5 | Stage 3 interest still accrued on the gross carrying amount | Overstates interest income; misclassifies the offset into impairment |
-| 6 | Reverting from Stage 3 with a catch-up | Recognises interest that was correctly never recognised |
-| 7 | POCI measured on contractual rather than expected flows | Grossly overstates yield (Case 6: 64.7% versus 29.1%) |
-| 8 | EIR frozen at origination on a floating-rate book | Progressive divergence from B5.4.5 |
-| 9 | Unamortised fee written off to suspense on prepayment | Unexplained P&L; unreconciled fee balance |
-| 10 | Double-counting a fee that is both an integral fee and a separately-billed service | Overstates income; fails the total-interest reconciliation |
-| 11 | Rate solved on rounded cash flows but rolled forward on unrounded (or vice versa) | Non-zero terminal balance; a residue that grows with tenor |
-| 12 | Binary floating-point for money | Irreproducible cents; failed reconciliations that cannot be diagnosed |
-| 13 | Expected life set to contractual on a fast-prepaying book | Under-amortises fees; large unexplained acceleration on closure |
-| 14 | Ignoring the fee on undrawn commitments that are probable of drawdown | Recognises commitment income too early |
+| 1 | Straight-lining integral fees instead of EIR amortisation | Timing error every period. On a 15-year zero-coupon, **year 1 overstated by 81%** — [Case 9](reference-cases/case-09-straight-line-vs-eir.md) |
+| 2 | Treating a re-estimation prospectively | Omits the catch-up; misstates P&L in the event period |
+| 3 | Treating a benchmark reset with a catch-up | Fabricates a P&L adjustment that should not exist |
+| 4 | Contingent fees folded into the projection at inception | Overstates yield across the book |
+| 5 | POCI measured on contractual rather than expected flows | Grossly overstates yield — 64.7% vs 29.1% in [Case 6](reference-cases/case-06-poci-credit-adjusted-eir.md) |
+| 6 | EIR frozen at origination on a floating-rate book | Progressive divergence from the reset mechanic |
+| 7 | Unamortised fee written off to suspense on prepayment | Unexplained P&L; unreconciled fee balance |
+| 8 | Double-counting a fee that is both integral and a separately-billed service | Overstates income; fails the total-interest reconciliation |
+| 9 | Rate solved on rounded flows but rolled forward on unrounded | Non-zero terminal balance; residue growing with tenor |
+| 10 | Binary floating-point for money | Irreproducible paise; failed reconciliations that cannot be diagnosed |
+| 11 | Expected life set to contractual on a fast-prepaying book | Under-amortises fees; large unexplained acceleration on closure |
+| 12 | Ignoring fees on undrawn commitments probable of drawdown | Recognises commitment income too early |
+| 13 | **Silent fallback to the contractual rate on non-convergence** | **Reproduces the pre-ACPIR position invisibly.** Plausible numbers, no trace. The most damaging failure available. |
+
+### India-specific — no IFRS 9 analogue
+
+| # | Error | Effect |
+|---|---|---|
+| 14 | Stage 3 interest recognised at all (on either basis) | Recognises income ACPIR suppresses |
+| 15 | Stage 3 unwind not computed because income is not recognised | ECL discounting silently wrong — ACPIR 50 makes the EIR the discount rate |
+| 16 | Cure booked with a catch-up | Recognises income that was correctly never recognised |
+| 17 | Penal charges reaching the interest ledger and thence the GCA | Inflates the carrying amount and the EIR; breaches the 2023 framework |
+| 18 | Pre-floor ECL overwritten by the prudential floor | Loses the accounting number ACPIR 90 requires alongside the floor |
+| 19 | Gold loans grouped under secured retail | Breaches ACPIR 92; corrupts the shared product taxonomy the floor engine also consumes |
+| 20 | EIR expected life and ECL horizon sharing one field | Conflates ACPIR 51 with ACPIR 46(1); cannot be fixed later without reworking history |
+| 21 | Tier 3 approximation with no equivalence test on file | The Cambodia failure mode — an undocumented shortcut |
+| 22 | Discontinued hedge with a frozen basis adjustment | Misstates interest in every period through to maturity, recurring indefinitely |
+| 23 | Swap or hedging cost inside an EIR cash flow stream | ACPIR 53 excludes financing costs; corrupts the rate |
+| 24 | Reset-versus-catch-up hard-coded | Re-engineering event when the IASB Exposure Draft lands; historical replay becomes wrong |
+
+Failure 15 is the one worth dwelling on, because it is *invited* by the Indian rule. A team told
+"India does not recognise Stage 3 income" reasonably concludes there is nothing to compute — and
+silently breaks ECL discounting. The unwind must be computed and suppressed, not skipped
+([§6](#6-impairment-stage-3-where-india-diverges)).
 
 ## 12. Further reading
 
+- **RBI ACPIR 2026** — the binding anchor. EIR at paragraphs 6(1), 6(4), 6(6), 6(12), 6(29), 19–24,
+  50–54. Read 51, 52 and 53 verbatim; they are short and they are the whole positive statement.
+- **Seventh Amendment Directions, 2026** — Stage 3 non-recognition protection; Schedule 13
+  compilation; the credit-quality and loss-allowance reconciliation tables.
+- **Investment Portfolio Directions** — governs the investment book by virtue of ACPIR 22.
+- **RBI penal charges framework, 2023** — basis for the §2 hard exclusion.
+- **[ACPIR 2026 application reference](reference/acpir-2026-eir-application-reference.md)** — the
+  silence map, 38-product matrix, 18-item divergence register, jurisdiction dossiers, and the live
+  IASB project. Start here for anything this primer treats briefly.
 - IFRS 9 *Financial Instruments*, §5.4 (amortised cost measurement), Appendix A
   (definitions), B5.4.1–B5.4.7 (application guidance on EIR, fees and revisions),
   B3.3.6 (the 10% test), §3.2 (derecognition).
