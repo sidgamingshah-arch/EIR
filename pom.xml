@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.crisil.eir</groupId>
+  <artifactId>eir-parent</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <name>EIR — Effective Interest Rate Engine</name>
+  <description>
+    Effective interest rate accounting engine anchored on RBI ACPIR 2026.
+    Phase 1: policy-agnostic computation core (eir-domain, eir-calc).
+  </description>
+
+  <modules>
+    <module>eir-domain</module>
+    <module>eir-calc</module>
+  </modules>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <junit.version>5.11.4</junit.version>
+    <jqwik.version>1.9.2</jqwik.version>
+    <assertj.version>3.27.3</assertj.version>
+    <surefire.version>3.5.2</surefire.version>
+    <checkstyle.plugin.version>3.6.0</checkstyle.plugin.version>
+    <!-- The plugin's bundled Checkstyle predates Java 21 record deconstruction
+         patterns and cannot parse them. Pinned forward explicitly. -->
+    <checkstyle.version>10.21.4</checkstyle.version>
+    <enforcer.version>3.5.0</enforcer.version>
+    <!-- Arbitrary-precision transcendental functions. Actual-date discounting
+         needs (1+r)^tau for fractional tau, which BigDecimal.pow cannot do.
+         A library rather than a hand-rolled exp/ln series: this is a
+         precision-critical engine and hand-rolled transcendentals are a classic
+         source of subtle error. Not a framework — ADR-0001 stands. -->
+    <bigmath.version>2.3.2</bigmath.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.junit</groupId>
+        <artifactId>junit-bom</artifactId>
+        <version>${junit.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>ch.obermuhlner</groupId>
+        <artifactId>big-math</artifactId>
+        <version>${bigmath.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>net.jqwik</groupId>
+        <artifactId>jqwik</artifactId>
+        <version>${jqwik.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.assertj</groupId>
+        <artifactId>assertj-core</artifactId>
+        <version>${assertj.version}</version>
+        <scope>test</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>${surefire.version}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+    <plugins>
+      <!-- ADR-0002: binary floating point is banned in the calculation path.
+           ADR-0001: eir-domain and eir-calc carry no framework dependencies.
+           Both are enforced at build time, not by review convention. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-checkstyle-plugin</artifactId>
+        <version>${checkstyle.plugin.version}</version>
+        <dependencies>
+          <dependency>
+            <groupId>com.puppycrawl.tools</groupId>
+            <artifactId>checkstyle</artifactId>
+            <version>${checkstyle.version}</version>
+          </dependency>
+        </dependencies>
+        <configuration>
+          <configLocation>${maven.multiModuleProjectDirectory}/build/checkstyle-precision.xml</configLocation>
+          <includeTestSourceDirectory>false</includeTestSourceDirectory>
+          <violationSeverity>error</violationSeverity>
+          <failOnViolation>true</failOnViolation>
+          <consoleOutput>true</consoleOutput>
+        </configuration>
+        <executions>
+          <execution>
+            <id>ban-binary-floating-point</id>
+            <phase>validate</phase>
+            <goals><goal>check</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <version>${enforcer.version}</version>
+        <executions>
+          <execution>
+            <id>ban-frameworks-in-calculation-path</id>
+            <phase>validate</phase>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <bannedDependencies>
+                  <searchTransitive>true</searchTransitive>
+                  <excludes>
+                    <exclude>org.springframework*:*</exclude>
+                    <exclude>org.springframework.boot:*</exclude>
+                    <exclude>jakarta.persistence:*</exclude>
+                    <exclude>com.fasterxml.jackson.core:*</exclude>
+                    <exclude>org.hibernate*:*</exclude>
+                  </excludes>
+                </bannedDependencies>
+              </rules>
+              <fail>true</fail>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
