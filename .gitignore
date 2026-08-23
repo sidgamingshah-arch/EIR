@@ -6,3 +6,6 @@ target/
 .DS_Store
 build/checkstyle-*.cache
 **/checkstyle-*.xml.cache
+
+# jqwik persists a failure database next to the module; it is a test artifact
+.jqwik-database
