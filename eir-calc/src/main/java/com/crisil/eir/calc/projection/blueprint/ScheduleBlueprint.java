@@ -220,12 +220,27 @@ public record ScheduleBlueprint(
                 "REVOLVER_BEHAVIOUR describes a drawn-and-repaid limit; disbursement profile "
                     + disbursement.label() + " is not one");
         }
-        if (calendar.frequency().requiresExplicitDates()
-            && calendar.admitsPeriodicIndexing()) {
-            conflicts.add(
-                "calendar " + calendar.frequency() + " has unequal periods yet reports itself as"
-                    + " admitting periodic indexing (ST-10)");
-        }
+        // A tenth condition stood here and could not fire. It read
+        //
+        //     calendar.frequency().requiresExplicitDates() && calendar.admitsPeriodicIndexing()
+        //
+        // and admitsPeriodicIndexing() begins by requiring !requiresExplicitDates(), so the
+        // conjunction was A && (... && !A && ...). No input made it true, and ST-11's calendar
+        // guard therefore offered no protection at all while reading as though it did.
+        //
+        // Removed rather than repaired, because the property it asserted — a calendar cannot
+        // both need explicit dates and admit ordinal discounting — is enforced by
+        // construction in admitsPeriodicIndexing itself, and a coherence rule restating a
+        // guarantee the type already makes is the tautology this file has now met three
+        // times under three different invariant ids.
+        //
+        // What it READ as aiming at is a calendar that misreports its own uniformity, and
+        // there is a live instance: admitsPeriodicIndexing does not consult endOfMonthRule,
+        // so ScheduleCalendar.monthly() — carrying LAST_BUSINESS_DAY_OF_MONTH — reports true
+        // while ScheduleDates does move month-end due dates. That is not fixable here. The
+        // rule would have to know the value date to tell whether the end-of-month rule bites
+        // on this schedule at all, and a blanket veto would throw on every mid-month loan,
+        // where it adjusts nothing. See ScheduleBlueprintTest's remaining @Disabled test.
         return conflicts;
     }
 

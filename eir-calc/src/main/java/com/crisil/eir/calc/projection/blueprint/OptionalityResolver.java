@@ -196,8 +196,32 @@ public final class OptionalityResolver {
             if (!candidate.available()) {
                 continue;
             }
-            ExpectedLifeDetermination.LifeAlternative costed =
-                cost(blueprint, contractual, initialCarryingAmount, solver, candidate);
+            ExpectedLifeDetermination.LifeAlternative costed;
+            try {
+                costed = cost(blueprint, contractual, initialCarryingAmount, solver, candidate);
+            } catch (OptionalityUnresolvedException unshapable) {
+                // The same asymmetry as the failed solve below, at the earlier stage. cost()
+                // reshapes the ladder before it solves, and the reshape has guards of its own
+                // — extend() refuses an amortising ladder, rolledDueDate() refuses explicit
+                // dates and a collapsed period. Those threw straight out of resolve() for ANY
+                // candidate, so an unchosen policy that merely could not be SHAPED aborted a
+                // determination that was otherwise perfectly computable.
+                //
+                // Measured on a five-year equal-principal loan either party may extend, with
+                // CONTRACTUAL_MATURITY recorded: the recorded policy needs no reshaping at
+                // all and the instrument got no determination under any policy, while the
+                // exception pleaded a substitution risk that was never in question — "the
+                // engine does not substitute another policy for the one recorded" — about a
+                // policy nobody was substituting.
+                //
+                // Unchosen and unshapable is the same disclosure as unchosen and unsolvable:
+                // the alternative is absent, and ST-7 reports that fewer than two policies
+                // were costed, which says honestly that a divergence could not be quantified.
+                if (candidate.policy() == chosen) {
+                    throw unshapable;
+                }
+                continue;
+            }
             if (costed == null) {
                 // The solve produced no rate. On the chosen policy that is fatal — 4.3
                 // names the silent fallback as the most damaging failure available to the

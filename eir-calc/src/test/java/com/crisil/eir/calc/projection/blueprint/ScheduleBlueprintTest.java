@@ -1346,24 +1346,21 @@ class ScheduleBlueprintTest {
         }
 
         @Test
-        @Disabled("DEFECT: the tenth condition in coherenceConflicts is unreachable — the two"
-            + " predicates it ANDs are mutually exclusive by construction, so this ST-11 rule"
-            + " can never fire. Not fixed here — see the comment.")
         @DisplayName("an unequal calendar that claims periodic indexing is an ST-11 conflict")
-        void calendarSelfConsistencyRuleCannotFire() {
-            // THE DEFECT, and it is dead code rather than a wrong number.
-            // ScheduleBlueprint.coherenceConflicts ends with
+        void anExplicitDateCalendarCannotAdmitOrdinalDiscounting() {
+            // This was @Disabled and asserted the tenth coherence condition firing. It could
+            // not: it read requiresExplicitDates() && admitsPeriodicIndexing(), and
+            // admitsPeriodicIndexing() begins by requiring !requiresExplicitDates(), so the
+            // conjunction was A && (... && !A && ...). The condition is now removed, and this
+            // test asserts what is actually true and worth keeping — that the property is
+            // enforced by construction in the type, so a coherence rule restating it would
+            // add nothing.
             //
-            //     calendar.frequency().requiresExplicitDates() && calendar.admitsPeriodicIndexing()
-            //
-            // and admitsPeriodicIndexing() begins by requiring !requiresExplicitDates(). The
-            // conjunction is therefore a contradiction and the conflict is unreachable: no
-            // input exists that makes it fire, which is why this test asserts through
-            // coherenceConflicts rather than pretending to construct a violating blueprint.
-            // Nine of the ten conditions in that method are enforceable; this is the tenth.
-            //
-            // The first two assertions below pass and are the proof of the contradiction. The
-            // third is what the rule promises and what fails.
+            // Worth noting what the rule was not: a seasonal calendar is a perfectly coherent
+            // dimension — crop-cycle loans exist — and rejecting one would be wrong. It read
+            // as a guard against a calendar that misreports its own uniformity, and the live
+            // instance of exactly that is the LAST_BUSINESS_DAY_OF_MONTH hole asserted in the
+            // test above, which this rule did not reach either.
             //
             // Worth noting what the rule is not: a seasonal calendar is a perfectly coherent
             // dimension — crop-cycle loans exist — and rejecting one would be wrong. The
@@ -1376,10 +1373,27 @@ class ScheduleBlueprintTest {
             assertThat(harvest.frequency().requiresExplicitDates()).isTrue();
             assertThat(harvest.admitsPeriodicIndexing()).isFalse();
 
+            // The type makes the contradiction unconstructable, so there is nothing for a
+            // coherence rule to catch: every explicit-date calendar reports false.
+            for (ScheduleCalendar.Frequency frequency : ScheduleCalendar.Frequency.values()) {
+                if (frequency.requiresExplicitDates()) {
+                    assertThat(new ScheduleCalendar(frequency,
+                        ScheduleCalendar.BusinessDayConvention.NONE, Set.of(),
+                        ScheduleCalendar.EndOfMonthRule.SAME_DAY_OF_MONTH,
+                        List.of(LocalDate.of(2026, 10, 15), LocalDate.of(2027, 4, 15)))
+                        .admitsPeriodicIndexing())
+                        .as("%s requires explicit dates, so it cannot admit ordinal discounting",
+                            frequency)
+                        .isFalse();
+                }
+            }
+
+            // And a seasonal calendar is coherent: it builds, and it raises no conflict.
             assertThat(ScheduleBlueprint.coherenceConflicts(new PrincipalProfile.LevelAnnuity(),
                 new InterestServicing.ServicedEachPeriod(), Moratorium.none(), singleDraw(),
                 fixed(), OptionSchedule.none(), contractual(), harvest))
-                .anyMatch(conflict -> conflict.contains("ST-10"));
+                .as("a crop-cycle loan is an ordinary instrument, not an incoherent blueprint")
+                .noneMatch(conflict -> conflict.contains("ST-10"));
         }
     }
 }

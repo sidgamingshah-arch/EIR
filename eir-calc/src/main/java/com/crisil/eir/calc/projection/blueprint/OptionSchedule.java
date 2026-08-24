@@ -42,10 +42,16 @@ public record OptionSchedule(List<EmbeddedOption> options, ExercisePolicy exerci
         Objects.requireNonNull(options, "options");
         Objects.requireNonNull(exercisePolicy, "exercisePolicy");
         options = List.copyOf(options);
-        if (options.isEmpty() && exercisePolicy != ExercisePolicy.CONTRACTUAL_MATURITY) {
+        // Asked of the policy rather than restated here. This read
+        // `exercisePolicy != CONTRACTUAL_MATURITY` inline, which is the same rule
+        // ExercisePolicy.requiresOptions() states — and the two disagreed, because the
+        // predicate had no callers at all and so nothing kept them in step. B5.4.4's
+        // NEXT_REPRICING amortises to a repricing date and needs no option, which the
+        // predicate now says and this guard now honours.
+        if (options.isEmpty() && exercisePolicy.requiresOptions()) {
             throw new IllegalArgumentException(
                 "an instrument with no options has nothing to exercise, so its policy is"
-                    + " CONTRACTUAL_MATURITY; got " + exercisePolicy);
+                    + " CONTRACTUAL_MATURITY or the NEXT_REPRICING election; got " + exercisePolicy);
         }
     }
 

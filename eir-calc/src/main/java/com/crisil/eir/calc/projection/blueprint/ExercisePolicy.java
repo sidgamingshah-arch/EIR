@@ -80,9 +80,28 @@ public enum ExercisePolicy {
      */
     ECONOMIC_RATIONALITY;
 
-    /** Whether the policy requires an option to be present to mean anything. */
+    /**
+     * Whether the policy requires an option to be present to mean anything.
+     *
+     * <p>False for {@link #CONTRACTUAL_MATURITY}, which ignores options by definition,
+     * and false for {@link #NEXT_REPRICING}, which used to be true and was wrong.
+     * B5.4.4 amortises to a <em>repricing date</em>, not to an exercise: the plan
+     * derivation in {@code OptionalityResolver.nextRepricing} reads the rate profile and
+     * the ladder and never touches the option schedule, and all four of its
+     * unavailability reasons are about the rate profile — no reset schedule, no reset
+     * after the value date, a reset before the first due date, a reset at or beyond the
+     * final rung. There is no path on which an embedded option changes the answer.
+     *
+     * <p>Requiring one had a cost. Reference case 8 elects the shortcut on the Case 1
+     * loan, a plain floating annuity with no options, and docs/09 § 3.2 makes it a
+     * per-product election; so electing it meant fabricating an option the contract does
+     * not grant, which then shows up in {@code isOptioned()} and drags ST-7 in over a
+     * divergence the instrument does not have. {@code ScheduleBlueprint} corroborates the
+     * intent by checking {@code NEXT_REPRICING} against the rate profile and saying
+     * nothing about options.
+     */
     public boolean requiresOptions() {
-        return this != CONTRACTUAL_MATURITY;
+        return this != CONTRACTUAL_MATURITY && this != NEXT_REPRICING;
     }
 
     /**

@@ -1612,19 +1612,6 @@ class OptionalityResolverTest {
         }
 
         @Test
-        @Disabled("PRODUCTION DEFECT. An *unchosen* policy that cannot be shaped aborts the whole"
-            + " determination, where the documented contract is that it is left out of the"
-            + " alternatives and ST-7 records the shortfall. OptionalityResolver.resolve tolerates a"
-            + " failed *solve* on an unchosen policy — it checks `candidate.policy() == chosen`"
-            + " before rethrowing — but nothing wraps the reshape that happens earlier, inside"
-            + " cost -> vector -> reshape. So OptionalityResolver.extend's amortising-ladder guard,"
-            + " and OptionalityResolver.rolledDueDate's explicit-dates guard, both propagate out of"
-            + " resolve() naming EARLIEST_CALL even when the recorded policy is CONTRACTUAL_MATURITY"
-            + " and is perfectly computable. An extendable amortising term loan can therefore obtain"
-            + " no expected-life determination at all, under any policy. The fix belongs in"
-            + " resolve's alternatives loop, which should treat an unchosen candidate's"
-            + " OptionalityUnresolvedException the same way it already treats an unchosen"
-            + " candidate's failed solve; it is not a test change and is not made here.")
         @DisplayName("an unchosen extension that cannot be shaped must not abort a computable determination")
         void anUnshapableUnchosenPolicyMustNotAbortTheDetermination() {
             // The instrument is ordinary: a five-year equal-principal term loan that either
@@ -1851,20 +1838,6 @@ class OptionalityResolverTest {
         }
 
         @Test
-        @Disabled("PRODUCTION DEFECT. The B5.4.4 next-repricing election is unrepresentable on the"
-            + " instrument it exists for. OptionSchedule's constructor refuses any policy other than"
-            + " CONTRACTUAL_MATURITY on an empty option list, and ExercisePolicy.requiresOptions()"
-            + " agrees by returning true for NEXT_REPRICING — but B5.4.4 needs a repricing date, not"
-            + " an embedded option. Reference case 8 elects the shortcut on the Case 1 loan, which is"
-            + " a plain floating annuity with no options at all, and docs 09 § 3.2 lists the election"
-            + " per product. ScheduleBlueprint.coherenceConflicts corroborates the intent: it checks"
-            + " NEXT_REPRICING against the *rate profile* and says nothing about options, a check"
-            + " that is unreachable while an option is mandatory. As it stands, electing the"
-            + " shortcut on a vanilla floating mortgage requires fabricating an embedded option that"
-            + " the contract does not grant, which then appears in isOptioned() and pulls ST-7 in"
-            + " over a divergence the instrument does not have. The fix is to exempt NEXT_REPRICING"
-            + " from the empty-schedule rule and from requiresOptions(); it is a production change"
-            + " and is not made here.")
         @DisplayName("the B5.4.4 election is available on a floating instrument with no embedded option")
         void theRepricingElectionDoesNotRequireAnEmbeddedOption() {
             // Reference case 8's instrument: floating, no options, the shortcut elected per
