@@ -154,13 +154,19 @@ class BulletAndDiscountProjectorTest {
         ContractTerms bond = fifteenYearZeroCoupon();
 
         assertThat(discount.faceValue(bond).amount()).isEqualByComparingTo(bd("1000000.00"));
-        assertThat(discount.issuePrice(bond).amount()).isEqualByComparingTo(bd("315241.70"));
-        assertThat(discount.discountToAccrete(bond).amount()).isEqualByComparingTo(bd("684758.30"));
-        // The price is cash actually paid, so it is rounded once to presentation scale.
-        // The sub-paise difference from the exact present value is a real feature of a
-        // traded instrument: the solver recovers the yield the trade struck rather than
-        // the one the calculator wanted.
-        assertThat(discount.issuePrice(bond).amount().scale()).isEqualTo(2);
+        assertThat(discount.issuePrice(bond).atPresentationScale().amount())
+            .isEqualByComparingTo(bd("315241.70"));
+        assertThat(discount.discountToAccrete(bond).atPresentationScale().amount())
+            .isEqualByComparingTo(bd("684758.30"));
+        // The price is DERIVED from a quoted yield, so it is an intermediate and is not
+        // rounded to currency scale (1.2). Rounding it would reprice the bond to
+        // 8.0000001134% and leave it redeeming at 999,999.98 against face — see
+        // DiscountInstrumentProjector.issuePrice. A price that genuinely is cash struck
+        // in a trade is an input the caller supplies, not a figure this method computes.
+        assertThat(discount.issuePrice(bond).amount())
+            .as("the exact present value, unrounded")
+            .isEqualByComparingTo(bd("315241.7049658902158585893826"));
+        assertThat(discount.issuePrice(bond).amount().scale()).isGreaterThan(2);
     }
 
     @Test
@@ -219,7 +225,6 @@ class BulletAndDiscountProjectorTest {
             .isEqualTo(new TimeConvention.ActualDate(DayCountConvention.ACT_365F));
         assertThat(tau).isEqualByComparingTo(bd("91").divide(bd("365"), Precision.WORKING));
         assertThat(discount.issuePrice(bill).amount()).isEqualByComparingTo(
-            Money.inr("1000000").times(Precision.discountFactor(bd("0.0675"), tau))
-                .atPresentationScale().amount());
+            Money.inr("1000000").times(Precision.discountFactor(bd("0.0675"), tau)).amount());
     }
 }

@@ -9,3 +9,4 @@ build/checkstyle-*.cache
 
 # jqwik persists a failure database next to the module; it is a test artifact
 .jqwik-database
+.jqwik-database

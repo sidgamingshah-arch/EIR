@@ -10,7 +10,7 @@ import java.util.Objects;
 /**
  * The contractual leg's balance after a given period.
  *
- * <p>Two consumers need it and both need the same answer: the B5.4.4 shortcut,
+ * <p>Two consumers need it and both need the same roll: the B5.4.4 shortcut,
  * whose synthetic redemption is the <em>contractual</em> balance at the next reset
  * date, and behavioural truncation, whose expected prepayment is the contractual
  * balance at the end of expected life. Case 8's 529,815.61 at month 12 and
@@ -28,6 +28,25 @@ import java.util.Objects;
  * is an accounting construct, not cash, so it does not reduce a contractual
  * balance; without this a vector that already carries one would roll to zero and
  * silently answer the wrong question.
+ *
+ * <p><b>The two consumers present the result differently, and deliberately.</b> The
+ * B5.4.4 notional redemption takes {@link #after} at working precision; behavioural
+ * truncation takes {@link #presentedAfter}. The line between them is whether the
+ * flow models cash. A notional redemption models an instrument that does <em>not</em>
+ * actually mature at the reset — nobody is ever billed it and no settlement occurs —
+ * so no cash event attaches currency scale to it, and rounding it is rounding an
+ * intermediate. An expected prepayment models the borrower actually paying the
+ * balance off, which is a settlement in cash at currency scale; the same reasoning
+ * makes reference case 6's expected receipt of 37,658.78 the rounded figure rather
+ * than the unrounded 37,658.776.
+ *
+ * <p>The distinction is worth stating because it is invisible at presentation scale —
+ * both read 529,815.61 at month 12 on the Case 1 loan, which is the cross-check
+ * against Case 1's INV-4 figure — and because collapsing it in either direction
+ * costs something real. Presenting the notional redemption moves Case 8's published
+ * monthly EIR by five units in its eighth decimal place; unpresenting the expected
+ * prepayment would change the solve leg of every behaviourally truncated contract
+ * with no reference case asking for it.
  */
 public final class ContractualBalance {
 
@@ -75,7 +94,12 @@ public final class ContractualBalance {
         return balance;
     }
 
-    /** {@link #after} at presentation scale — what a synthetic flow is billed at. */
+    /**
+     * {@link #after} at presentation scale — for a flow that models a cash
+     * settlement, such as behavioural truncation's expected prepayment. A flow that
+     * models no cash event, such as the B5.4.4 notional redemption, takes
+     * {@link #after} instead; see the class comment for where that line falls.
+     */
     public static Money presentedAfter(
         Money openingPrincipal,
         BigDecimal periodicRate,

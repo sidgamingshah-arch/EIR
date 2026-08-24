@@ -67,10 +67,17 @@ class RepricingShortcutProjectorTest {
         assertThat(redemption.date()).isEqualTo(floatingCase1().dueDate(RESET_PERIOD));
         // The figure that ties three ways: Case 1's INV-4 at month 12, Case 2's
         // prepayment acceleration, and the fee this shortcut eliminates.
-        assertThat(redemption.amount().amount()).isEqualByComparingTo(bd("529815.61"));
+        assertThat(redemption.amount().atPresentationScale().amount())
+            .isEqualByComparingTo(bd("529815.61"));
+        // Carried at working precision, not presented. The instrument does not actually
+        // mature at the reset and nobody is ever billed this amount, so there is no cash
+        // event at which currency scale attaches. Presenting it before the solve moves
+        // Case 8's published monthly EIR from 1.05614730% to 1.05614735%.
+        assertThat(redemption.amount().amount())
+            .isEqualByComparingTo(bd("529815.6050153324520158584563"));
         assertThat(redemption.amount().amount().scale())
-            .as("a synthetic flow stands in for an amount the borrower would be billed")
-            .isEqualTo(2);
+            .as("a synthetic flow is an accounting construct, so it is not rounded to paise")
+            .isGreaterThan(2);
     }
 
     @Test
@@ -80,7 +87,7 @@ class RepricingShortcutProjectorTest {
 
         Money atReset = shortcut.contractualBalanceAtReset(floatingCase1(), full);
 
-        assertThat(atReset.amount()).isEqualByComparingTo(bd("529815.61"));
+        assertThat(atReset.atPresentationScale().amount()).isEqualByComparingTo(bd("529815.61"));
         // Same number from the behavioural-truncation path, which is the cross-check the
         // shared routine exists to make possible: 529,815.61 is the contractual balance
         // at month 12 whether it is reached as a notional redemption or as an expected

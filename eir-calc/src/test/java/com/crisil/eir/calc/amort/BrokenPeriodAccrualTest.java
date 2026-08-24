@@ -10,6 +10,7 @@ import com.crisil.eir.domain.DayCountConvention;
 import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Precision;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -122,7 +123,7 @@ class BrokenPeriodAccrualTest {
         // feeding the nominal rate — or a periodic rate scaled up — accretes at the wrong
         // rate for the whole broken period.
         assertThat(CONTRACTUAL.nominalAnnual()).isEqualByComparingTo(bd("0.12"));
-        assertThat(CONTRACTUAL.effectiveAnnual().setScale(6, java.math.RoundingMode.HALF_UP))
+        assertThat(CONTRACTUAL.effectiveAnnual().setScale(6, RoundingMode.HALF_UP))
             .isEqualByComparingTo(bd("0.126825"));
 
         Money onEffective = BrokenPeriodAccrual.interest(

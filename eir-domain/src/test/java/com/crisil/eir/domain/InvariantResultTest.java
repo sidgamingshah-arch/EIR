@@ -81,27 +81,45 @@ class InvariantResultTest {
         }
 
         @Test
-        @DisplayName("comparing at presentation scale means the rounding boundary decides")
-        void theRoundingBoundaryDecides() {
-            // A thousandth of a rupee either side of the half-way point: the raw
-            // difference is one thousandth in both cases, but only the pair that
-            // straddles the boundary breaches. This is the honest cost of comparing
-            // published figures, and it is stated rather than hidden.
+        @DisplayName("the difference is reduced once, so a rounding boundary between the operands is not a breach")
+        void theDifferenceIsReducedOnce() {
+            // A thousandth of a rupee apart in both pairs, one pair straddling the
+            // half-way point. Neither breaches: the invariant compares the reduced
+            // DIFFERENCE, not two reduced operands, which is section 1.3's round-once
+            // rule and the rule the reference cases publish (case 1 period 23 states
+            // 19.50 from the working difference 19.4966, not the 19.51 the two
+            // published balances differenced would give).
+            //
+            // Rounding both operands first would report the second pair as a one-paise
+            // breach on a true difference of one thousandth of a rupee — and that error
+            // has no floor, so a difference of 1e-20 straddling the boundary would
+            // breach too. It bit a real 30-year exposure whose legs differed by 0.0031.
             assertThat(InvariantResult.ofMoney(InvariantId.INV_1, "same side of the boundary",
                 Money.inr("1000.003"), Money.inr("1000.004")).satisfied()).isTrue();
             assertThat(InvariantResult.ofMoney(InvariantId.INV_1, "across the boundary",
-                Money.inr("1000.004"), Money.inr("1000.005")).satisfied()).isFalse();
+                Money.inr("1000.004"), Money.inr("1000.005")).satisfied()).isTrue();
+            // Half a paise is where a real difference starts, and it is reported.
+            assertThat(InvariantResult.ofMoney(InvariantId.INV_1, "half a paise apart",
+                Money.inr("1000.000"), Money.inr("1000.005")).satisfied()).isFalse();
+            assertThat(InvariantResult.ofMoney(InvariantId.INV_1, "half a paise apart",
+                Money.inr("1000.000"), Money.inr("1000.005")).deviation())
+                .isEqualByComparingTo("0.01");
         }
 
         @Test
         @DisplayName("presentation scale is the currency's, not two decimals by assumption")
         void theScaleFollowsTheCurrency() {
-            // JPY has no minor units, so a difference of 0.4 is invisible and passes.
+            // JPY has no minor units, so a difference below half a yen is invisible.
             assertThat(InvariantResult.ofMoney(InvariantId.SL_1, "sub-ledger ties to GL",
                 Money.of("100.4", JPY), Money.of("100.0", JPY)).satisfied()).isTrue();
+            // 0.2 of a yen, reduced once, is still zero yen — the operands happen to
+            // straddle 100.5 but the difference between them does not reach half a unit.
             assertThat(InvariantResult.ofMoney(InvariantId.SL_1, "sub-ledger ties to GL",
-                Money.of("100.4", JPY), Money.of("100.6", JPY)).satisfied()).isFalse();
-            // KWD has three, so the same 0.4 fils difference is visible and breaches.
+                Money.of("100.4", JPY), Money.of("100.6", JPY)).satisfied()).isTrue();
+            // Half a yen apart is a real difference at JPY scale and is reported.
+            assertThat(InvariantResult.ofMoney(InvariantId.SL_1, "sub-ledger ties to GL",
+                Money.of("100.0", JPY), Money.of("100.5", JPY)).satisfied()).isFalse();
+            // KWD has three minor digits, so the same 0.4 is enormous there and breaches.
             assertThat(InvariantResult.ofMoney(InvariantId.SL_1, "sub-ledger ties to GL",
                 Money.of("100.4", KWD), Money.of("100.0", KWD)).satisfied()).isFalse();
         }

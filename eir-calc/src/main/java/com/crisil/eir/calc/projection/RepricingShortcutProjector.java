@@ -133,7 +133,7 @@ public final class RepricingShortcutProjector implements CashflowProjector {
 
     /**
      * The synthetic redemption amount: the contractual balance at the reset —
-     * 529,815.61 on the Case 8 loan.
+     * 529,815.605015332452 on the Case 8 loan, presented as 529,815.61.
      *
      * <p>Contractual, not the EIR-leg balance. The synthetic flow stands in for the
      * amount the borrower would owe if the instrument matured at the reset, and the
@@ -141,9 +141,22 @@ public final class RepricingShortcutProjector implements CashflowProjector {
      * put the unamortised fee inside the flow the fee is being amortised against.
      * This is also the figure that ties three ways: Case 1's INV-4 at month 12,
      * Case 2's prepayment acceleration, and the fee this shortcut eliminates.
+     *
+     * <p><b>At working precision, not presented.</b> A notional redemption is an
+     * accounting construct that is never billed to anybody, so there is no cash
+     * event at which currency scale attaches, and rounding it to paise here would
+     * round an intermediate — which the calculation specification forbids (1.2, and
+     * 1.3's "exactly once, where a figure is persisted as a reportable amount").
+     * The rounding is not free: presenting the balance before solving moves the
+     * Case 8 monthly EIR from the published 1.05614730% to 1.05614735% and lifts
+     * five of the twelve published closing balances by a paisa. Presenting it costs
+     * five paise of accuracy in the rate's eighth decimal place to buy a flow figure
+     * that nobody ever receives. {@link ContractualBalance} states the same
+     * discipline for the roll itself — working precision throughout, presented once
+     * where the schedule is rendered.
      */
     public Money contractualBalanceAtReset(ContractTerms terms, FlowVector contractual) {
-        return ContractualBalance.presentedAfter(
+        return ContractualBalance.after(
             terms.principal(), terms.periodicRate(), contractual, periodsToNextRepricing);
     }
 }

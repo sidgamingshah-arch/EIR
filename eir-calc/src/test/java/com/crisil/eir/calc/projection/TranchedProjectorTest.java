@@ -14,6 +14,7 @@ import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Precision;
 import com.crisil.eir.domain.RateType;
 import com.crisil.eir.domain.TimeConvention;
+import java.math.RoundingMode;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -109,10 +110,22 @@ class TranchedProjectorTest {
         TranchedProjector projector = new TranchedProjector(twoDraws(), 3);
         ProjectionResult result = projector.project(FACILITY, List.of());
 
+        assertThat(projector.instalment(FACILITY).amount().setScale(6, RoundingMode.HALF_UP))
+            .isEqualByComparingTo(bd("53371.032470"));
         assertThat(projector.billedInstalment(FACILITY).amount()).isEqualByComparingTo(bd("53371.03"));
+        // What is left is the rounding residue of the billed instalment and nothing else:
+        // 0.057 on a 1,000,000 facility, the same order as the 0.06 the Case 1 annuity
+        // leaves. An instalment that had ignored the interim draw would strand 400,000 of
+        // it at maturity instead.
         assertThat(ContractualBalance.after(projector.firstDraw(), FACILITY.periodicRate(),
-            result.contractual(), 24).atPresentationScale().amount())
-            .as("the derived instalment leaves only the rounding residue behind")
+            result.contractual(), 24).amount().setScale(6, RoundingMode.HALF_UP))
+            .isEqualByComparingTo(bd("0.057390"));
+
+        // Under a plug policy the same leg closes at the scale it is published in.
+        TranchedProjector plugged = new TranchedProjector(twoDraws(), 3,
+            ResiduePolicy.FINAL_PERIOD_PLUG, 0);
+        assertThat(ContractualBalance.after(plugged.firstDraw(), FACILITY.periodicRate(),
+            plugged.project(FACILITY, List.of()).contractual(), 24).atPresentationScale().amount())
             .isEqualByComparingTo(bd("0.00"));
     }
 

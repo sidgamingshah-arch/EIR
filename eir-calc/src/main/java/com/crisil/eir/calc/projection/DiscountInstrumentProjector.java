@@ -57,19 +57,42 @@ public final class DiscountInstrumentProjector implements CashflowProjector {
 
     /**
      * The price: face discounted at the contractual yield over the instrument's
-     * own tenor — 315,241.70 on the Case 9 bond.
+     * own tenor — 315,241.704965890215858589382597 on the Case 9 bond, presented as
+     * 315,241.70.
      *
-     * <p>Rounded to presentation scale, because a price is cash actually paid. The
-     * sub-paise difference between the rounded price and the exact present value is
-     * a real feature of a traded instrument, not a defect: the solver will recover
-     * the yield the trade actually struck rather than the one the calculator wanted.
+     * <p><b>At working precision, not presented.</b> Here the price is
+     * <em>derived</em> from a quoted yield, which makes it an intermediate, and the
+     * calculation specification never rounds an intermediate to currency scale
+     * (1.2; 1.3 rounds "exactly once, where a figure is persisted as a reportable
+     * amount"). The tempting argument for rounding — that a price is cash actually
+     * paid — describes a different instrument: where a price genuinely is cash
+     * struck in a trade it is an <em>input</em> the caller supplies, not something
+     * this method computes from a yield.
+     *
+     * <p>Rounding a derived price does not merely lose sub-paise. It silently
+     * reprices the instrument: on the Case 9 bond the rounded 315,241.70 yields
+     * 8.0000001134% rather than the 8.00% the instrument was quoted at, shifts
+     * eight of the fifteen published opening carrying amounts and year 15's
+     * accretion by a paisa each, and — decisively — leaves the instrument unable to
+     * redeem at par, closing at 999,999.98 against face of 1,000,000.00 and so
+     * breaching TR-1 by two paise. A price that cannot recover the face value it
+     * was discounted from is not a better model of a traded instrument; it is an
+     * arithmetic artefact. The reportable figure is one {@code atPresentationScale}
+     * call away, and the shared assembly makes it where the carrying amount is
+     * persisted, so {@code ProjectionResult.initialCarryingAmount()} still reads
+     * 315,241.70.
+     *
+     * <p>The same rounding is what makes a deep-discount instrument unsolvable at
+     * the extreme: above roughly 16% over thirty years the price falls below 1% of
+     * face, and a presentation-scale price rounds towards zero into a vector with
+     * no sign change.
      */
     public Money issuePrice(ContractTerms terms) {
         CashFlow maturity = redemption(terms);
         TimeConvention convention = pricingConvention(terms, maturity);
         BigDecimal rate = ProjectionSupport.rateUnder(convention, terms.contractualRate());
         BigDecimal tau = convention.tau(terms.disbursementDate(), maturity);
-        return faceValue(terms).times(Precision.discountFactor(rate, tau)).atPresentationScale();
+        return faceValue(terms).times(Precision.discountFactor(rate, tau));
     }
 
     /** Face less price — the whole of the return, all of it accretion. */

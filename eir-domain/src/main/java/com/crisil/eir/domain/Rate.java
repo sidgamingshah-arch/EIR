@@ -34,15 +34,30 @@ import java.util.Objects;
  */
 public record Rate(BigDecimal periodic, int periodsPerYear) {
 
+    /**
+     * Rounds to storage scale and then validates the <em>stored</em> value.
+     *
+     * <p>The order matters and it is the only order that makes the type's two
+     * promises true of the same number. A {@code Rate} always holds the stored
+     * value, and a {@code Rate} always exceeds -100%; validating the argument and
+     * then rounding it would let any input in {@code (-1, -1 + 5e-13]} pass the
+     * guard and land on the excluded boundary. {@code Rate.monthly(-0.9999999999996)}
+     * would be accepted and store {@code -1.000000000000}, whereupon
+     * {@code 1 + periodic} is zero, {@link #effectiveAnnual()} is -1, and the first
+     * {@link Precision#discountFactor} raises "1 + base must be positive" from deep
+     * inside the numeric layer — a rate that should have been refused at
+     * construction failing instead as an arithmetic error several frames away, with
+     * nothing left to say which contract produced it.
+     */
     public Rate {
         Objects.requireNonNull(periodic, "periodic");
         if (periodsPerYear < 1) {
             throw new IllegalArgumentException("periodsPerYear must be >= 1, got " + periodsPerYear);
         }
+        periodic = Precision.storedRate(periodic);
         if (periodic.compareTo(BigDecimal.ONE.negate()) <= 0) {
             throw new IllegalArgumentException("rate must exceed -100%, got " + periodic.toPlainString());
         }
-        periodic = Precision.storedRate(periodic);
     }
 
     /** A per-period rate compounding {@code periodsPerYear} times a year. */

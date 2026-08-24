@@ -208,19 +208,25 @@ class RateTest {
         }
 
         @Test
-        @DisplayName("validation precedes rounding, so -0.9999999999996 is stored as exactly -100%")
-        void validationPrecedesRounding() {
-            // Documents current behaviour, and the reason it is reported as a
-            // defect rather than asserted as correct: the -100% guard is applied to
-            // the constructor argument, but the value actually STORED is that
-            // argument rounded to 12dp. An input inside the guard by 4e-13 rounds
-            // onto the excluded boundary, and the resulting Rate has
-            // 1 + periodic == 0 — a rate whose discount factor divides by zero.
-            // If the guard moves after the rounding, this test should be changed to
-            // expect a throw.
-            Rate degenerate = Rate.monthly(new BigDecimal("-0.9999999999996"));
-            assertThat(degenerate.periodic()).isEqualByComparingTo("-1");
-            assertThat(BigDecimal.ONE.add(degenerate.periodic())).isEqualByComparingTo("0");
+        @DisplayName("the guard is applied to the STORED value, so -0.9999999999996 is refused")
+        void theGuardIsAppliedToTheStoredValue() {
+            // Rounding happens first and the guard tests the value the Rate will
+            // actually hold. Otherwise an input inside the guard by 4e-13 rounds onto
+            // the excluded boundary and the type's two promises — always the stored
+            // value, always above -100% — stop being true of the same number. Such a
+            // Rate has 1 + periodic == 0, so it fails later inside
+            // Precision.discountFactor instead of here, several frames from the
+            // contract that produced it.
+            assertThatIllegalArgumentException()
+                .isThrownBy(() -> Rate.monthly(new BigDecimal("-0.9999999999996")))
+                .withMessageContaining("must exceed -100%");
+            // The whole half-open interval that rounds onto -1 is refused, and the
+            // first value that rounds clear of it is accepted.
+            assertThatIllegalArgumentException()
+                .isThrownBy(() -> Rate.monthly(new BigDecimal("-0.9999999999995")));
+            Rate accepted = Rate.monthly(new BigDecimal("-0.9999999999994"));
+            assertThat(accepted.periodic()).isEqualByComparingTo("-0.999999999999");
+            assertThat(BigDecimal.ONE.add(accepted.periodic())).isPositive();
         }
 
         @ParameterizedTest

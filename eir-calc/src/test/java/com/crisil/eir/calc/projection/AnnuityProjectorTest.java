@@ -116,7 +116,7 @@ class AnnuityProjectorTest {
     }
 
     @Test
-    @DisplayName("a shorter expected life truncates the expected leg and carries the contractual balance as a prepayment")
+    @DisplayName("a shorter expected life truncates the leg and carries the contractual balance over")
     void behaviouralLifeTruncatesTheExpectedLeg() {
         ContractTerms shorterLife = case1().withLives(12, 24,
             "ACPIR 51 behavioural life from the product CPR curve; ACPIR 46(1) horizon is contractual");

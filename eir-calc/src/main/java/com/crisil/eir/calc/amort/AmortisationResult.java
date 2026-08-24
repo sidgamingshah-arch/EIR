@@ -68,8 +68,29 @@ public record AmortisationResult(
         }
     }
 
+    /**
+     * Checks a declared total against the rows it claims to summarise.
+     *
+     * <p>Compared at presentation scale, while the row-to-row balance chain above is
+     * compared at working precision through {@code Money.equals}. The asymmetry is
+     * deliberate: the chain is a ledger identity where one row's opening <em>is</em>
+     * the previous row's closing and any difference at all is a broken chain, whereas
+     * a declared total is a reported figure and the claim is that it reports these
+     * rows. A caller may therefore declare a total up to half a minor unit from the
+     * row sum and be accepted; that is not the residue tolerance section 5.7 forbids,
+     * because no residue is being absorbed — the rows themselves are unchanged and
+     * remain the authority.
+     *
+     * <p>The difference is reduced <em>once</em>, not two rounded figures compared,
+     * for the reason {@code InvariantResult.ofMoney} and
+     * {@code TwoLegRow.presentedUnamortisedFee} give: rounding both sides first
+     * rounds twice, and the error that admits has no floor. A declared total a
+     * thousandth of a rupee from the row sum would be rejected whenever the pair
+     * happened to straddle a rounding boundary, which is a false alarm on a figure
+     * that is right.
+     */
     private static void requireTie(String name, Money fromRows, Money declared) {
-        if (!fromRows.atPresentationScale().equals(declared.atPresentationScale())) {
+        if (!declared.minus(fromRows).atPresentationScale().isZero()) {
             throw new IllegalArgumentException(
                 name + " does not tie to the rows: rows give " + fromRows.atPresentationScale()
                     + ", result declares " + declared.atPresentationScale());

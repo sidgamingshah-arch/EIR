@@ -22,6 +22,7 @@ import com.crisil.eir.domain.InvariantId;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Rate;
+import java.math.RoundingMode;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -225,7 +226,7 @@ class TwoLegReconciliationTest {
 
         assertThat(mirroredEir.effectiveAnnual()).isLessThan(CONTRACTUAL.effectiveAnnual());
         // 12.123448% p.a. against a 12.682503% coupon.
-        assertThat(mirroredEir.effectiveAnnual().setScale(6, java.math.RoundingMode.HALF_UP))
+        assertThat(mirroredEir.effectiveAnnual().setScale(6, RoundingMode.HALF_UP))
             .isEqualByComparingTo(bd("0.121234"));
 
         // INV-1 still holds, with the fee entering as a deduction: 129,763.28 - 5,000.00.

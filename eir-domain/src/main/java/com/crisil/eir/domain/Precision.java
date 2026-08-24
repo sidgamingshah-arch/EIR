@@ -67,7 +67,18 @@ public final class Precision {
         if (exponent < 0) {
             throw new IllegalArgumentException("exponent must be non-negative, got " + exponent);
         }
-        return BigDecimal.ONE.add(base).pow(exponent, WORKING);
+        // Guarded identically to the fractional overload. The two are documented as one
+        // function with a cheaper exact path for integer exponents, and that is only
+        // true if they accept the same domain: without this check onePlusPow(-1, 12)
+        // returns 0 and onePlusPow(-2, 3) returns -1, a negative compound factor, where
+        // the fractional overload refuses the same base. The periodic-index convention
+        // always takes this path, so this was the one place the equivalence broke.
+        BigDecimal onePlus = BigDecimal.ONE.add(base);
+        if (onePlus.signum() <= 0) {
+            throw new IllegalArgumentException(
+                "1 + base must be positive, got " + onePlus.toPlainString());
+        }
+        return onePlus.pow(exponent, WORKING);
     }
 
     /**

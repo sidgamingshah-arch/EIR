@@ -19,6 +19,7 @@ import com.crisil.eir.domain.Rate;
 import com.crisil.eir.domain.RateType;
 import com.crisil.eir.domain.TimeConvention;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
@@ -158,15 +159,14 @@ class ConventionSelectorTest {
     }
 
     @Test
-    @DisplayName("the two conventions agree on a vector that licenses both")
+    @DisplayName("the two conventions agree exactly on a vector that licenses both")
     void thePeriodicIndexIsExactlyEquivalentWhereItIsLicensed() {
-        // The claim in the specification is not "close enough" but "exactly equivalent",
-        // and this is what that means: discounting the licensed vector at 1% a month
-        // under period ordinals, and at the same rate's annual effective form under
-        // 30/360 year fractions, produces the same present value to the last working
-        // digit. That is why taking the cheaper convention is free rather than
-        // approximate — and why taking it unlicensed is a wrong rate rather than a slow
-        // one.
+        // The specification's claim is not "close enough" but "exactly equivalent", and
+        // this is what that means: discounting the licensed vector at 1% a month under
+        // period ordinals, and at the same rate's annual effective form under 30/360 year
+        // fractions, gives the same present value to the last working digit. That is why
+        // taking the cheaper convention is free rather than approximate — and why taking
+        // it unlicensed is a wrong rate rather than a slow one.
         FlowVector vector = projector.project(case1(), CaseFixtures.case1Fees()).contractual();
         Rate monthly = Rate.monthly(bd("0.01"));
         TimeConvention indexed = new TimeConvention.PeriodicIndex(12);
@@ -174,9 +174,34 @@ class ConventionSelectorTest {
 
         BigDecimal underIndex = Discounting.presentValue(monthly.periodic(), vector, indexed);
         BigDecimal underDates = Discounting.presentValue(
-            ConventionSelector.rateUnder(dated, monthly).periodic(), vector, dated);
+            ConventionSelector.rateValueUnder(dated, monthly), vector, dated);
 
         assertThat(underIndex).isEqualByComparingTo(underDates);
+    }
+
+    @Test
+    @DisplayName("the unrounded conversion is for arithmetic and the rounded one is for the ledger")
+    void thereAreTwoConversionsAndTheDifferenceIsStoragePrecision() {
+        // rateUnder rounds to twelve decimal places because a rate a ledger rolls forward
+        // with must be the rate that was published (1.4). rateValueUnder does not, because
+        // an intermediate used to derive a cash flow inside one projection is not a
+        // published rate, and rounding it would import a twelfth-decimal error into a
+        // figure the fixtures assert to more places than that. The gap below is exactly
+        // that trade-off, priced: three hundredths of a millionth of a rupee on a
+        // 1,000,000 loan.
+        FlowVector vector = projector.project(case1(), CaseFixtures.case1Fees()).contractual();
+        TimeConvention dated = new TimeConvention.ActualDate(DayCountConvention.THIRTY_360_BOND);
+        Rate monthly = Rate.monthly(bd("0.01"));
+
+        BigDecimal unrounded = ConventionSelector.rateValueUnder(dated, monthly);
+        BigDecimal stored = ConventionSelector.rateUnder(dated, monthly).periodic();
+
+        assertThat(stored.scale()).isEqualTo(Precision.RATE_SCALE);
+        assertThat(unrounded.scale()).isGreaterThan(Precision.RATE_SCALE);
+        assertThat(stored).isEqualByComparingTo(unrounded.setScale(Precision.RATE_SCALE, RoundingMode.HALF_UP));
+        assertThat(Discounting.presentValue(unrounded, vector, dated)
+            .subtract(Discounting.presentValue(stored, vector, dated)).abs())
+            .isLessThan(bd("0.000001"));
     }
 
     @Test

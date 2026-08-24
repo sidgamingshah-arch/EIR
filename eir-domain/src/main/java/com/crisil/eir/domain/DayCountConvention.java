@@ -105,6 +105,25 @@ public enum DayCountConvention implements DayCount {
      * This implementation takes the former, and the choice is stated here rather
      * than left to the reader precisely because the specification requires
      * conventions to be documented rather than inferred.
+     *
+     * <p>A second reading choice sits inside the first, and it is easy to get
+     * wrong: "inside the interval" is <b>half-open on the left</b>, matching the
+     * numerator, which counts start-exclusive and end-inclusive. A period
+     * <em>starting</em> on 29 February therefore divides by 365, while one
+     * <em>ending</em> on 29 February divides by 366. Consistency with the numerator
+     * is what makes it right — a leap day the numerator does not count must not
+     * change the denominator.
+     *
+     * <p><b>This is a per-coupon-period convention and is not additive.</b> Over a
+     * multi-year interval it divides once by 366 if a leap day falls anywhere
+     * inside: 2019-01-01 to 2021-01-01 is 731/366 = 1.997, against exactly 2 under
+     * ACT/ACT. It is also not monotonic in the end date beyond a year — from
+     * 2023-01-24, 400 days gives 1.09589041... and 401 days gives 1.09562841...,
+     * because admitting 29 February adds one to the numerator and one to the
+     * denominator, and {@code (d+1)/366 < d/365} whenever {@code d > 365}. Inside a
+     * coupon period, which is where the convention belongs, it is monotone.
+     * Selecting it for multi-year discount factors would build a discount curve
+     * that is not monotone in time.
      */
     ACT_365L("ACT/365L") {
         @Override
