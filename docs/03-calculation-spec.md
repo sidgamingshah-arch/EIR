@@ -891,10 +891,10 @@ period close.
 | INV-4 | Unamortised fee balance = contractual GCA − EIR GCA | Every period |
 | CU-1 | EIR unchanged across a catch-up restatement | Event |
 | CU-2 | Catch-up = PV(revised, original EIR) − GCA_before | Event |
-| **ST-2** | **Stage 3: net-basis interest + ECL unwind = gross-basis interest** | Every period |
+| **ST-2** | **Stage 3: net-basis interest + ECL unwind = gross-basis interest**, plus the decomposition's accrual length and interest against the ledger row it decomposes | Every period |
 | S3-1 | Stage 3: GCA roll-forward, shadow unwind, suspense ledger and recognised income all reconcile | Every period |
 | S3-2 | Recognised interest income on a Stage 3 contract = 0 | Every period |
-| **PC-1** | **No `EXCLUDED_BY_DIRECTION` posting entered any EIR stream or the GCA** | Every period |
+| **PC-1** | **No `EXCLUDED_BY_DIRECTION` posting entered any EIR stream or the GCA** — one result per period, the conjunction over every screening route that applies | Every period |
 | PF-1 | Pre-floor ECL retained and reported alongside post-floor | Period close |
 | POCI-1 | Credit-adjusted EIR unchanged across a cure | Event |
 | HB-1 | No discontinued hedge relationship without an active basis-adjustment amortisation schedule | Every period |
@@ -903,6 +903,38 @@ period close.
 | SL-2 | Σ journal debits = Σ journal credits, per run and per contract | Every posting |
 | DT-1 | Re-run of a closed period reproduces published figures bit-identically | Nightly replay |
 | TG-1 | Every Tier 3 population has a current, in-date equivalence test on file | Annual |
+
+**On ST-2 being an identity, and what to do about it.** The first limb is a *tautology by
+construction* and cannot fail. The engine computes one figure — the gross-basis interest the Stage
+1/2 ledger would have recognised — and derives the net basis and the unwind from it by subtracting
+the same accretion applied to the allowance. `net + unwind = gross` then holds whatever the accrual
+factor was, including badly wrong: it checks the **decomposition**, never the **magnitude**. That is
+not a reason to drop it — the decomposition is what a reader has to be able to follow, and the limb
+is what makes the Indian treatment legible — but it must not be mistaken for assurance about the
+number.
+
+Getting this wrong twice is instructive. A cross-check was added to close the gap and recomputed the
+gross interest as `GCA × accretion(EIR, exponent)` against a figure computed as
+`GCA × accretion(EIR, exponent)` — the same expression, so bit-identical by construction, and with a
+wrong exponent both sides were wrong by the same factor. A second tautology, emitted under the same
+`ST-2` id as the first, in the belief that it fixed the first.
+
+The check that works compares the decomposition to the **amortisation row it decomposes**. Those are
+two independent derivations of the accrual length: the ledger's comes from the flow vector's dates
+and the time convention, the decomposition's from its caller. A disagreement is a broken first period
+or a mis-selected day count — precisely the defect the identities cannot see. The accrual length is
+compared before the interest, because it is the cause and the other is the effect.
+
+**On PC-1's arity.** A projection can be screened along more than one route at once: the
+classified-fee route always applies, and `LMS_AUTHORITATIVE` adds the billed-schedule attestation on
+top. Those are not two invariants. Emitted separately they produced two PC-1 results for one period
+and, on an unattested LMS feed, two *contradictory* ones — the fee route passing because the rule set
+had resolved every posting, the schedule route failing because nothing attested to the feed. The
+conjunction was still enforced, so the breach was not lost, but anything reading PC-1 by name got
+whichever answer came first in the list. PC-1 is the control an ACPIR auditor asks for by name: it
+yields one result per period, satisfied only if every applicable route is, with the detail carrying
+each route's evidence. A pass on the fee route alone means something quite different from a pass on
+both, so the evidence is concatenated rather than replaced.
 
 **On INV-2's third limb.** "Equals it when there is none" cannot be read as exact equality. A
 borrower is billed an instalment rounded to the paise, so a zero-fee loan does not reprice exactly

@@ -3,6 +3,7 @@ package com.crisil.eir.calc.projection;
 import com.crisil.eir.domain.CashFlow;
 import com.crisil.eir.domain.FlowKind;
 import com.crisil.eir.domain.FlowVector;
+import com.crisil.eir.domain.InvariantId;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Rate;
@@ -150,9 +151,20 @@ final class ProjectionSupport {
         TimeConvention convention = convention(terms, contractual, expected);
         Money carryingAmount = initialCarryingAmount(
             amountAdvanced, netIntegralFee(fees, terms.currency()));
+        // PC-1 is emitted once, combining the fee route with any route the caller adds —
+        // see PenalChargeScreen.combine. Two PC-1 results for one period disagreed with
+        // each other on an unattested LMS feed.
+        List<InvariantResult> penalCharge = new ArrayList<>();
+        penalCharge.add(PenalChargeScreen.overFeePostings(fees));
         List<InvariantResult> invariants = new ArrayList<>();
-        invariants.add(PenalChargeScreen.overFeePostings(fees));
-        invariants.addAll(additionalInvariants);
+        for (InvariantResult additional : additionalInvariants) {
+            if (additional.id() == InvariantId.PC_1) {
+                penalCharge.add(additional);
+            } else {
+                invariants.add(additional);
+            }
+        }
+        invariants.add(0, PenalChargeScreen.combine(penalCharge));
         return new ProjectionResult(
             contractual, expected, carryingAmount, convention, !truncate, List.copyOf(invariants));
     }

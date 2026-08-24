@@ -55,6 +55,78 @@ class Stage3DecompositionTest {
     private static final Money CONTRACTUAL_INTEREST_BILLED = Money.inr("5298.16");
 
     @Test
+    @DisplayName("the ledger cross-check catches a wrong accrual length, which ST-2's own identity cannot")
+    void theLedgerCrossCheckCatchesAWrongAccrualLength() {
+        // Why this test exists at all. ST-2, S3-1 and S3-2 are identities between figures
+        // the decomposition derives from the same two inputs, so they hold however wrong
+        // the accrual factor is — they check the decomposition, never the magnitude. That
+        // was already documented. What was NOT true was the fix: a cross-check called
+        // accrualConsistency recomputed the gross interest as
+        // grossCarryingAmount.times(accretion(eir, exponent)) and compared it to the
+        // grossInterest computed as grossCarryingAmount.amount().multiply(accretion,
+        // WORKING). Same balance, same accretion, same multiplication, same MathContext:
+        // bit-identical by construction, and with a wrong exponent both sides were wrong
+        // by the same factor. A second tautology, asserting under the same ST-2 id as the
+        // first, added in the belief that it fixed the first.
+        //
+        // The ledger row is the independent derivation. AmortisationEngine computes its
+        // accrualExponent from the flow vector's dates and the convention; a caller of
+        // forAccrualPeriod supplies its own. A disagreement between them is a broken
+        // period or a mis-selected day count.
+        AmortisationRow month13 = case1EirLeg().row(13);
+        assertThat(month13.accrualExponent())
+            .as("a whole monthly period under PeriodicIndex")
+            .isEqualByComparingTo(BigDecimal.ONE);
+
+        Stage3Decomposition sound = Stage3Decomposition.forAccrualPeriod(
+            month13.openingGca(), ALLOWANCE_40_PCT, CASE1_EIR, CONTRACTUAL_INTEREST_BILLED,
+            Stage.STAGE_3, BigDecimal.ONE);
+        assertThat(sound.againstLedger(month13))
+            .as("a sound decomposition agrees with the row it decomposes")
+            .allMatch(InvariantResult::satisfied);
+
+        // Half a month's accrual on a monthly rate: every internal identity still holds,
+        // and the interest is wrong by nearly half.
+        Stage3Decomposition halfPeriod = Stage3Decomposition.forAccrualPeriod(
+            month13.openingGca(), ALLOWANCE_40_PCT, CASE1_EIR, CONTRACTUAL_INTEREST_BILLED,
+            Stage.STAGE_3, bd("0.5"));
+        assertThat(halfPeriod.invariants())
+            .as("ST-2's own identity cannot see this, which is the whole point")
+            .allMatch(InvariantResult::satisfied);
+        assertThat(halfPeriod.grossBasisInterest().amount())
+            .as("and yet the magnitude is materially wrong")
+            .isLessThan(sound.grossBasisInterest().amount().multiply(bd("0.51")));
+
+        List<InvariantResult> breaches = halfPeriod.againstLedger(month13).stream()
+            .filter(result -> !result.satisfied())
+            .toList();
+        assertThat(breaches)
+            .as("the ledger cross-check must see both the cause and the effect")
+            .hasSize(2);
+        assertThat(breaches).allMatch(result -> result.id() == InvariantId.ST_2);
+        assertThat(breaches.get(0).detail())
+            .contains("accrued over 0.5 period(s)")
+            .contains("ledger row accrued over 1")
+            .contains("broken period or a mis-selected day count");
+    }
+
+    @Test
+    @DisplayName("exactly one ST-2 travels on a decomposition, not two under the same id")
+    void oneStageTwoIdentityPerDecomposition() {
+        // The duplicate-control defect, in the place it was introduced. Two results under
+        // one invariant id means anything reading ST-2 by name gets whichever comes first,
+        // and ST-2 is the invariant an ACPIR auditor looks at hardest.
+        Stage3Decomposition decomposition = Stage3Decomposition.forPeriod(
+            GCA_AT_MONTH_12, ALLOWANCE_40_PCT, CASE1_EIR, CONTRACTUAL_INTEREST_BILLED,
+            Stage.STAGE_3);
+
+        assertThat(decomposition.invariants().stream()
+            .filter(result -> result.id() == InvariantId.ST_2)
+            .count())
+            .isEqualTo(1);
+    }
+
+    @Test
     @DisplayName("reference case 5: 5,506.79 gross splits into 3,304.08 net and 2,202.72 unwind")
     void referenceCaseFive() {
         Stage3Decomposition decomposition = Stage3Decomposition.forPeriod(

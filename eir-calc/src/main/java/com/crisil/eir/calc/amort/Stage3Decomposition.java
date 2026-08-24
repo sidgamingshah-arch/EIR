@@ -70,6 +70,7 @@ public record Stage3Decomposition(
     Money recognisedIncome,
     Money toSuspense,
     Stage stage,
+    BigDecimal accrualExponent,
     List<InvariantResult> invariants) {
 
     public Stage3Decomposition {
@@ -79,7 +80,12 @@ public record Stage3Decomposition(
         Objects.requireNonNull(recognisedIncome, "recognisedIncome");
         Objects.requireNonNull(toSuspense, "toSuspense");
         Objects.requireNonNull(stage, "stage");
+        Objects.requireNonNull(accrualExponent, "accrualExponent");
         Objects.requireNonNull(invariants, "invariants");
+        if (accrualExponent.signum() <= 0) {
+            throw new IllegalArgumentException(
+                "accrualExponent must be positive, got " + accrualExponent.toPlainString());
+        }
         invariants = List.copyOf(invariants);
     }
 
@@ -188,7 +194,6 @@ public record Stage3Decomposition(
 
         List<InvariantResult> invariants = new ArrayList<>();
         invariants.add(stageTwoIdentity(grossInterest, netInterest, unwindAmount));
-        invariants.add(accrualConsistency(grossCarryingAmount, eir, accrualExponent, grossInterest));
         if (suppressed) {
             invariants.add(nilRecognition(recognised));
             invariants.add(InvariantResult.ofMoney(
@@ -197,8 +202,8 @@ public record Stage3Decomposition(
                 contractualInterestBilled,
                 recognised.plus(suspense)));
         }
-        return new Stage3Decomposition(
-            grossInterest, netInterest, unwindAmount, recognised, suspense, stage, invariants);
+        return new Stage3Decomposition(grossInterest, netInterest, unwindAmount, recognised,
+            suspense, stage, accrualExponent, invariants);
     }
 
     /**
@@ -243,6 +248,7 @@ public record Stage3Decomposition(
             cured.recognisedIncome(),
             cured.toSuspense(),
             cured.stage(),
+            cured.accrualExponent(),
             invariants);
     }
 
@@ -335,24 +341,60 @@ public record Stage3Decomposition(
     }
 
     /**
-     * Cross-checks the gross-basis figure against the roll-forward's own accretion.
+     * Cross-checks this decomposition against the amortisation row it decomposes.
      *
-     * <p>ST-2 and its siblings are identities between derived halves and therefore
-     * cannot detect a wrong accrual factor. This is the assertion that can: it
-     * recomputes the gross-basis interest from the balance, the rate and the
-     * accrual length independently of the decomposition, and compares. It exists
-     * because a Stage 3 figure that disagrees with the ledger it is supposed to
-     * decompose is wrong even when every internal identity holds.
+     * <p><strong>This replaces a check that could not fail.</strong> The previous
+     * version recomputed the gross-basis interest as
+     * {@code grossCarryingAmount.times(accretion(eir, accrualExponent))} and compared
+     * it to the {@code grossInterest} the decomposition had computed as
+     * {@code grossCarryingAmount.amount().multiply(accretion, WORKING)}. Those are the
+     * same balance, the same accretion and the same multiplication under the same
+     * {@link Precision#WORKING} context, so the comparison was bit-identical by
+     * construction — and if the {@code accrualExponent} was wrong, both sides were
+     * wrong by exactly the same factor and it still passed. It was a second tautology
+     * added to fix the first, and it claimed in its own comment to be the assertion
+     * that could detect a wrong accrual factor. It could not.
+     *
+     * <p>This one can, because the row is not derived from the same inputs.
+     * {@link AmortisationEngine} computes a row's {@code accrualExponent} from the flow
+     * vector's dates and the time convention; a caller of
+     * {@link #forAccrualPeriod} supplies its exponent separately. Those are two
+     * independent derivations of the same quantity, and a mismatch between them is
+     * exactly the defect a broken first period or a mis-selected day count produces.
+     * So the exponent is compared first — it is the cause — and the interest second,
+     * which localises a failure rather than leaving one figure to explain.
+     *
+     * <p>Caller-invoked rather than folded into the decomposition, because the
+     * decomposition does not have the row: it is handed a balance and a rate, and the
+     * ledger is the pipeline's. That is the same reason it can be checked at all.
+     *
+     * @param row the EIR-leg row for the accrual period this decomposition covers
      */
-    static InvariantResult accrualConsistency(
-        Money grossCarryingAmount, Rate eir, BigDecimal accrualExponent, Money grossInterest) {
-        Money expected = grossCarryingAmount.times(
-            AmortisationEngine.accretion(eir.periodic(), accrualExponent));
-        return InvariantResult.ofMoney(
+    public List<InvariantResult> againstLedger(AmortisationRow row) {
+        Objects.requireNonNull(row, "row");
+        List<InvariantResult> results = new ArrayList<>();
+        if (row.accrualExponent().compareTo(accrualExponent) != 0) {
+            results.add(InvariantResult.fail(
+                InvariantId.ST_2,
+                "the decomposition accrued over " + accrualExponent.toPlainString()
+                    + " period(s) but the ledger row accrued over "
+                    + row.accrualExponent().toPlainString()
+                    + ". The two derive the accrual length independently — the ledger from the"
+                    + " vector's dates and the convention, the decomposition from its caller — so"
+                    + " a disagreement is a broken period or a mis-selected day count, not a"
+                    + " rounding matter",
+                row.accrualExponent().subtract(accrualExponent)));
+        } else {
+            results.add(InvariantResult.pass(
+                InvariantId.ST_2,
+                "the decomposition and the ledger row agree on an accrual length of "
+                    + accrualExponent.toPlainString() + " period(s)"));
+        }
+        results.add(InvariantResult.ofMoney(
             InvariantId.ST_2,
-            "Stage 3 gross-basis interest agrees with the roll-forward accretion over an accrual"
-                + " length of " + accrualExponent.toPlainString() + " period(s)",
-            expected,
-            grossInterest);
+            "Stage 3 gross-basis interest against the ledger's own accretion for the period",
+            row.eirInterest(),
+            grossBasisInterest));
+        return results;
     }
 }

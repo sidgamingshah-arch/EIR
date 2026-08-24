@@ -102,6 +102,57 @@ public final class PenalChargeScreen {
     }
 
     /**
+     * The single PC-1 result for a projection, combining every route that applies.
+     *
+     * <p><strong>Why this has to exist.</strong> A projection can be screened along
+     * more than one route at once: the classified-fee route always applies, and the
+     * {@code LMS_AUTHORITATIVE} route adds the billed-schedule assertion on top. Emitted
+     * separately they produced <em>two</em> PC-1 results for one period, and on an
+     * unattested LMS feed they disagreed — the fee route passing because the rule set had
+     * resolved every posting, the schedule route failing because nothing attested to the
+     * feed. {@code allInvariantsSatisfied} still came out false, so the breach was not
+     * lost, but anything looking PC-1 up by name got whichever of the two contradictory
+     * answers came first in the list. PC-1 is a named control that an auditor asks for by
+     * name; it gets one answer per period, and the answer is the conjunction.
+     *
+     * <p>The detail concatenates the evidence rather than replacing it, because which
+     * routes were screened is the part worth keeping: a pass on the fee route alone means
+     * something quite different from a pass on both.
+     */
+    public static InvariantResult combine(List<InvariantResult> assertions) {
+        Objects.requireNonNull(assertions, "assertions");
+        if (assertions.isEmpty()) {
+            throw new IllegalArgumentException("PC-1 must be asserted on every projection");
+        }
+        if (assertions.size() == 1) {
+            return assertions.get(0);
+        }
+        StringBuilder detail = new StringBuilder();
+        BigDecimal deviation = null;
+        boolean satisfied = true;
+        for (InvariantResult assertion : assertions) {
+            if (assertion.id() != InvariantId.PC_1) {
+                throw new IllegalArgumentException(
+                    "only PC-1 assertions combine here, got " + assertion.id());
+            }
+            if (detail.length() > 0) {
+                detail.append("; ");
+            }
+            detail.append(assertion.detail());
+            if (!assertion.satisfied()) {
+                satisfied = false;
+                if (deviation == null) {
+                    deviation = assertion.deviation();
+                }
+            }
+        }
+        return satisfied
+            ? InvariantResult.pass(InvariantId.PC_1, detail.toString())
+            : InvariantResult.fail(InvariantId.PC_1, detail.toString(),
+                deviation == null ? BigDecimal.ZERO : deviation);
+    }
+
+    /**
      * PC-1 over an externally-supplied billed schedule.
      *
      * <p>Satisfied only where an {@link Attestation} accompanies the feed. A
