@@ -68,7 +68,45 @@ public enum InvariantId {
     DT_1("deterministic replay"),
 
     /** Every Tier 3 population has a current equivalence test on file. */
-    TG_1("Tier 3 equivalence test in date");
+    TG_1("Tier 3 equivalence test in date"),
+
+    // ---- Structure-specific, from the compositional cash-flow model (doc 09 section 7) ----
+
+    /** Scheduled principal over the contractual ladder sums to the principal advanced. */
+    ST_3("scheduled principal = principal advanced"),
+
+    /** Capitalised moratorium interest is compound accretion; deferred-simple is simple, and they differ. */
+    ST_4("moratorium interest matches its servicing basis"),
+
+    /** A balloon or residual-value ladder amortises to the terminal amount, not to zero. */
+    ST_5("balloon ladder amortises to the terminal amount"),
+
+    /** Tranche disbursements sum to notional, each dated on or after the value date. */
+    ST_6("tranche draws sum to notional"),
+
+    /** With any option present, at least two exercise policies are computed and the divergence quantified. */
+    ST_7("optionality divergence quantified"),
+
+    /** Expected life never exceeds the ECL horizon. */
+    ST_8("expected life within the ECL horizon"),
+
+    /**
+     * A behavioural or option re-estimation on an instrument with a nil unamortised
+     * premium or discount produces a catch-up of exactly zero.
+     *
+     * <p>The invariant that keeps the close window survivable: without it the engine
+     * churns the whole par-priced book on every curve refresh for no P&amp;L effect.
+     */
+    ST_9("re-estimation at par produces no catch-up"),
+
+    /** Any business-day adjustment or seasonal calendar makes periodic indexing unavailable. */
+    ST_10("calendar irregularity forces actual dating"),
+
+    /** An incoherent blueprint is rejected at construction, naming the conflicting dimensions. */
+    ST_11("blueprint coherence"),
+
+    /** A conversion option, or any SPPI failure, yields no EIR at all. */
+    ST_12("SPPI failure yields no EIR");
 
     private final String statement;
 
