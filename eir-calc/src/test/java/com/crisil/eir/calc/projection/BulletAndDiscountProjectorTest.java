@@ -155,7 +155,8 @@ class BulletAndDiscountProjectorTest {
 
         assertThat(discount.faceValue(bond).amount()).isEqualByComparingTo(bd("1000000.00"));
         assertThat(discount.issuePrice(bond).atPresentationScale().amount())
-            .isEqualByComparingTo(bd("315241.7049658902158585893826"));
+            .as("the price as reference case 9 presents it")
+            .isEqualByComparingTo(bd("315241.70"));
         assertThat(discount.discountToAccrete(bond).atPresentationScale().amount())
             .isEqualByComparingTo(bd("684758.30"));
         // The price is DERIVED from a quoted yield, so it is an intermediate and is not
@@ -174,8 +175,22 @@ class BulletAndDiscountProjectorTest {
     void discountInstrumentOpensAtThePrice() {
         ProjectionResult result = discount.project(fifteenYearZeroCoupon(), List.of());
 
-        assertThat(result.initialCarryingAmount().amount()).isEqualByComparingTo(bd("315241.70"));
-        assertThat(result.netCashAtInception().amount()).isEqualByComparingTo(bd("-315241.70"));
+        // Carried unrounded, presented at 315,241.70. The carried figure is the one that
+        // matters here: it is the target the EIR solves to, and rounding it before the
+        // solve reprices the bond to 8.0000001134% and leaves it redeeming at 999,999.98
+        // against face. IC-1 then requires the inception leg to be that same unrounded
+        // figure to the last digit, which is why ProjectionSupport.inceptionLeg no longer
+        // re-rounds it — a second rounding one call downstream silently defeated the
+        // first fix, and this pair is what would have caught that.
+        assertThat(result.initialCarryingAmount().amount())
+            .as("the carried price, unrounded")
+            .isEqualByComparingTo(bd("315241.7049658902158585893826"));
+        assertThat(result.initialCarryingAmount().atPresentationScale().amount())
+            .as("the price as reference case 9 presents it")
+            .isEqualByComparingTo(bd("315241.70"));
+        assertThat(result.netCashAtInception().amount())
+            .as("IC-1: the inception leg is the negated carrying amount to the last digit")
+            .isEqualByComparingTo(bd("-315241.7049658902158585893826"));
         assertThat(result.initialRecognitionCheck().satisfied()).isTrue();
         assertThat(result.contractual().future()).hasSize(1);
         assertThat(result.contractual().future().get(0).kind()).isEqualTo(FlowKind.PRINCIPAL);

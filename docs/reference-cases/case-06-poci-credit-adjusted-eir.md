@@ -42,9 +42,10 @@ no gross-basis phase for a POCI asset.
 > [03 § 1.2](../03-calculation-spec.md#12-working-precision) forbids rounding an intermediate
 > before it enters a solve. The same principle governs Case 8's synthetic notional redemption and
 > Case 9's yield-derived price. Rounding it first shifts the rate to 2.15405325% per month —
-> a difference of 1.5 bp p.a., invisible in the roll-forward (period 1 is 15,078.37 either way)
-> and therefore exactly the kind of discrepancy that survives review. Stated here explicitly so
-> that a reader who recomputes and gets the other number knows which input differed.
+> a difference of 1.5 bp p.a., invisible at period 1 of the roll-forward (15,078.37 either way)
+> and a paisa adrift from period 2 onward, which is exactly the kind of discrepancy that survives
+> review. Stated here explicitly so that a reader who recomputes and gets the other number knows
+> which input differed.
 >
 > The **Cash received** column below shows the *presented* 37,658.78; the carried figure
 > is 37658.7760. So the life total is 903,810.62, not 24 x 37,658.78 =
@@ -64,7 +65,7 @@ no gross-basis phase for a POCI asset.
 | 23 | 72,952.04 | 1,571.43 | 37,658.78 | 36,864.69 |
 | 24 | 36,864.69 | 794.08 | 37,658.78 | -0.00 |
 
-*(periods 7–22 omitted; terminal closing balance -0E-8)*
+*(periods 7–22 omitted; terminal closing balance -0.00000365)*
 
 ## Two ACPIR rules the engine enforces
 

@@ -26,10 +26,22 @@ rowsC=amort_table(P,i,{t:E for t in range(1,n+1)},n)
 bal12C=rowsC[11]['closing']
 
 # CASE 6 POCI
-price=D('700000'); exp=q(E*D('0.80'))
+# The expected receipt is carried UNROUNDED. It is a derived estimate of collections,
+# not a billed amount, so no cash event attaches currency scale to it and 03 s1.2 forbids
+# rounding an intermediate before it enters a solve. This line read q(E*D('0.80')) until
+# the engine was built against the case, which put the rounded 37658.78 into the solve and
+# the rate at 2.15405325% instead of 2.15405231% — a 1.5 bp difference, invisible at
+# period 1 of the roll-forward and a paisa adrift from period 2 onward. The document was
+# corrected by hand and this generator was not, so re-running it would have silently
+# reverted the document. That is the whole reason the contributing rule says a change to a
+# reference-case number must change the generator.
+price=D('700000'); exp=E*D('0.80')
 ca_eir=solve_irr([(t,exp) for t in range(1,25)],price)
 plain=solve_irr([(t,E) for t in range(1,25)],price)
-rows6=amort_table(price,ca_eir,{t:exp for t in range(1,25)},24)
+# Rounded to 12dp before the roll-forward because Rate's constructor rounds there, so the
+# published amortisation is rolled forward with the published rate and not with the raw
+# solved value. Solving at 28 digits and rolling forward unrounded is the trap this avoids.
+rows6=amort_table(price,q(ca_eir,12),{t:exp for t in range(1,25)},24)
 c6=HDR("Case 6 — POCI asset: the credit-adjusted EIR",
        "Expected losses live inside the rate from inception. Using contractual flows instead produces a yield that is arithmetically impeccable and economically fictional.")
 c6+=f"""A distressed pool is acquired for {f(price)}. Contractual flows are the 24 EMIs of
@@ -46,7 +58,8 @@ allowance**; thereafter only *cumulative changes* in lifetime ECL are recognised
 |---|---|
 | Purchase price = amortised cost at initial recognition | {f(price)} |
 | Contractual monthly receipt | {f(E)} |
-| Expected monthly receipt (80%) | {f(exp)} |
+| Expected monthly receipt (80%), as carried | {exp} |
+| Expected monthly receipt, as presented | {f(exp)} |
 
 | Basis | Per month | Effective p.a. |
 |---|---:|---:|
@@ -60,6 +73,22 @@ statement mean anything.
 
 Note that the rate solves to **amortised cost**, not gross carrying amount (ACPIR 6(4)). There is
 no gross-basis phase for a POCI asset.
+
+> **On the expected receipt.** It is carried at working precision ({exp}), not rounded to
+> paise, because it is a derived *estimate of collections* rather than a billed amount — nobody is
+> ever billed 80% of an instalment, so no cash event attaches currency scale to it, and
+> [03 § 1.2](../03-calculation-spec.md#12-working-precision) forbids rounding an intermediate
+> before it enters a solve. The same principle governs Case 8's synthetic notional redemption and
+> Case 9's yield-derived price. Rounding it first shifts the rate to {f(solve_irr([(t,q(exp)) for t in range(1,25)],price)*100,8)}% per month —
+> a difference of 1.5 bp p.a., invisible at period 1 of the roll-forward (15,078.37 either way)
+> and a paisa adrift from period 2 onward, which is exactly the kind of discrepancy that survives
+> review. Stated here explicitly so that a reader who recomputes and gets the other number knows
+> which input differed.
+>
+> The **Cash received** column below shows the *presented* {f(exp)}; the carried figure
+> is {exp}. So the life total is {f(exp*24)}, not 24 x {f(exp)} =
+> {f(q(exp)*24)}. Multiplying the presented figure is how a stale expected value gets
+> written down, so the carried total is stated here rather than left to be inferred.
 
 ## Roll-forward at the credit-adjusted EIR
 
@@ -113,21 +142,62 @@ advanced.
 
 EIR = **{f(dd*100,8)}% per month**, {f(annualise(dd)*100,6)}% p.a.
 
-At this magnitude Newton–Raphson seeded from the contractual rate can overshoot outside the
-bracket; the bisection fallback is what guarantees termination
-([03 §4.2](../03-calculation-spec.md#42-algorithm)).
+At this magnitude a raw tangent step from the contractual rate can leave the bracket, and the
+safeguards of step 3 replace it with a bisection of the current bracket rather than abandoning the
+solve ([03 §4.2](../03-calculation-spec.md#42-algorithm)).
 
 ## Must raise, never guess
 
 | Scenario | Required behaviour |
 |---|---|
-| Total inflows ≤ initial outflow (no sign change over the bracket ladder) | `NoSolution` → exception queue with the flow vector attached. **Never** default to zero or to the contractual rate. |
+| No sign change anywhere on the ladder **or its escalation** | `NoSolution` → exception queue with the flow vector attached. **Never** default to zero or to the contractual rate. |
+| A root the standard ladder cannot bracket, found only by escalation | `REQUIRES_REVIEW` with the rate and its full working. Never `SOLVED`. |
 | Multiple sign changes, exactly one root in the plausible band | Take it; record that disambiguation occurred and log all candidate roots. |
 | Multiple sign changes, several roots in band | Take the root nearest contractual; mark `REQUIRES_REVIEW`; route for approval. Computed and usable, but flagged. |
 | Multiple sign changes, no root in band | Exception queue. |
-| Newton–Raphson exceeds 100 iterations | Fall back to 200 bisection iterations over the bracket. |
+| Newton–Raphson exceeds 100 iterations | Fall back to 200 bisection iterations over the bracket. Unreachable under the specification's cap — every accepted point halves the bracket, so the width test fires first — and the guarantee is kept anyway. |
 | Unmapped fee code on the contract | Exception queue before the solver is reached. |
 | `EXCLUDED_BY_DIRECTION` posting (penal charge) present in the vector | Rejected at ingestion; invariant PC-1 asserted for the period. |
+
+### Why "total inflows <= initial outflow" is not the no-solution case
+
+This row said, until the engine was built against it, that a vector whose inflows do not exceed the
+initial outflow has no rate. That is false, and it was worth getting wrong to find out why.
+
+For a plain asset vector — one outflow at inception, receipts afterwards — `f(r) = PV(r) - GCA_0`
+tends to `+infinity` as `r -> -100%+`, because discounting at a negative rate *inflates*, and tends
+to `-GCA_0` as `r -> infinity`. It is continuous between them. So it **always** crosses zero: a
+unique rate above -100% exists for every such vector, whatever the recovery. A token recovery of
+50.00 against 1,000,000.00 advanced one month earlier does have an EIR, and it is exactly
+-99.995% per month.
+
+What actually failed was reach, not existence. A ladder node caps the money multiple the scan can
+bracket at `(1+node)^tau`, and that cap collapses toward 1 as tau falls:
+
+| tau | bracketable at node 10.0 | bracketable at node -0.9999 |
+|---|---|---|
+| 1 day | 1.006591 | 0.975082 — a 2.49% loss |
+| 3 days | 1.019904 | 0.927093 — a 7.29% loss |
+| 7 days | 1.047061 | 0.838084 — a 16.19% loss |
+| 1 year | 11.000000 | 0.000100 — a 99.99% loss |
+
+So a single-day money-market drawing of 10,000,000.00 with a 100,000.00 integral fee and 6.75%
+ACT/365F interest repays 10,001,849.32 against 9,900,000.00 advanced — a multiple of 1.010288, an
+ordinary instrument, and an unambiguous **4,092.4331% annual effective**. It sat above the top of
+the ladder and came back `NoSolution`. That is the entire short-tenor population, which is the
+Tier 3 population.
+
+The engine therefore escalates the ladder to `[-0.999999999999, 1e12]` when the standard rungs find
+no sign change, and reports what it finds as `REQUIRES_REVIEW` — never `SOLVED`. A root out there is
+one of two things and both need a person: a tenor too short to carry the fee loaded onto it, where
+the annualisation is arithmetically correct and the presentation is a policy question
+([03 §4.5](../03-calculation-spec.md)); or a recovery so far below the advance that the answer is
+impairment rather than interest. Saying *which rate* the vector implies is strictly more actionable
+than saying none exists — and it sends nobody looking for a fee misclassification that is not there.
+
+`NoSolution` is now reserved for vectors where no root exists at all: no sign change in `f`'s own
+coefficient sequence, so it cannot cross zero. A facility drawn twice and never repaid is the case,
+and in production it is a data defect on a tranched facility rather than an economic outcome.
 
 **The one that matters most.** Silently falling back to the contractual rate on non-convergence
 reproduces the pre-ACPIR position while appearing to have implemented EIR. It produces plausible

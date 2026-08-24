@@ -155,14 +155,20 @@ class Case06PociCreditAdjustedEirTest {
             solveExpected().rateOrThrow(), expectedFlows(), MONTHLY).amortise(expectedFlows());
 
         assertThat(schedule.periods()).isEqualTo(24);
+        // These rows were the last place the rounded receipt survived. The document was
+        // regenerated on the carried 37658.7760; this table was not, so it still held the
+        // roll-forward the rounded 37658.78 produces — 14,591.98 rather than 14,591.97 at
+        // period 2, and a paisa adrift from there on. A 1.5 bp difference in the rate,
+        // invisible at period 1 and visible from period 2, which is exactly the shape of
+        // discrepancy that survives review.
         assertRow(schedule, 1, "700000.00", "15078.37", "677419.59");
-        assertRow(schedule, 2, "677419.59", "14591.98", "654352.79");
-        assertRow(schedule, 3, "654352.79", "14095.11", "630789.12");
-        assertRow(schedule, 4, "630789.12", "13587.53", "606717.87");
-        assertRow(schedule, 5, "606717.87", "13069.03", "582128.12");
-        assertRow(schedule, 6, "582128.12", "12539.35", "557008.69");
-        assertRow(schedule, 23, "72952.05", "1571.43", "36864.69");
-        assertRow(schedule, 24, "36864.69", "794.09", "0.00");
+        assertRow(schedule, 2, "677419.59", "14591.97", "654352.79");
+        assertRow(schedule, 3, "654352.79", "14095.10", "630789.11");
+        assertRow(schedule, 4, "630789.11", "13587.53", "606717.86");
+        assertRow(schedule, 5, "606717.86", "13069.02", "582128.11");
+        assertRow(schedule, 6, "582128.11", "12539.34", "557008.68");
+        assertRow(schedule, 23, "72952.04", "1571.43", "36864.69");
+        assertRow(schedule, 24, "36864.69", "794.08", "0.00");
 
         assertThat(paise(schedule.terminalBalance()))
             .as("TR-1: terminal closing balance")
@@ -199,8 +205,16 @@ class Case06PociCreditAdjustedEirTest {
             .isEqualByComparingTo(bd(opening));
         assertThat(paise(row.eirInterest())).as("period %d interest", period)
             .isEqualByComparingTo(bd(interest));
-        assertThat(paise(row.cashReceived())).as("period %d cash", period)
+        // Both forms, because this is the figure the repo has now twice managed to state
+        // two ways. The carried receipt is unrounded — it is a derived estimate of
+        // collections that enters the solve, and calc-spec 1.2 forbids rounding an
+        // intermediate before it does. Its presentation is 37,658.78, which is what the
+        // document's cash column shows, and 24 of the carried figure total 903,810.62
+        // rather than the 903,810.72 that 24 presented receipts would suggest.
+        assertThat(row.cashReceived().amount()).as("period %d cash, as carried", period)
             .isEqualByComparingTo(bd("37658.7760"));
+        assertThat(paise(row.cashReceived())).as("period %d cash, as presented", period)
+            .isEqualByComparingTo(bd("37658.78"));
         assertThat(paise(row.closingGca())).as("period %d closing", period)
             .isEqualByComparingTo(bd(closing));
     }
