@@ -10,3 +10,10 @@ build/checkstyle-*.cache
 # jqwik persists a failure database next to the module; it is a test artifact
 .jqwik-database
 .jqwik-database
+
+# Transient git worktrees created for isolated subagent runs. Ephemeral by
+# design and auto-removed when the agent finishes; a full repo copy each, so
+# committing them would add megabytes of duplicate source per run.
+# NOTE: only the worktrees path is ignored. .claude/ itself may legitimately
+# carry committed project settings, skills and agent definitions.
+.claude/worktrees/
