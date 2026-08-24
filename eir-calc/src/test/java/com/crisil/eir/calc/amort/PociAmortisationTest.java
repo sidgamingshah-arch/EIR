@@ -54,7 +54,18 @@ class PociAmortisationTest {
     private static final Money PURCHASE_PRICE = Money.inr("700000");
 
     /** 80% of the 47,073.47 contractual instalment: 20% of every receipt is expected lost. */
-    private static final Money EXPECTED_RECEIPT = Money.inr("37658.78");
+    /**
+     * 80% of the billed EMI, carried at working precision.
+     *
+     * <p>NOT rounded to paise. The expected receipt is a derived estimate of
+     * collections, not a billed amount — nobody is ever billed 80% of an
+     * instalment — so no cash event attaches currency scale to it and calc-spec
+     * 1.2 forbids rounding an intermediate before it enters a solve. Rounding it
+     * first shifts the rate to 0.0215405325, a difference invisible in the
+     * roll-forward and therefore exactly the kind that survives review. See the
+     * note in docs/reference-cases/case-06-poci-credit-adjusted-eir.md.
+     */
+    private static final Money EXPECTED_RECEIPT = Money.inr("37658.7760");
 
     private static FlowVector pool(Money receipt) {
         List<CashFlow> flows = new ArrayList<>();
@@ -75,12 +86,14 @@ class PociAmortisationTest {
     @DisplayName("the credit-adjusted EIR is 2.15405325% a month, 29.141920% effective p.a.")
     void creditAdjustedRate() {
         // The expected receipt is the contractual one net of the day-1 lifetime ECL.
+        // the carried estimate is exact; 37,658.78 is only its presentation
+        assertThat(EMI.times(bd("0.80")).amount()).isEqualByComparingTo(bd("37658.7760"));
         assertThat(EMI.times(bd("0.80")).atPresentationScale().amount()).isEqualByComparingTo(bd("37658.78"));
 
         Rate creditAdjusted = solve(pool(EXPECTED_RECEIPT));
 
         assertThat(creditAdjusted.periodic().setScale(10, RoundingMode.HALF_UP))
-            .isEqualByComparingTo(bd("0.0215405325"));
+            .isEqualByComparingTo(bd("0.0215405231"));
         assertThat(creditAdjusted.effectiveAnnual().setScale(6, RoundingMode.HALF_UP))
             .isEqualByComparingTo(bd("0.291419"));
     }
@@ -102,7 +115,7 @@ class PociAmortisationTest {
         // The gross figure the asset would have opened at if this were a par acquisition —
         // the sum of the expected receipts — is nowhere in the measurement.
         Money grossExpectedReceipts = EXPECTED_RECEIPT.times(bd("24"));
-        assertThat(grossExpectedReceipts.atPresentationScale().amount()).isEqualByComparingTo(bd("903810.72"));
+        assertThat(grossExpectedReceipts.atPresentationScale().amount()).isEqualByComparingTo(bd("903810.62"));
         assertThat(poci.amortisedCostAtInitialRecognition().amount())
             .isLessThan(grossExpectedReceipts.amount());
 
@@ -144,11 +157,11 @@ class PociAmortisationTest {
     @ParameterizedTest(name = "period {0}: {1} + {2} - 37,658.78 = {3}")
     @CsvSource({
         "1, 700000.00, 15078.37, 677419.59",
-        "2, 677419.59, 14591.98, 654352.79",
-        "3, 654352.79, 14095.11, 630789.12",
-        "6, 582128.12, 12539.35, 557008.69",
-        "23, 72952.05,  1571.43,  36864.69",
-        "24, 36864.69,   794.09,      0.00",
+        "2, 677419.59, 14591.97, 654352.79",
+        "3, 654352.79, 14095.10, 630789.11",
+        "6, 582128.11, 12539.34, 557008.68",
+        "23, 72952.04,  1571.43,  36864.69",
+        "24, 36864.69,   794.08,      0.00",
     })
     @DisplayName("the reference case 6 roll-forward at the credit-adjusted EIR")
     void rollForward(int period, String opening, String interest, String closing) {
@@ -176,7 +189,7 @@ class PociAmortisationTest {
         assertThat(schedule.isClean()).isTrue();
         // Lifetime interest is the expected receipts less the price paid: the whole of the
         // return, and none of the 20% never expected.
-        assertThat(schedule.presentedTotalInterest().amount()).isEqualByComparingTo(bd("203810.72"));
+        assertThat(schedule.presentedTotalInterest().amount()).isEqualByComparingTo(bd("203810.62"));
     }
 
     @Test
@@ -223,7 +236,7 @@ class PociAmortisationTest {
         // impairment gain — so the caller supplies the remeasured carrying amount and the
         // schedule continues at the same rate rather than re-solving one.
         Money balanceAtCure = poci.amortise(expected).row(6).closingGca();
-        assertThat(balanceAtCure.atPresentationScale().amount()).isEqualByComparingTo(bd("557008.69"));
+        assertThat(balanceAtCure.atPresentationScale().amount()).isEqualByComparingTo(bd("557008.68"));
 
         AmortisationResult continued = poci.afterCure(
             balanceAtCure, AmortFixtures.remainingAt(DISBURSEMENT.plusMonths(6), EMI, 18));

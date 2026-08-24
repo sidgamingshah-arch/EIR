@@ -34,12 +34,31 @@ import java.util.Objects;
 public final class ExternalScheduleProjector implements CashflowProjector {
 
     private final List<Instalment> billed;
+    private final PenalChargeScreen.Attestation attestation;
 
     /**
      * @param billedSchedule the lines the lending system billed, in any order;
      *     split principal and interest lines sharing a date and ordinal are fine
      */
     public ExternalScheduleProjector(List<Instalment> billedSchedule) {
+        this(billedSchedule, null);
+    }
+
+    /**
+     * The production form: a billed schedule together with the attestation that it
+     * was screened for amounts excluded by Direction.
+     *
+     * <p>Without an attestation this projector still works and still produces
+     * arithmetically correct figures, but reports invariant PC-1 as unsatisfied —
+     * see {@link PenalChargeScreen}. A billed instalment is a single net amount
+     * with no components, so a penal charge the core banking system folded into an
+     * interest line is undetectable downstream of this boundary. The screening has
+     * to happen upstream, and the attestation is how the engine records that it
+     * did.
+     */
+    public ExternalScheduleProjector(
+        List<Instalment> billedSchedule, PenalChargeScreen.Attestation attestation) {
+        this.attestation = attestation;
         Objects.requireNonNull(billedSchedule, "billedSchedule");
         if (billedSchedule.isEmpty()) {
             throw new IllegalArgumentException(
@@ -73,7 +92,11 @@ public final class ExternalScheduleProjector implements CashflowProjector {
             }
             future.add(line.toCashFlow());
         }
-        return ProjectionSupport.assemble(terms, terms.principal(), fees, future, true);
+        return ProjectionSupport.assemble(
+            terms, terms.principal(), fees, future, true,
+            List.of(PenalChargeScreen.overBilledSchedule(
+                attestation == null ? "unattested feed" : attestation.sourceSystem(),
+                billed.size(), attestation)));
     }
 
     /** The billed lines, in date then period order. */

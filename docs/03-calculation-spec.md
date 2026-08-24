@@ -648,14 +648,37 @@ ACPIR and is the highest-value position for a wholesale bank to get right.
 
 Both reduce the balance; they diverge on the remaining schedule.
 
-- **Tenor reduced, EMI held.** Fewer future flows at the same amount. The original EIR still
-  discounts the remaining flows to the post-payment carrying amount closely enough that no
-  restatement is warranted; re-project and continue.
+- **Tenor reduced, EMI held.** Fewer future flows at the same amount. Re-project and continue; no
+  catch-up is booked.
 - **EMI reduced, tenor held.** The flow *pattern* changed, which is a revision of estimated
   receipts. Restate at the original EIR with a catch-up.
 
 Which applies is a contractual or borrower election carried **on the event**, never inferred from
 the resulting schedule.
+
+> **The reason is the election, not the size of the number.** An earlier draft of this section
+> justified booking nothing on a tenor reduction by asserting that the original EIR still discounts
+> the remaining flows to the post-payment carrying amount "closely enough that no restatement is
+> warranted". That is false, and measurably so. On the
+> [Case 1](reference-cases/case-01-emi-loan-with-fees.md) loan at month 12 with a 100,000
+> part-prepayment, discounting each variant's revised flows at the original EIR against the
+> post-payment carrying amount of 428,407.32 gives:
+>
+> | Variant | Revised schedule | PV at original EIR | Implied restatement |
+> |---|---|---:|---:|
+> | Tenor reduced | EMI held at 47,073.47, 10 periods (final stub 29,364.65) | 428,875.96 | **468.64** — *not booked* |
+> | EMI reduced | 12 periods held, EMI 38,188.60 | 428,673.22 | **265.90** — *booked* |
+>
+> The variant that books nothing produces the **larger** divergence. The unamortised fee is
+> untouched by the cash in both cases, and a tenor reduction leaves it *fewer* periods to amortise
+> over, so the gap widens rather than narrows.
+>
+> The engine's posture is nonetheless correct, for a different reason. The two variants are
+> different **contractual elections**, and B5.4.6 attaches to a revision of *estimated receipts*.
+> Holding the instalment and shortening the tenor consumes the schedule as written; re-sizing the
+> instalment changes the pattern of receipts and is therefore a revision. Justifying the treatment
+> by the magnitude of the number invites exactly the wrong question at audit — "how close is close
+> enough?" — when the answer turns on what the borrower elected.
 
 ### 6.6 Rollover versus new instrument
 
@@ -798,6 +821,12 @@ period close.
 | SL-2 | Σ journal debits = Σ journal credits, per run and per contract | Every posting |
 | DT-1 | Re-run of a closed period reproduces published figures bit-identically | Nightly replay |
 | TG-1 | Every Tier 3 population has a current, in-date equivalence test on file | Annual |
+
+Structure-specific invariants ST-3 … ST-12 extend this table and are stated in
+[09 § 7](09-cashflow-structures.md#7-structure-specific-invariants). ST-9 in particular constrains
+this section: a behavioural or option re-estimation on an instrument with a nil unamortised
+premium or discount must produce a catch-up of exactly zero, which is why catch-up processing keys
+on that balance rather than on an assumption having moved.
 
 INV-4 is the workhorse. The unamortised fee balance is not an independent accumulator — it is
 *defined* as the difference between the two legs, so it cannot drift from them. Case 1 at month 12:

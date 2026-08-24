@@ -59,7 +59,7 @@ which is deliberately built to be *policy-agnostic* so it can start now.
 
 ---
 
-## Phase 1 — Core engine (Sep–Nov 2026)
+## Phase 1 — Core engine (Sep–Nov 2026) — **DELIVERED**
 
 Everything here is independent of the unresolved policy positions, which is why it goes first.
 
@@ -72,8 +72,17 @@ Everything here is independent of the unresolved policy positions, which is why 
 | Reference cases | All 9 as a **merge gate** | [reference-cases](reference-cases/README.md) |
 | Invariant sweep | Property-based (jqwik) over generated contracts | [05 §6](05-architecture.md#6-testing-strategy) |
 
-**Exit gate:** all 9 reference cases pass to the paisa; the property-based sweep runs clean over
-100k generated contracts; the shifted-clock determinism test passes.
+**Exit gate: met.** All nine reference cases pass to the paisa; the property sweep runs clean over
+149,000 generated contracts with zero tolerance on IC-1, INV-3, INV-4 (at every period), ST-2,
+S3-2, CU-1 and CU-2; the shifted-clock determinism test passes.
+
+Integration found four defects a module-wide compile could not, because the four packages contained
+no cross-package imports — the build was green on arrival only because nothing referenced anything.
+The lesson is worth carrying into Phase 2: **a green build across independently-written packages is
+evidence of nothing until something exercises the seams.** Two further defects came from the
+reference cases themselves, both the same root cause — a derived or synthetic amount rounded to
+currency scale before entering a solve, which [03 § 1.2](03-calculation-spec.md#12-working-precision)
+forbids.
 
 > Deliberately excluded from Phase 1: anything requiring a settled policy position. The solver does
 > not need to know whether ESG ratchets reset or catch up; it needs to solve. Building the

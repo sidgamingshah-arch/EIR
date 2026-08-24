@@ -9,9 +9,12 @@ Recognition) Directions, 2026 — "**ACPIR**" — effective **1 April 2027**, le
 **31 March 2030**. IFRS 9 and Ind AS 109 are **interpretive sources only**, applied where ACPIR is
 silent.
 
-> **Status: design phase.** This repository currently contains the product and technical
-> specification. No implementation code has been written yet. Target stack Java 21 / Spring Boot —
-> see [ADR-0001](docs/adr/0001-modular-monolith.md).
+> **Status: Phase 1 implemented.** `eir-domain` and `eir-calc` are built and tested — the
+> policy-agnostic computation core: value types, day counts, the rate solver, twelve projectors,
+> amortisation, the ACPIR Stage 3 decomposition, the catch-up restatement, and event routing.
+> Java 21 / Maven; see [ADR-0001](docs/adr/0001-modular-monolith.md). Everything from
+> `eir-policy` outward is still specification only — see the
+> [roadmap](docs/08-roadmap.md).
 
 ---
 
@@ -96,6 +99,7 @@ Read in order on a first pass. Each document stands alone on a second.
 | 06 | [API specification](docs/06-api-spec.md) | REST surface and payloads |
 | 07 | [NFRs, controls and audit](docs/07-nfr-controls-audit.md) | Scale, precision, the 15 controls, auditability |
 | 08 | [Delivery roadmap](docs/08-roadmap.md) | Phasing against the statutory clock |
+| 09 | [Cash-flow structures](docs/09-cashflow-structures.md) | The compositional structure model — amortising, bullet, balloon, step, moratorium, tranched, revolving, and optionality |
 | — | [Reference cases](docs/reference-cases/README.md) | Nine worked cases; the acceptance fixtures |
 | — | [Decision records](docs/adr/) | Eight ADRs with rationale and rejected alternatives |
 | — | [Glossary](docs/glossary.md) | Terms and abbreviations |

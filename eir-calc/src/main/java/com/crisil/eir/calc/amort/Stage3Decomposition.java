@@ -107,11 +107,52 @@ public record Stage3Decomposition(
         Rate eir,
         Money contractualInterestBilled,
         Stage stage) {
+        return forAccrualPeriod(
+            grossCarryingAmount, allowance, eir, contractualInterestBilled, stage, BigDecimal.ONE);
+    }
+
+    /**
+     * The general form: one accrual period of length {@code accrualExponent},
+     * expressed in the rate's own periodicity.
+     *
+     * <p>The exponent exists because multiplying a balance by
+     * {@link Rate#periodic()} flat is only correct for a <em>whole</em> compounding
+     * period. Section 3.10 makes actual dating the default and the fallback, and
+     * under actual dating the rate is annual while a monthly accrual has an
+     * exponent near {@code 1/12}; a broken period has an exponent that is not a
+     * whole number under any convention. A flat multiply in either case computes
+     * the wrong gross-basis interest, the wrong ECL unwind and the wrong IFRS 9
+     * comparative.
+     *
+     * <p>Nothing downstream would catch that. ST-2, S3-1 and S3-2 are algebraic
+     * identities between figures this method derives from the same two inputs, so
+     * they hold no matter how wrong the accrual factor is — they check the
+     * <em>decomposition</em>, never the <em>magnitude</em>. Hence the exponent is a
+     * required parameter of the general form rather than an optional refinement,
+     * and hence {@link #accrualConsistency} cross-checks the result against the
+     * roll-forward's own accretion rather than trusting it.
+     *
+     * @param accrualExponent the accrual length in the rate's periodicity —
+     *     {@link BigDecimal#ONE} for a whole period, {@code delta tau} from the
+     *     roll-forward otherwise. Must be positive.
+     */
+    public static Stage3Decomposition forAccrualPeriod(
+        Money grossCarryingAmount,
+        Money allowance,
+        Rate eir,
+        Money contractualInterestBilled,
+        Stage stage,
+        BigDecimal accrualExponent) {
         Objects.requireNonNull(grossCarryingAmount, "grossCarryingAmount");
         Objects.requireNonNull(allowance, "allowance");
         Objects.requireNonNull(eir, "eir");
         Objects.requireNonNull(contractualInterestBilled, "contractualInterestBilled");
         Objects.requireNonNull(stage, "stage");
+        Objects.requireNonNull(accrualExponent, "accrualExponent");
+        if (accrualExponent.signum() <= 0) {
+            throw new IllegalArgumentException(
+                "accrual exponent must be positive, got " + accrualExponent.toPlainString());
+        }
         if (!allowance.currency().equals(grossCarryingAmount.currency())
             || !contractualInterestBilled.currency().equals(grossCarryingAmount.currency())) {
             throw new IllegalArgumentException("gross carrying amount, allowance and billed interest must agree"
@@ -120,10 +161,22 @@ public record Stage3Decomposition(
         if (allowance.isNegative()) {
             throw new IllegalArgumentException("allowance must not be negative, got " + allowance);
         }
+        if (allowance.compareTo(grossCarryingAmount) > 0) {
+            throw new IllegalArgumentException(
+                "allowance " + allowance + " exceeds the gross carrying amount " + grossCarryingAmount
+                    + "; every control in this method is an algebraic identity between figures derived"
+                    + " from the same two inputs, so an allowance above the balance — or the two"
+                    + " arguments supplied the wrong way round — would yield a negative amortised-cost"
+                    + " interest and an inflated shadow unwind with ST-2, S3-1 and S3-2 all reporting"
+                    + " satisfied. The bound is checked here because no downstream control can catch it.");
+        }
 
-        BigDecimal periodic = eir.periodic();
-        BigDecimal gross = grossCarryingAmount.amount().multiply(periodic, Precision.WORKING);
-        BigDecimal unwind = allowance.amount().multiply(periodic, Precision.WORKING);
+        // The same accretion the roll-forward uses, so the Stage 3 figures and the
+        // gross-basis ledger cannot diverge. For a whole period this reduces to the
+        // periodic rate exactly, on BigDecimal's exact integer power path.
+        BigDecimal accretion = AmortisationEngine.accretion(eir.periodic(), accrualExponent);
+        BigDecimal gross = grossCarryingAmount.amount().multiply(accretion, Precision.WORKING);
+        BigDecimal unwind = allowance.amount().multiply(accretion, Precision.WORKING);
         BigDecimal net = gross.subtract(unwind);
 
         Money grossInterest = Money.of(gross, grossCarryingAmount.currency());
@@ -135,6 +188,7 @@ public record Stage3Decomposition(
 
         List<InvariantResult> invariants = new ArrayList<>();
         invariants.add(stageTwoIdentity(grossInterest, netInterest, unwindAmount));
+        invariants.add(accrualConsistency(grossCarryingAmount, eir, accrualExponent, grossInterest));
         if (suppressed) {
             invariants.add(nilRecognition(recognised));
             invariants.add(InvariantResult.ofMoney(
@@ -278,5 +332,27 @@ public record Stage3Decomposition(
             result.orThrow();
         }
         return this;
+    }
+
+    /**
+     * Cross-checks the gross-basis figure against the roll-forward's own accretion.
+     *
+     * <p>ST-2 and its siblings are identities between derived halves and therefore
+     * cannot detect a wrong accrual factor. This is the assertion that can: it
+     * recomputes the gross-basis interest from the balance, the rate and the
+     * accrual length independently of the decomposition, and compares. It exists
+     * because a Stage 3 figure that disagrees with the ledger it is supposed to
+     * decompose is wrong even when every internal identity holds.
+     */
+    static InvariantResult accrualConsistency(
+        Money grossCarryingAmount, Rate eir, BigDecimal accrualExponent, Money grossInterest) {
+        Money expected = grossCarryingAmount.times(
+            AmortisationEngine.accretion(eir.periodic(), accrualExponent));
+        return InvariantResult.ofMoney(
+            InvariantId.ST_2,
+            "Stage 3 gross-basis interest agrees with the roll-forward accretion over an accrual"
+                + " length of " + accrualExponent.toPlainString() + " period(s)",
+            expected,
+            grossInterest);
     }
 }

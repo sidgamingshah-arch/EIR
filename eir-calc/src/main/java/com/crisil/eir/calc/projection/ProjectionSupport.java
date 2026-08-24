@@ -3,6 +3,7 @@ package com.crisil.eir.calc.projection;
 import com.crisil.eir.domain.CashFlow;
 import com.crisil.eir.domain.FlowKind;
 import com.crisil.eir.domain.FlowVector;
+import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Rate;
 import com.crisil.eir.domain.TimeConvention;
@@ -118,6 +119,27 @@ final class ProjectionSupport {
         List<CashFlow> futureFlows,
         boolean behaviouralLife) {
 
+        return assemble(terms, amountAdvanced, fees, futureFlows, behaviouralLife, List.of());
+    }
+
+    /**
+     * As {@link #assemble}, with additional invariant assertions from the caller.
+     *
+     * <p>Used by the externally-supplied-schedule route, which carries a PC-1
+     * assertion of its own: a billed line arrives as a net amount with no
+     * components, so screening for amounts excluded by Direction cannot happen at
+     * this boundary and has to be attested upstream. Both PC-1 assertions are
+     * retained rather than one replacing the other, so the projection is clean only
+     * where the fee set is clean <em>and</em> the feed was screened.
+     */
+    static ProjectionResult assemble(
+        ContractTerms terms,
+        Money amountAdvanced,
+        List<FeePosting> fees,
+        List<CashFlow> futureFlows,
+        boolean behaviouralLife,
+        List<InvariantResult> additionalInvariants) {
+
         List<CashFlow> all = new ArrayList<>(inceptionLeg(terms, amountAdvanced, fees));
         all.addAll(futureFlows);
         FlowVector contractual = FlowVector.of(terms.disbursementDate(), terms.currency(), all)
@@ -128,7 +150,11 @@ final class ProjectionSupport {
         TimeConvention convention = convention(terms, contractual, expected);
         Money carryingAmount = initialCarryingAmount(
             amountAdvanced, netIntegralFee(fees, terms.currency()));
-        return ProjectionResult.of(contractual, expected, carryingAmount, convention, !truncate);
+        List<InvariantResult> invariants = new ArrayList<>();
+        invariants.add(PenalChargeScreen.overFeePostings(fees));
+        invariants.addAll(additionalInvariants);
+        return new ProjectionResult(
+            contractual, expected, carryingAmount, convention, !truncate, List.copyOf(invariants));
     }
 
     /**
