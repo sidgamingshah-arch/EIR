@@ -155,7 +155,7 @@ class BulletAndDiscountProjectorTest {
 
         assertThat(discount.faceValue(bond).amount()).isEqualByComparingTo(bd("1000000.00"));
         assertThat(discount.issuePrice(bond).atPresentationScale().amount())
-            .isEqualByComparingTo(bd("315241.70"));
+            .isEqualByComparingTo(bd("315241.7049658902158585893826"));
         assertThat(discount.discountToAccrete(bond).atPresentationScale().amount())
             .isEqualByComparingTo(bd("684758.30"));
         // The price is DERIVED from a quoted yield, so it is an intermediate and is not

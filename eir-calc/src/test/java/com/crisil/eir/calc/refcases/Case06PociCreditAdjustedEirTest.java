@@ -48,7 +48,20 @@ class Case06PociCreditAdjustedEirTest {
     private static final Money PRICE = Money.inr("700000");
 
     /** 80% of the contractual receipt: what the pool is expected to pay. */
-    private static final Money EXPECTED_RECEIPT = Money.inr("37658.78");
+    /**
+     * 80% of the billed EMI, carried at working precision.
+     *
+     * <p>NOT rounded. The expected receipt is a derived estimate of collections, not a
+     * billed amount — nobody is ever billed 80% of an instalment — so no cash event
+     * attaches currency scale and calc-spec 1.2 forbids rounding an intermediate before
+     * it enters a solve. Rounding it shifts the rate to 0.0215405325.
+     *
+     * <p>See the note in docs/reference-cases/case-06-poci-credit-adjusted-eir.md. This
+     * fixture was previously stated two ways in the repo — this merge-gate test held the
+     * rounded value while the document held the unrounded one — which is exactly how a
+     * regression becomes a specification.
+     */
+    private static final Money EXPECTED_RECEIPT = Money.inr("37658.7760");
 
     private final BracketedNewtonSolver solver = new BracketedNewtonSolver();
 
@@ -68,24 +81,29 @@ class Case06PociCreditAdjustedEirTest {
     @Test
     @DisplayName("the expected monthly receipt is 80% of the 47,073.47 contractual EMI")
     void theExpectedReceipt() {
+        // carried at working precision — this is the figure that enters the solve
+        assertThat(CASE1_EMI.times(bd("0.80")).amount())
+            .as("contractual receipt less the 20% expected loss, as carried")
+            .isEqualByComparingTo(bd("37658.7760"));
+        // and its presentation, which is what the fixture's cash column shows
         assertThat(paise(CASE1_EMI.times(bd("0.80"))))
-            .as("contractual receipt less the 20% expected loss")
+            .as("contractual receipt less the 20% expected loss, as presented")
             .isEqualByComparingTo(bd("37658.78"));
         assertThat(paise(EXPECTED_RECEIPT)).isEqualByComparingTo(bd("37658.78"));
     }
 
     @Test
-    @DisplayName("the credit-adjusted EIR is 2.15405325% per month, 29.141920% effective p.a.")
+    @DisplayName("the credit-adjusted EIR is 2.15405231% per month, 29.141905% effective p.a.")
     void theCreditAdjustedRateIsSolvedOnExpectedFlows() {
         SolveResult result = solveExpected();
 
         assertThat(result.status()).isEqualTo(SolveStatus.SOLVED);
         assertThat(periodicPercent(result.rateOrThrow()))
             .as("credit-adjusted EIR per month")
-            .isEqualByComparingTo(bd("2.15405325"));
+            .isEqualByComparingTo(bd("2.15405231"));
         assertThat(effectiveAnnualPercent(result.rateOrThrow()))
             .as("credit-adjusted EIR effective p.a.")
-            .isEqualByComparingTo(bd("29.141920"));
+            .isEqualByComparingTo(bd("29.141905"));
     }
 
     @Test
@@ -108,7 +126,7 @@ class Case06PociCreditAdjustedEirTest {
             solveExpected().rateOrThrow(), expectedFlows(), MONTHLY);
         BigDecimal adjustmentBps = poci.creditAdjustmentBps(naive.rateOrThrow());
         assertThat(adjustmentBps)
-            .as("64.703664% less 29.141920%, in basis points")
+            .as("64.703664% less 29.141905%, in basis points")
             .isGreaterThan(BigDecimal.ZERO);
         assertThat(adjustmentBps.setScale(0, java.math.RoundingMode.HALF_UP))
             .isEqualByComparingTo(bd("3556"));
@@ -182,7 +200,7 @@ class Case06PociCreditAdjustedEirTest {
         assertThat(paise(row.eirInterest())).as("period %d interest", period)
             .isEqualByComparingTo(bd(interest));
         assertThat(paise(row.cashReceived())).as("period %d cash", period)
-            .isEqualByComparingTo(bd("37658.78"));
+            .isEqualByComparingTo(bd("37658.7760"));
         assertThat(paise(row.closingGca())).as("period %d closing", period)
             .isEqualByComparingTo(bd(closing));
     }

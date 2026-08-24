@@ -133,7 +133,7 @@ class AnnuityProjectorTest {
         // month-12 figure as the Case 8 notional redemption and the Case 1 INV-4 check.
         assertThat(terminal.kind()).isEqualTo(FlowKind.EXPECTED_PREPAYMENT);
         assertThat(terminal.periodIndex()).isEqualTo(12);
-        assertThat(terminal.amount().amount()).isEqualByComparingTo(bd("529815.61"));
+        assertThat(terminal.amount().amount()).isEqualByComparingTo(bd("529815.6050153324520158584563"));
         assertThat(result.initialCarryingAmount().amount()).isEqualByComparingTo(bd("995000.00"));
     }
 

@@ -32,13 +32,25 @@ import java.util.Objects;
  * <p><b>The two consumers present the result differently, and deliberately.</b> The
  * B5.4.4 notional redemption takes {@link #after} at working precision; behavioural
  * truncation takes {@link #presentedAfter}. The line between them is whether the
- * flow models cash. A notional redemption models an instrument that does <em>not</em>
- * actually mature at the reset — nobody is ever billed it and no settlement occurs —
- * so no cash event attaches currency scale to it, and rounding it is rounding an
- * intermediate. An expected prepayment models the borrower actually paying the
- * balance off, which is a settlement in cash at currency scale; the same reasoning
- * makes reference case 6's expected receipt of 37,658.78 the rounded figure rather
- * than the unrounded 37,658.776.
+ * flow is a BILLED amount or a PROJECTED one.
+ *
+ * <p>Neither of the two synthetic terminal flows is billed. A notional redemption
+ * models an instrument that does not actually mature at the reset — nobody is ever
+ * billed it and no settlement occurs. An expected prepayment models a settlement
+ * that may occur, but the <em>amount</em> is a projected balance, not a figure any
+ * borrower has been charged. Both are intermediates entering a solve, so
+ * calculation specification 1.2 applies to both and {@link #after} is the right
+ * accessor for both.
+ *
+ * <p>An earlier version of this note argued the other way for the expected
+ * prepayment, on the ground that a prepayment is a cash settlement, and cited
+ * reference case 6's expected receipt as support. That citation was wrong and is
+ * worth recording as an error rather than quietly dropping: case 6's receipt is 80%
+ * of an instalment — a statistical expectation of partial collection that no single
+ * payment ever equals — so it is not an instance of the settlement category at all.
+ * The case itself is explicit that the receipt is carried unrounded. Two structurally
+ * identical synthetic terminal flows following two different rounding rules was the
+ * tell.
  *
  * <p>The distinction is worth stating because it is invisible at presentation scale —
  * both read 529,815.61 at month 12 on the Case 1 loan, which is the cross-check

@@ -67,7 +67,7 @@ final class ProjectionSupport {
     static List<CashFlow> inceptionLeg(ContractTerms terms, Money amountAdvanced, List<FeePosting> fees) {
         List<CashFlow> flows = new ArrayList<>();
         flows.add(CashFlow.of(
-            terms.disbursementDate(), 0, amountAdvanced.negate().atPresentationScale(), FlowKind.DISBURSEMENT));
+            terms.disbursementDate(), 0, amountAdvanced.negate(), FlowKind.DISBURSEMENT));
         for (FeePosting fee : fees) {
             if (!fee.entersInitialCarryingAmount() || fee.amount().isZero()) {
                 continue;
@@ -76,7 +76,7 @@ final class ProjectionSupport {
                 ? FlowKind.INTEGRAL_FEE_RECEIVED
                 : FlowKind.INTEGRAL_COST_PAID;
             flows.add(CashFlow.of(
-                terms.disbursementDate(), 0, fee.amount().atPresentationScale(), kind));
+                terms.disbursementDate(), 0, fee.amount(), kind));
         }
         return flows;
     }
@@ -91,7 +91,7 @@ final class ProjectionSupport {
      * exceeds the contractual rate (invariant INV-2).
      */
     static Money initialCarryingAmount(Money amountAdvanced, Money netIntegralFee) {
-        return amountAdvanced.minus(netIntegralFee).atPresentationScale();
+        return amountAdvanced.minus(netIntegralFee);
     }
 
     /** A run of equal instalments over an inclusive period range. */
@@ -180,7 +180,7 @@ final class ProjectionSupport {
      */
     static FlowVector expectedLeg(ContractTerms terms, FlowVector contractual, Money openingBalance) {
         int life = terms.expectedLifePeriods();
-        Money outstanding = ContractualBalance.presentedAfter(
+        Money outstanding = ContractualBalance.after(
             openingBalance, terms.periodicRate(), contractual, life);
         List<CashFlow> kept = new ArrayList<>();
         for (CashFlow flow : contractual.flows()) {
