@@ -8,6 +8,9 @@ import static com.crisil.eir.calc.refcases.ReferenceCaseFixtures.paise;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.crisil.eir.calc.amort.DerecognitionCalculator;
+import com.crisil.eir.calc.amort.DerecognitionReason;
+import com.crisil.eir.calc.amort.DerecognitionResult;
 import com.crisil.eir.calc.amort.TwoLegResult;
 import com.crisil.eir.calc.projection.FeePosting;
 import com.crisil.eir.calc.projection.ProjectionResult;
@@ -16,6 +19,7 @@ import com.crisil.eir.domain.CashFlow;
 import com.crisil.eir.domain.FeeClassification;
 import com.crisil.eir.domain.FlowKind;
 import com.crisil.eir.domain.FlowVector;
+import com.crisil.eir.domain.InvariantId;
 import com.crisil.eir.domain.Money;
 import java.util.ArrayList;
 import java.util.List;
@@ -84,21 +88,99 @@ class Case02FullPrepaymentTest {
     @Test
     @DisplayName("derecognition: 529,815.61 received less 528,407.32 derecognised is a 1,408.29 gain to P&L")
     void theAcceleratedFeeIsAGainOnDerecognition() {
-        Money cashReceived = case1.contractualLeg().row(12).closingGca();
-        Money grossCarryingAmountDerecognised = case1.eirLeg().row(12).closingGca();
+        // Through the engine, not computed here. This assertion used to read
+        // cashReceived.minus(grossCarryingAmount) in the test body — right arithmetic, and
+        // as a merge gate it gated nothing, because no derecognition routine existed for
+        // it to disagree with. A reference case that computes its own answer states a fact
+        // about subtraction rather than testing an implementation.
+        DerecognitionResult closure = DerecognitionCalculator.onClosure(
+            case1.contractualLeg().row(12).closingGca(),
+            case1.eirLeg().row(12).closingGca(),
+            case1.twoLeg().unamortisedFeeAt(12));
 
-        Money gain = cashReceived.minus(grossCarryingAmountDerecognised);
-
-        assertThat(paise(gain))
+        assertThat(closure.reason()).isEqualTo(DerecognitionReason.CLOSURE);
+        assertThat(paise(closure.gainOrLoss()))
             .as("gain to P&L on closure — accelerated fee, not a suspense balance")
             .isEqualByComparingTo(bd("1408.29"));
-        assertThat(gain.isPositive())
+        assertThat(closure.isGain())
             .as("a net fee received is income, so early closure brings income forward")
             .isTrue();
-        // And it is the same number the roll-forward carries, not a second computation of
-        // it: INV-4 defines the unamortised fee as exactly this leg difference.
-        assertThat(paise(gain))
+        assertThat(closure.affectsInterestIncome())
+            .as("a closure gain is this engine's to recognise, unlike a write-off's loss")
+            .isTrue();
+
+        // The position is extinguished, not left with a residual. A routine that returns a
+        // gain while leaving a balance behind is precisely the defect this case names: a
+        // residual written to suspense that then never clears.
+        assertThat(closure.carryingAmountAfter().isZero()).isTrue();
+
+        // And INV-4 is asserted by the engine rather than restated here: the gain it
+        // computed IS the unamortised fee the sub-ledger reports, so two legs that had
+        // drifted apart could not survive this event.
+        assertThat(closure.isClean()).isTrue();
+        assertThat(closure.invariants())
+            .anyMatch(result -> result.id() == InvariantId.INV_4 && result.satisfied());
+        assertThat(paise(closure.gainOrLoss()))
             .isEqualByComparingTo(paise(case1.twoLeg().unamortisedFeeAt(12)));
+    }
+
+    @Test
+    @DisplayName("a drifted fee balance cannot pass closure: INV-4 fails and the result is not clean")
+    void aDriftedFeeBalanceBreachesInvariantFourOnClosure() {
+        // The reason INV-4 is worth asserting at the moment of derecognition rather than
+        // trusting it from the roll-forward. The fee balance reaching the engine comes from
+        // the sub-ledger; if it has drifted from the gap between the legs, closure is the
+        // last point at which anything can notice, because after it both legs are gone.
+        DerecognitionResult drifted = DerecognitionCalculator.onClosure(
+            case1.contractualLeg().row(12).closingGca(),
+            case1.eirLeg().row(12).closingGca(),
+            case1.twoLeg().unamortisedFeeAt(12).plus(Money.inr("0.50")));
+
+        assertThat(drifted.isClean()).isFalse();
+        assertThat(drifted.breaches()).hasSize(1);
+        assertThat(drifted.breaches().get(0).id()).isEqualTo(InvariantId.INV_4);
+        // The gain itself is still the leg difference — the engine reports the arithmetic
+        // it can verify and flags the figure it was handed, rather than adopting it.
+        assertThat(paise(drifted.gainOrLoss())).isEqualByComparingTo(bd("1408.29"));
+    }
+
+    @Test
+    @DisplayName("a write-off removes the balance but its loss is not this engine's to recognise")
+    void aWriteOffIsRemovedWithoutBeingRecognisedHere() {
+        // The boundary of ADR's ECL split, expressed in code. The balance goes to zero on
+        // the same mechanic as a closure, so SL-1 continues to tie; the loss is measured
+        // against the allowance the impairment engine holds (ACPIR 6(12)), so posting it
+        // to a fee or interest line here would count it twice.
+        DerecognitionResult writeOff = DerecognitionCalculator.onWriteOff(
+            Money.zero(Money.INR), case1.eirLeg().row(12).closingGca());
+
+        assertThat(paise(writeOff.gainOrLoss())).isEqualByComparingTo(bd("-528407.32"));
+        assertThat(writeOff.isLoss()).isTrue();
+        assertThat(writeOff.affectsInterestIncome())
+            .as("the allowance this consumes is not held by this engine")
+            .isFalse();
+        assertThat(writeOff.carryingAmountAfter().isZero()).isTrue();
+        // No INV-4: the consideration is a recovery, not a contractual balance, so the
+        // difference is not an unamortised fee and asserting it would fail on every
+        // sound write-off.
+        assertThat(writeOff.invariants()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a substantial modification derecognises at carrying amount against the new asset's fair value")
+    void aSubstantialModificationRemeasuresRatherThanAcceleratingAFee() {
+        // Same mechanic, different meaning: the consideration is a fair value, so the
+        // difference is a remeasurement rather than a deferred fee. INV-4 is deliberately
+        // not asserted — it would fail on every sound substantial modification, which is
+        // why these are separate methods and not one method with a flag.
+        Money carrying = case1.eirLeg().row(12).closingGca();
+        DerecognitionResult modified = DerecognitionCalculator.onSubstantialModification(
+            carrying.minus(Money.inr("25000")), carrying);
+
+        assertThat(modified.reason()).isEqualTo(DerecognitionReason.SUBSTANTIAL_MODIFICATION);
+        assertThat(paise(modified.gainOrLoss())).isEqualByComparingTo(bd("-25000.00"));
+        assertThat(modified.affectsInterestIncome()).isTrue();
+        assertThat(modified.invariants()).isEmpty();
     }
 
     @Test
