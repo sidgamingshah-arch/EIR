@@ -72,9 +72,32 @@ Everything here is independent of the unresolved policy positions, which is why 
 | Reference cases | All 9 as a **merge gate** | [reference-cases](reference-cases/README.md) |
 | Invariant sweep | Property-based (jqwik) over generated contracts | [05 §6](05-architecture.md#6-testing-strategy) |
 
-**Exit gate: met.** All nine reference cases pass to the paisa; the property sweep runs clean over
-149,000 generated contracts with zero tolerance on IC-1, INV-3, INV-4 (at every period), ST-2,
-S3-2, CU-1 and CU-2; the shifted-clock determinism test passes.
+**Exit gate: met.** All nine reference cases pass to the paisa; the property sweep runs clean with
+zero tolerance on IC-1, INV-3, INV-4 (at every period), ST-2, S3-2, CU-1 and CU-2; the
+shifted-clock determinism test passes.
+
+The sweep's size is worth stating accurately, because this line previously read "149,000 generated
+contracts" and that was two claims too strong. 148,300 is the total **property tries**, and most of
+them are not contracts:
+
+| Property class | Tries | What each try is |
+|---|---:|---|
+| `RateOrderingProperties` | 22,000 | a generated contract, projected, solved and amortised |
+| `ReconciliationSweep` | 20,000 | a generated contract, projected, solved and amortised |
+| `NumericProperties` | 60,000 | a `BigDecimal` or a date pair — precision and day-count laws |
+| `SolverProperties` | 20,000 | a flow vector handed straight to the solver |
+| `StageAndCatchUpProperties` | 25,000 | a Stage 3 decomposition or a catch-up from supplied balances |
+| `Stage3IdentityProperty`, `SolverRoundTripProperties` | 1,300 | a decomposition or a single vector |
+
+So **42,000** tries take a contract through the whole pipeline; the other 106,300 exercise a stage of
+it. Both numbers are worth having and only one of them is the one that sentence was claiming.
+
+Every property except the three in `SolverRoundTripProperties` is **fixed-seeded**, which makes the
+sweep a large deterministic fixture rather than a random search. That is deliberate: a ledger
+engine's tests are also its replay evidence (invariant DT-1), and a failing case nobody can reproduce
+from the test source is worth less than one they can. But it means the sweep does not widen with
+repeated runs, and new coverage has to come from new generators or new seeds rather than from running
+it again.
 
 Integration found four defects a module-wide compile could not, because the four packages contained
 no cross-package imports — the build was green on arrival only because nothing referenced anything.

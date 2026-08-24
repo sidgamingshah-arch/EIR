@@ -11,6 +11,7 @@ import static com.crisil.eir.calc.refcases.ReferenceCaseFixtures.paise;
 import static com.crisil.eir.calc.refcases.ReferenceCaseFixtures.periodicPercent;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.crisil.eir.calc.Discounting;
 import com.crisil.eir.calc.amort.AmortisationResult;
 import com.crisil.eir.calc.amort.AmortisationRow;
 import com.crisil.eir.calc.amort.TwoLegResult;
@@ -18,11 +19,13 @@ import com.crisil.eir.calc.amort.TwoLegRow;
 import com.crisil.eir.calc.projection.AnnuityProjector;
 import com.crisil.eir.calc.projection.ProjectionResult;
 import com.crisil.eir.calc.solver.SolveStatus;
+import com.crisil.eir.calc.solver.SolverTolerance;
 import com.crisil.eir.domain.InvariantId;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Rate;
 import java.math.BigDecimal;
+import java.math.MathContext;
 import java.math.RoundingMode;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
@@ -119,15 +122,48 @@ class Case01EmiLoanWithFeesTest {
     }
 
     @Test
-    @DisplayName("the residual at the stored 12dp rate is below a paisa")
+    @DisplayName("the residual at the stored 12dp rate is 2.85e-6, which is half the rounding floor and 3,504x inside a paisa")
     void theStoredRateReproducesTheTarget() {
         // The published rate must reproduce the published amortisation, so what matters is
         // the residual at the *stored* twelve-place rate rather than at the raw solved
-        // value. The fixture prints it as 0E-12; at presentation scale it is nil.
+        // value. At the raw root |f| is 7.4e-33; rounding the rate to twelve places moves
+        // it by 2.41e-13 and brings the residual up to 2.85e-6. The fixture prints the
+        // rate as 0E-12 and the residual is nil at presentation scale.
         BigDecimal residual = case1.solve().residualAtStoredRate();
         assertThat(residual.abs())
             .as("|f(r)| at the stored rate must not reach a paisa of the 995,000 target")
             .isLessThan(bd("0.01"));
+
+        // That bound alone is 3,504 times the residual's actual magnitude, so on its own it
+        // would pass through a solver regression three orders of magnitude wide. The bound
+        // that means something is the rounding floor: rounding the rate to RATE_SCALE can
+        // displace it by at most half a unit in the last place, so the residual it leaves
+        // cannot exceed |f'| * 1e-12 / 2. Here that is 5.91e-6 against an actual 2.85e-6 —
+        // the displacement came out at 2.41e-13 against a half-ULP of 5e-13, so the
+        // residual sits at 48% of its ceiling, which is where a correctly rounded rate
+        // should sit. A solve that stopped short of the root would breach this; a solve
+        // that merely rounded would not.
+        BigDecimal slope = Discounting.derivative(case1.eir().periodic(),
+            case1.projection().expected(), case1.projection().recommendedConvention());
+        BigDecimal roundingFloor = SolverTolerance.standard().attainableResidual(slope);
+        assertThat(roundingFloor.round(new MathContext(3)))
+            .as("the ceiling a 12dp rate can leave on this vector")
+            .isEqualByComparingTo(bd("0.00000591"));
+        assertThat(residual.abs())
+            .as("the residual must sit under the rounding floor, not merely under a paisa")
+            .isLessThan(roundingFloor);
+        assertThat(residual.abs().round(new MathContext(3)))
+            .as("and it is this figure; it moves only if the discounting does")
+            .isEqualByComparingTo(bd("0.00000285"));
+
+        // And the tolerance the solver was actually held to is nowhere near either: 1e-10
+        // on a 995,000 target. It is met at working precision and missed by four orders of
+        // magnitude once the rate is rounded for publication, which is the ordinary case
+        // on every instrument in the book and is why SOLVED does not turn on it
+        // (03 §4.2.1).
+        assertThat(residual.abs())
+            .as("the published residual misses tol_abs, as it does on every real instrument")
+            .isGreaterThan(SolverTolerance.standard().absoluteFor(bd("995000")));
     }
 
     // -------------------------------------------------------- the roll-forward
