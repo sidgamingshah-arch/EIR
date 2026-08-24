@@ -380,8 +380,13 @@ class ScheduleBuilderTest {
             // 54,386.1241 -> 54,386.12. Stepping the unrounded 40,861.104010 instead gives
             // 49,441.94 and 54,386.13, and nobody was ever billed the unrounded base for the
             // step to be a percentage of. The fixture governs (09 preamble).
-            assertThat(ladder.rung(13).total().amount()).isNotEqualByComparingTo(bd("49441.94"));
-            assertThat(ladder.rung(24).total().amount()).isNotEqualByComparingTo(bd("54386.13"));
+            //
+            // Rung 24 is stated positively rather than as "not 54,386.13". The negative form
+            // stood here and passed on every wrong value but one — including a ladder that
+            // stopped stepping after period 19, or that mis-sized the final band — and the
+            // companion "rung 13 is not 49,441.94" could not fail at all, rung 13 having
+            // been pinned to 49,441.93 nine lines above.
+            assertThat(ladder.rung(24).total().amount()).isEqualByComparingTo(bd("54386.12"));
 
             // 6 x (40,861.10 + 44,947.21 + 49,441.93 + 54,386.12) = 6 x 189,636.36.
             assertThat(ladder.totalCash().amount()).isEqualByComparingTo(bd("1137818.16"));
@@ -921,8 +926,21 @@ class ScheduleBuilderTest {
             // paise; what is left is 0.000031 and unpresentable rather than untreated.
             assertThat(ladder.rung(23).total().amount()).isEqualByComparingTo(bd("47073.47"));
             assertThat(ladder.rung(24).total().amount()).isEqualByComparingTo(bd("47073.53"));
-            assertThat(terminalResidue(ladder).amount().abs())
-                .isLessThan(bd("0.01"));
+
+            // The residue that is left, signed and to eight places rather than bounded by a
+            // paise. Derivation, independent of the plug: the policy moves the BILL and
+            // never the balance path, so periods 1-23 bill the same 47,073.47 as under
+            // LMS_AUTHORITATIVE and the final rung's principal + interest is the same
+            // 47,073.47 + 0.059969152489 that test derives from
+            // 1,000,000 x 1.01^24 − 47,073.47 x ((1.01^24 − 1) / 0.01). The plug bills the
+            // paise-rounded 47,073.53, so what is left is exactly the rounding-up:
+            //   0.059969152489 − 0.06 = −0.000030847511.
+            // The sign is the content. An `.abs() < 0.01` bound stood here, 324x the figure
+            // it bounded, and it admitted a plug that left 0.009 outstanding — 292x the
+            // correct residue — in EITHER direction, and over-collection is what the
+            // sibling anOverCollectingResidueReducesTheFinalInstalment exists to refuse.
+            assertThat(Precision.round(terminalResidue(ladder).amount(), 8))
+                .isEqualByComparingTo(bd("-0.00003085"));
 
             // The plug moved the bill, not the balance: the closing balance is still exactly
             // zero and the principal column is untouched, which is what keeps the residue a
@@ -945,7 +963,21 @@ class ScheduleBuilderTest {
             assertThat(ladder.rung(1).total().amount()).isEqualByComparingTo(bd("47073.52"));
             assertThat(ladder.rung(2).total().amount()).isEqualByComparingTo(bd("47073.47"));
             assertThat(ladder.rung(24).total().amount()).isEqualByComparingTo(bd("47073.47"));
-            assertThat(terminalResidue(ladder).amount().abs()).isLessThan(bd("0.01"));
+
+            // And what the extra 0.05 billed in period 1 leaves behind, signed and exact.
+            // The residue any billing pattern leaves is
+            //   1,000,000 x 1.01^24 − sum(billed_t x 1.01^(24−t)),
+            // so relative to LMS_AUTHORITATIVE's 0.059969152489 this schedule collects
+            // 0.05 extra 23 periods before maturity:
+            //   0.059969152489 − 0.05 x 1.01^23
+            //     = 0.059969152489 − 0.05 x 1.257163018348 = −0.002888998428.
+            // Negative, and pinned rather than bounded. An `.abs() < 0.01` bound stood
+            // here — 3.5x the figure it bounded, and blind to the sign, so it admitted a
+            // plug that over-collected by three times as much as this one under-collects.
+            // Anything that changes which periods carry the residue, or how much of it they
+            // carry, moves this figure; the exact form says so and the bound did not.
+            assertThat(Precision.round(terminalResidue(ladder).amount(), 8))
+                .isEqualByComparingTo(bd("-0.00288900"));
         }
 
         @Test
@@ -973,7 +1005,19 @@ class ScheduleBuilderTest {
             assertThat(ladder.rung(22).total().amount()).isEqualByComparingTo(bd("47073.49"));
             assertThat(ladder.rung(23).total().amount()).isEqualByComparingTo(bd("47073.49"));
             assertThat(ladder.rung(24).total().amount()).isEqualByComparingTo(bd("47073.49"));
-            assertThat(terminalResidue(ladder).amount().abs()).isLessThan(bd("0.01"));
+
+            // The residue the three-period spread leaves, signed and exact. Same
+            // derivation as the other two policies — 1,000,000 x 1.01^24 less each billed
+            // instalment compounded to period 24 — and here three periods each bill 0.02
+            // more than the 47,073.47 base:
+            //   0.059969152489 − 0.02 x (1.01^2 + 1.01 + 1)
+            //     = 0.059969152489 − 0.02 x 3.0301 = −0.000632847511.
+            // Which is what distinguishes a spread from a plug: FINAL_PERIOD_PLUG leaves
+            // −0.00003085 on the same loan, twenty times smaller, so a SPREAD_LAST_N that
+            // quietly ran as a one-period plug would move this figure by a factor of
+            // twenty. The `.abs() < 0.01` bound that stood here admitted both.
+            assertThat(Precision.round(terminalResidue(ladder).amount(), 8))
+                .isEqualByComparingTo(bd("-0.00063285"));
 
             // A width past the number of instalments is a misconfiguration, not something to
             // clamp: it would spread over instalments that do not exist.
@@ -1243,8 +1287,12 @@ class ScheduleBuilderTest {
 
             // Applying period 1's rate uniformly would bill the 47,073.47 of the flat 1% loan
             // and under-collect the whole coupon step — a schedule that looks right and bills
-            // the wrong interest for half the life.
-            assertThat(ladder.rung(1).total().amount()).isNotEqualByComparingTo(bd("47073.47"));
+            // the wrong interest for half the life. That figure is excluded by the equality
+            // above, which is why the `isNotEqualByComparingTo(47,073.47)` line that stood
+            // here was removed: it restated the same accessor on the same ladder and no
+            // input could satisfy one and break the other. The independent statement about
+            // the step is the period-13 interest below, which a uniformly applied period-1
+            // rate moves and which the instalment assertion does not constrain.
 
             // Each period's interest is that period's own rate on that period's balance. The
             // balance after twelve bills of 47,421.67 at 1% is 525,399.5575, and period 13
@@ -1470,23 +1518,23 @@ class ScheduleBuilderTest {
         }
 
         @Test
-        @Disabled("DEFECT: InterestServicing.DeferredSimple is silently discarded whenever the"
-            + " moratorium kind is not FULL_INTEREST_DEFERRED_SIMPLE. holidaySteps() reads the"
-            + " kind alone — PRINCIPAL_ONLY maps to Accrual.CHARGE — and amortisingAccrual()"
-            + " returns DEFER only where the moratorium is absent, so with a PRINCIPAL_ONLY"
-            + " holiday nothing defers anywhere: probe.deferredAccrual() stays zero,"
-            + " settlementPeriod() is never consulted, and the settlement date the contract"
-            + " states is discarded without a word. The ladder produced is rung-for-rung the"
-            + " one ServicedEachPeriod produces, so the blueprint declares that interest"
-            + " accrues to a lump and the schedule bills it every period. The fix belongs in"
-            + " ScheduleBlueprint.coherenceConflicts as an ST-11 conflict — interest cannot be"
-            + " both serviced during the holiday and deferred to a settlement — beside the two"
-            + " rules that already cross-check the kind against servicing.compounds(). The"
-            + " mirror case is the same defect: CapitalisedEachPeriod with a PRINCIPAL_ONLY"
-            + " holiday capitalises nothing, and the requireSupported() guard that would have"
-            + " caught it only fires when the moratorium is absent altogether.")
         @DisplayName("interest cannot be both serviced through the holiday and deferred to a lump")
         void servicingThatContradictsTheMoratoriumKindIsRefused() {
+            // This was @Disabled: the contradiction used to be accepted and then resolved
+            // silently in favour of the moratorium kind. holidaySteps reads the kind alone
+            // — PRINCIPAL_ONLY maps to Accrual.CHARGE — and amortisingAccrual returns DEFER
+            // only where the moratorium is ABSENT, so with a PRINCIPAL_ONLY holiday nothing
+            // deferred anywhere: deferredAccrual() stayed zero, settlementPeriod() was never
+            // consulted, and the settlement date the contract states was discarded without a
+            // word. The ladder came out rung-for-rung the one ServicedEachPeriod produces,
+            // so the blueprint declared that interest accrues to a lump while the schedule
+            // billed it every period.
+            //
+            // Now refused as an ST-11 conflict, beside the two rules that already cross-check
+            // the kind against servicing.compounds(). It needed a new predicate:
+            // DeferredSimple neither compounds nor pays as it accrues, so compounds() could
+            // not express "interest is actually being serviced" — see
+            // InterestServicing.leavesAsCashEachPeriod.
             assertThatIllegalArgumentException()
                 .isThrownBy(() -> ScheduleBuilder.build(
                     compose(new PrincipalProfile.LevelAnnuity(),
@@ -1495,6 +1543,43 @@ class ScheduleBuilderTest {
                             Moratorium.MoratoriumTermEffect.COMPRESS_REMAINING))))
                 .withMessageContaining("PRINCIPAL_ONLY")
                 .withMessageContaining("DEFERRED_SIMPLE");
+        }
+
+        @Test
+        @DisplayName("the mirror case is the same defect: capitalising through a PRINCIPAL_ONLY holiday")
+        void capitalisingThatContradictsTheMoratoriumKindIsRefused() {
+            // Named in the original defect report but never asserted, so it would have been
+            // left live by a fix that only handled DeferredSimple. CapitalisedEachPeriod with
+            // a PRINCIPAL_ONLY holiday capitalised nothing, and the requireSupported guard
+            // that would have caught it only fires when the moratorium is absent altogether.
+            // Education loans and IDC are exactly this shape, and capitalising is worth
+            // 34.6 bp more than deferring simple on the same loan (doc 09 S5 against S6).
+            assertThatIllegalArgumentException()
+                .isThrownBy(() -> ScheduleBuilder.build(
+                    compose(new PrincipalProfile.LevelAnnuity(),
+                        new InterestServicing.CapitalisedEachPeriod(),
+                        new Moratorium(6, Moratorium.MoratoriumKind.PRINCIPAL_ONLY,
+                            Moratorium.MoratoriumTermEffect.EXTEND_TERM))))
+                .withMessageContaining("PRINCIPAL_ONLY")
+                .withMessageContaining("CAPITALISED_EACH_PERIOD");
+        }
+
+        @Test
+        @DisplayName("and the coherent pairing still builds: PRINCIPAL_ONLY with interest serviced")
+        void aPrincipalOnlyHolidayWithServicedInterestIsCoherent() {
+            // The falsifiability half. A guard that refused every PRINCIPAL_ONLY holiday
+            // would satisfy both tests above and destroy fixture S4, whose whole point is
+            // that interest of 10,000.00 is serviced for six periods while principal is
+            // untouched.
+            InstalmentLadder ladder = ScheduleBuilder.build(
+                compose(new PrincipalProfile.LevelAnnuity(),
+                    new InterestServicing.ServicedEachPeriod(),
+                    new Moratorium(6, Moratorium.MoratoriumKind.PRINCIPAL_ONLY,
+                        Moratorium.MoratoriumTermEffect.COMPRESS_REMAINING)));
+
+            assertThat(ladder.rung(6).principal().amount()).isEqualByComparingTo("0");
+            assertThat(ladder.rung(6).interest().atPresentationScale().amount())
+                .isEqualByComparingTo("10000.00");
         }
     }
 }

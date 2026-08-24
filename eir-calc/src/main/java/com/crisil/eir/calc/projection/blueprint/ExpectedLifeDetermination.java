@@ -44,17 +44,31 @@ public record ExpectedLifeDetermination(
         }
         alternatives = List.copyOf(alternatives);
         invariants = List.copyOf(invariants);
-        boolean chosenPresent = false;
+        LifeAlternative chosenAlternative = null;
         for (LifeAlternative alternative : alternatives) {
             if (alternative.policy() == chosenPolicy) {
-                chosenPresent = true;
+                chosenAlternative = alternative;
                 break;
             }
         }
-        if (!chosenPresent) {
+        if (chosenAlternative == null) {
             throw new IllegalArgumentException(
                 "the chosen policy " + chosenPolicy + " is absent from the alternatives; the"
                     + " published figure must be one of the computed ones");
+        }
+        // And the published LIFE must be the chosen alternative's life, not merely some
+        // number sitting beside the chosen policy's name. The check above established that
+        // the published figure is one of the computed ones; this establishes that it is the
+        // one it claims to be. Without it a determination could publish life 5 while
+        // chosen().lifePeriods() returned 8, and be accepted in silence: ST-8 would then be
+        // asserted against a life no computed policy supports, and two readers of the same
+        // record would get different lives depending on which accessor they reached for.
+        if (chosenAlternative.lifePeriods() != chosenLifePeriods) {
+            throw new IllegalArgumentException(
+                "the published expected life is " + chosenLifePeriods + " period(s) but policy "
+                    + chosenPolicy + " computes " + chosenAlternative.lifePeriods()
+                    + "; the published figure must be the chosen alternative's own, or ST-8 is"
+                    + " asserted against a life no policy supports");
         }
     }
 

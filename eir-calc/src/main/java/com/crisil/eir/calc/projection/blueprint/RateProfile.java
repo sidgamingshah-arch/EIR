@@ -202,6 +202,27 @@ public sealed interface RateProfile {
             if (ladder.isEmpty()) {
                 throw new IllegalArgumentException("a coupon ladder needs at least one step");
             }
+            // Strictly ascending, exactly as Floating validates its reset dates. Without
+            // this, rateForPeriod below is order-dependent and silently wrong: it keeps the
+            // LAST rung whose fromPeriod has been reached, so a ladder supplied in
+            // descending order makes the period-1 rung win at every index and the coupon
+            // never steps at all. [(13, 1.0%), (7, 0.9%), (1, 0.8%)] returned 0.8% at
+            // period 8 and at period 20. A descending coupon table is an ordinary
+            // ingestion order, and duplicate fromPeriod values were equally unguarded.
+            //
+            // This is also the profile whose changes route to a B5.4.6 catch-up rather than
+            // a B5.4.5 reset, so a ladder that never steps restates the carrying amount at
+            // a rate the contract never bore — the defect CU-1 exists to make loud, arrived
+            // at from the projection side instead.
+            for (int i = 1; i < ladder.size(); i++) {
+                if (ladder.get(i).fromPeriod() <= ladder.get(i - 1).fromPeriod()) {
+                    throw new IllegalArgumentException(
+                        "a coupon ladder must be strictly ascending in fromPeriod; step " + i
+                            + " starts at period " + ladder.get(i).fromPeriod() + " after a step at "
+                            + ladder.get(i - 1).fromPeriod() + ". rateForPeriod keeps the last rung"
+                            + " reached, so an out-of-order ladder does not step");
+                }
+            }
             ladder = List.copyOf(ladder);
         }
 

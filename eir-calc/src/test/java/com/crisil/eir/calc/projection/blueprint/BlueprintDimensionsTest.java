@@ -192,11 +192,14 @@ class BlueprintDimensionsTest {
             // 1,000,000 x 0.60 = 600,000. The notional is the expected drawn balance, not
             // the sanctioned limit: ACPIR 54 permits an approximation on a revolver
             // precisely because there is no drawdown schedule, and striking a rate on the
-            // undrawn limit would spread the fee over money that never left the bank.
+            // undrawn limit would spread the fee over money that never left the bank —
+            // 1,000,000 is the figure a defect here would report, and the equality below
+            // excludes it. (An `isNotEqualTo(1,000,000)` line stood here and was removed:
+            // it is entailed by the equality above it, so no input could break one and
+            // satisfy the other, and it read as a second independent gate.)
             DisbursementProfile revolver =
                 new DisbursementProfile.UtilisationDriven(Money.inr("1000000"), bd("0.60"));
             assertThat(revolver.notional()).isEqualTo(Money.inr("600000"));
-            assertThat(revolver.notional()).isNotEqualTo(Money.inr("1000000"));
             assertThat(revolver.label()).isEqualTo("UTILISATION_DRIVEN");
         }
     }
@@ -560,7 +563,11 @@ class BlueprintDimensionsTest {
 
             assertThat(stepped.driverOnChange()).isEqualTo(RateDriver.STEP_UP_PREDETERMINED);
             assertThat(mechanismOf(stepped)).isEqualTo(Mechanism.CATCH_UP);
-            assertThat(mechanismOf(stepped)).isNotEqualTo(Mechanism.RESET);
+            // (An `isNotEqualTo(Mechanism.RESET)` line stood here and was removed: it is
+            // entailed by the equality above it and could not fail on any input. That the
+            // same shipped table really does send a market-movement driver to RESET — so
+            // CATCH_UP here is a routing decision and not the table's only answer — is
+            // asserted on the floating profiles in benchmarkMovementResets.)
             // Known at inception and unrelated to any benchmark, so the instrument is
             // FIXED and its driver is not a market movement. Both halves matter: the
             // router pairs the rate type with the driver, and FLOATING here would let a
@@ -737,44 +744,52 @@ class BlueprintDimensionsTest {
         }
 
         @Test
-        @Disabled("DEFECT: StepCoupon neither validates nor sorts its ladder, and its lookup is"
-            + " order-dependent. See the comment below.")
-        @DisplayName("DEFECT: a coupon ladder supplied out of order returns the wrong rate")
-        void aCouponLadderSuppliedOutOfOrderReturnsTheWrongRate() {
-            // The same ladder as above, supplied newest-first — the order a coupon-schedule
-            // table sorted by date descending arrives in.
+        @DisplayName("a coupon ladder supplied out of order is refused, because the lookup is order-dependent")
+        void aCouponLadderSuppliedOutOfOrderIsRefused() {
+            // This was @Disabled as a defect exposure and is now a refusal test, which is
+            // what its own comment said it should become once the constructor guard landed.
             //
-            // rateForPeriod walks the list and keeps the last rung whose fromPeriod is at
-            // or below the index, so on a descending list the *earliest* matching rung wins
-            // instead of the latest. Past period 1 every rung matches, so the period-1 rung
-            // is always the one that survives the walk: this ladder returns 0.008 for
-            // period 8, for period 20, and for every period of the bond's life. The ladder
-            // does not merely mis-step, it never steps at all. Nothing refuses the input and
-            // nothing sorts it: RateProfile.Floating validates its reset dates as strictly
-            // ascending and ScheduleCalendar validates its custom due dates the same way,
-            // but StepCoupon validates only that the ladder is non-empty.
+            // The defect: rateForPeriod walks the list and keeps the last rung whose
+            // fromPeriod is at or below the index, so on a descending list every rung past
+            // period 1 matches and the period-1 rung always survives the walk. This ladder
+            // returned 0.008 for period 8, for period 20, and for every period of the
+            // bond's life — it did not merely mis-step, it never stepped at all. Every rung
+            // was individually valid and the label still read STEP_COUPON(3 steps).
             //
-            // Consequence: the contractual rate is wrong for the whole post-step tail of a
-            // step-up bond, and this profile is the one whose changes route to a B5.4.6
-            // catch-up — so the restatement is computed by discounting revised flows at a
-            // rate the contract never bore. It is silent: every rung is individually valid
-            // and the label still reads STEP_COUPON(3 steps).
+            // A coupon-schedule table sorted by date descending arrives in exactly this
+            // order. And this is the profile whose changes route to a B5.4.6 catch-up, so a
+            // ladder that never steps means the restatement discounts revised flows at a
+            // rate the contract never bore.
             //
-            // Two fixes close it. A constructor guard mirroring Floating ("coupon steps
-            // must be strictly ascending") is the one consistent with this package, and
-            // would additionally reject a duplicated fromPeriod, which today resolves to
-            // whichever rung appears last. Sorting internally would also work but accepts a
-            // contradictory ladder silently, which the house style refuses elsewhere. This
-            // test is written against the order-independent-lookup reading: under the
-            // constructor-guard fix it errors on the first statement instead of failing on
-            // the assertion, and should then be rewritten as a refusal test.
-            RateProfile.StepCoupon descending = new RateProfile.StepCoupon(List.of(
+            // Refused rather than sorted: sorting accepts a contradictory ladder silently,
+            // and the guard mirrors RateProfile.Floating's strictly-ascending reset-date
+            // check, which is the house pattern.
+            List<RateProfile.CouponStep> descending = List.of(
                 new RateProfile.CouponStep(13, Rate.monthly(bd("0.010"))),
                 new RateProfile.CouponStep(7, Rate.monthly(bd("0.009"))),
-                new RateProfile.CouponStep(1, Rate.monthly(bd("0.008")))));
+                new RateProfile.CouponStep(1, Rate.monthly(bd("0.008"))));
 
-            assertThat(descending.rateForPeriod(8).periodic()).isEqualByComparingTo("0.009");
-            assertThat(descending.rateForPeriod(20).periodic()).isEqualByComparingTo("0.010");
+            assertThatThrownBy(() -> new RateProfile.StepCoupon(descending))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("strictly ascending in fromPeriod")
+                .hasMessageContaining("does not step");
+
+            // A duplicated fromPeriod resolved to whichever rung appeared last, which is a
+            // silent choice between two contradictory rates for one period. Same guard.
+            assertThatThrownBy(() -> new RateProfile.StepCoupon(List.of(
+                new RateProfile.CouponStep(1, Rate.monthly(bd("0.008"))),
+                new RateProfile.CouponStep(7, Rate.monthly(bd("0.009"))),
+                new RateProfile.CouponStep(7, Rate.monthly(bd("0.011"))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("strictly ascending in fromPeriod");
+
+            // And the ascending ladder the defect test compared against still steps.
+            RateProfile.StepCoupon ascending = new RateProfile.StepCoupon(List.of(
+                new RateProfile.CouponStep(1, Rate.monthly(bd("0.008"))),
+                new RateProfile.CouponStep(7, Rate.monthly(bd("0.009"))),
+                new RateProfile.CouponStep(13, Rate.monthly(bd("0.010")))));
+            assertThat(ascending.rateForPeriod(8).periodic()).isEqualByComparingTo("0.009");
+            assertThat(ascending.rateForPeriod(20).periodic()).isEqualByComparingTo("0.010");
         }
 
         @Test
@@ -862,7 +877,22 @@ class BlueprintDimensionsTest {
             // or a period to stop being equal, so each is asserted separately: dropping any
             // one of them licenses ordinal discounting on a schedule whose periods are not
             // the same length, which is the one thing ST-10 forbids.
-            assertThat(ScheduleCalendar.monthly().admitsPeriodicIndexing()).isTrue();
+            //
+            // The licensed case is stated with an explicit SAME_DAY_OF_MONTH calendar and
+            // NOT with ScheduleCalendar.monthly(). The default carries
+            // LAST_BUSINESS_DAY_OF_MONTH, which does move month-end due dates, and
+            // admitsPeriodicIndexing() never reads endOfMonthRule — that hole is the
+            // subject of ScheduleBlueprintTest.lastBusinessDayRuleMustVoidPeriodicIndexing,
+            // which is @Disabled and asserts the default's answer is FALSE. This line used
+            // to assert monthly() is TRUE, so the two files asserted opposite values for one
+            // expression and the enabled one pinned the defect: applying the documented
+            // one-clause fix would have turned this test red and read as a regression. The
+            // fourth veto is asserted there, once, where the defect is described.
+            assertThat(new ScheduleCalendar(
+                ScheduleCalendar.Frequency.MONTHLY,
+                ScheduleCalendar.BusinessDayConvention.NONE, Set.of(),
+                ScheduleCalendar.EndOfMonthRule.SAME_DAY_OF_MONTH, List.of())
+                .admitsPeriodicIndexing()).isTrue();
 
             assertThat(new ScheduleCalendar(
                 ScheduleCalendar.Frequency.MONTHLY,
@@ -1309,14 +1339,39 @@ class BlueprintDimensionsTest {
             assertThat(st8.detail()).contains("expected life 5").contains("ECL horizon 8");
             assertThat(st8.deviation()).isEqualByComparingTo("0");
 
-            // The same life against a horizon that happens to equal it. If the horizon were
-            // being written into the life — the collapse this design exists to prevent —
-            // one of these two would report the other's number.
+            // The same life against a horizon that happens to equal it: the life must not
+            // move when the horizon does, and ST-8 must report the horizon it was given.
             ExpectedLifeDetermination fiveOfFive = ExpectedLifeDetermination.of(
                 ExercisePolicy.CONTRACTUAL_MATURITY, 5, List.of(TO_STATED, TO_EXTENDED), true, 5);
             assertThat(fiveOfFive.chosenLifePeriods()).isEqualTo(5);
             assertThat(resultFor(fiveOfFive, InvariantId.ST_8).detail()).contains("ECL horizon 5");
-            assertThat(fiveOfEight.chosenLifePeriods()).isEqualTo(fiveOfFive.chosenLifePeriods());
+
+            // (A `fiveOfEight.chosenLifePeriods() == fiveOfFive.chosenLifePeriods()`
+            // comparison stood here and was removed. Both operands are pinned to 5 above,
+            // so it was entailed; and fiveOfFive has life 5 against horizon 5, which is by
+            // construction insensitive to a horizon-overwrites-life collapse — the one
+            // defect the comment claimed it caught. The asymmetric pair below is the
+            // falsifiable form.)
+            //
+            // Both fields carried the other way round: the longer figure in the life and
+            // the shorter one in the horizon. A life read from the horizon field would
+            // report 5 rather than 8; a horizon read from the life would print "ECL
+            // horizon 8". Only one of the two can be right in each reading, so each
+            // direction of the collapse moves one of these two assertions.
+            ExpectedLifeDetermination eightOfFive = ExpectedLifeDetermination.of(
+                ExercisePolicy.MOST_LIKELY_OUTCOME, 8,
+                List.of(TO_STATED, new ExpectedLifeDetermination.LifeAlternative(
+                    ExercisePolicy.MOST_LIKELY_OUTCOME, 8, EXTENDED, EXTENDED_INCOME)),
+                true, 5);
+            assertThat(eightOfFive.chosenLifePeriods()).isEqualTo(8);
+            assertThat(resultFor(eightOfFive, InvariantId.ST_8).detail())
+                .contains("expected life 8")
+                .contains("ECL horizon 5");
+            // 8 - 5 = 3 periods of overrun, and it is reported rather than clamped: the
+            // pair is an ST-8 breach precisely because the horizon is not derived from the
+            // life. aLifeBeyondTheHorizonIsReportedNotClamped covers what that breach says.
+            assertThat(resultFor(eightOfFive, InvariantId.ST_8).deviation())
+                .isEqualByComparingTo("3");
         }
 
         @Test
@@ -1384,10 +1439,8 @@ class BlueprintDimensionsTest {
         }
 
         @Test
-        @Disabled("DEFECT: the published life is not cross-checked against the chosen"
-            + " alternative's life. See the comment below.")
-        @DisplayName("DEFECT: the published life may contradict the chosen alternative's own life")
-        void thePublishedLifeMayContradictTheChosenAlternative() {
+        @DisplayName("the published life must be the chosen alternative's own, not merely beside its name")
+        void thePublishedLifeMustNotContradictTheChosenAlternative() {
             // chosenPolicy is cross-checked against the alternatives — "the published
             // figure must be one of the computed ones" — but chosenLifePeriods is not. So a
             // determination can publish a 5-period life while the alternative it names as
@@ -1401,9 +1454,10 @@ class BlueprintDimensionsTest {
             // different answers from the same record. The ordinary way in is an ingestion
             // path that fills the scalar from one source and the alternatives from another.
             //
-            // The fix belongs in the canonical constructor, next to the policy check it
-            // mirrors: reject a chosenLifePeriods that differs from chosen().lifePeriods().
-            // This test asserts that refusal, so it fails today by not throwing.
+            // The fix is in the canonical constructor, next to the policy check it mirrors:
+            // a chosenLifePeriods differing from chosen().lifePeriods() is refused. This test
+            // was @Disabled and failed by not throwing; it now asserts the refusal it was
+            // written for, unchanged.
             assertThatIllegalArgumentException()
                 .isThrownBy(() -> new ExpectedLifeDetermination(
                     ExercisePolicy.MOST_LIKELY_OUTCOME, 5, List.of(TO_STATED, TO_EXTENDED),

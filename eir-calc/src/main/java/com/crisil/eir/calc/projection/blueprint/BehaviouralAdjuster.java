@@ -460,7 +460,8 @@ public final class BehaviouralAdjuster {
         for (InstalmentLadder.Rung rung : contractual.rungs()) {
             requireReproducible(rung, periodic, contractual);
             Money interest = balance.times(periodic);
-            Money afterScheduled = rung.periodIndex() == lastPeriod
+            boolean isLastRung = rung.periodIndex() == lastPeriod;
+            Money afterScheduled = isLastRung
                 ? floor
                 : balance.minus(rung.total().minus(interest));
             if (afterScheduled.compareTo(floor) <= 0) {
@@ -472,9 +473,46 @@ public final class BehaviouralAdjuster {
                 // silently plugged here.
                 Money retained = balance.compareTo(floor) < 0 ? balance : floor;
                 Money repaid = balance.minus(retained);
+                // The last rung's total INCLUDES the retained lump, which is the convention
+                // ScheduleBuilder's closing roll sets and FlowVectorAssembler relies on:
+                // fixture S2's final period is 432,244.08, being the 32,244.08 instalment
+                // plus the 400,000 balloon, and the assembler subtracts the terminal back out
+                // to recover the billed instalment. Excluding it here made the assembler
+                // compute a billed instalment of 4,000.00 - 400,000 = -396,000.00 alongside a
+                // +400,000 BALLOON flow. The net cash was right, so no invariant complained,
+                // and the disclosed decomposition was not a schedule anybody could read.
+                //
+                // On an intermediate rung the lump is not yet due, so the total is the
+                // interest alone.
+                Money settled = repaid.plus(interest);
                 rungs.add(new InstalmentLadder.Rung(rung.periodIndex(), rung.dueOn(),
-                    repaid, interest, repaid.plus(interest), retained));
-                break;
+                    repaid, interest, isLastRung ? settled.plus(retained) : settled, retained));
+                balance = retained;
+                // Settling the prepayable balance is not the end of the contract when a
+                // lump is retained. This used to break unconditionally, which is right for
+                // a fully amortising ladder and wrong for a balloon or a lease residual:
+                // the comment below says prepayment stops ON the floor rather than through
+                // it, and a ladder that ends the moment the floor is reached stops short of
+                // saying so. The borrower still owes the lump at CONTRACTUAL maturity, and
+                // still owes interest on it until then.
+                //
+                // Two figures went missing, and neither invariant could see it. On a
+                // 400,000 balloon reached four periods early, four periods of interest on
+                // the retained lump vanished from the expected leg — ST-3 cannot notice,
+                // because the principal column telescopes to the advance whatever the
+                // ladder's length. And FlowVectorAssembler dates the terminal flow at
+                // rungs.get(size - 1).dueOn(), so a truncated ladder discounted the balloon
+                // four months early — ST-5 cannot notice either, because the terminal
+                // AMOUNT is right and only its date is wrong. Running the ladder to
+                // maturity fixes both from one place: the last rung is then the contractual
+                // maturity rung, so the assembler's dating is correct by construction.
+                //
+                // Continuing costs nothing on the fully amortising path: with a zero floor
+                // there is no lump to carry, so the ladder ends here as it always did.
+                if (isLastRung || retained.isZero() || balance.compareTo(floor) < 0) {
+                    break;
+                }
+                continue;
             }
             // The mortality bites on the prepayable balance only. A residual value is the
             // lessor's interest in an asset and a balloon is a contractual lump; neither is

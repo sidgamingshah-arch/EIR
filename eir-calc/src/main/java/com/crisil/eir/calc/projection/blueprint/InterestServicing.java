@@ -25,6 +25,22 @@ public sealed interface InterestServicing {
     /** Whether unpaid interest is added to the balance and itself bears interest. */
     boolean compounds();
 
+    /**
+     * Whether interest leaves as cash in the period it accrues.
+     *
+     * <p>Distinct from {@code !compounds()}, and that is the whole reason it exists.
+     * {@link DeferredSimple} does not compound and does not leave as cash either — it
+     * accrues without compounding and settles as a lump — so {@code compounds()} cannot
+     * express "interest is actually being paid". A {@code PRINCIPAL_ONLY} holiday asserts
+     * exactly that: interest serviced, principal suspended. Without this predicate
+     * {@link ScheduleBlueprint} had no way to check the pairing — the two
+     * {@code FULL_INTEREST_*} kinds are cross-checked against {@code compounds()} and
+     * {@code PRINCIPAL_ONLY} was cross-checked against nothing, so pairing it with
+     * capitalising or deferring servicing passed coherence and then silently produced the
+     * plain serviced ladder.
+     */
+    boolean leavesAsCashEachPeriod();
+
     /** Interest leaves as cash every period. */
     record ServicedEachPeriod() implements InterestServicing {
         @Override
@@ -35,6 +51,11 @@ public sealed interface InterestServicing {
         @Override
         public boolean compounds() {
             return false;
+        }
+
+        @Override
+        public boolean leavesAsCashEachPeriod() {
+            return true;
         }
     }
 
@@ -60,6 +81,11 @@ public sealed interface InterestServicing {
         @Override
         public boolean compounds() {
             return true;
+        }
+
+        @Override
+        public boolean leavesAsCashEachPeriod() {
+            return false; // compounds into the balance instead
         }
     }
 
@@ -87,6 +113,11 @@ public sealed interface InterestServicing {
         public boolean compounds() {
             return false;
         }
+
+        @Override
+        public boolean leavesAsCashEachPeriod() {
+            return false; // accrues, then settles as a lump
+        }
     }
 
     /**
@@ -105,6 +136,11 @@ public sealed interface InterestServicing {
         @Override
         public boolean compounds() {
             return false;
+        }
+
+        @Override
+        public boolean leavesAsCashEachPeriod() {
+            return false; // collected at inception, not period by period
         }
     }
 
@@ -132,6 +168,11 @@ public sealed interface InterestServicing {
         @Override
         public boolean compounds() {
             return false;
+        }
+
+        @Override
+        public boolean leavesAsCashEachPeriod() {
+            return true;
         }
     }
 }

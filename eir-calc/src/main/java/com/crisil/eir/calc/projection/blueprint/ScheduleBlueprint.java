@@ -159,6 +159,37 @@ public record ScheduleBlueprint(
                 "a FULL_INTEREST_DEFERRED_SIMPLE holiday must not compound, but servicing "
                     + servicing.label() + " does");
         }
+        // The third leg of the same symmetry, and it was missing. PRINCIPAL_ONLY asserts
+        // that interest IS serviced while principal is suspended — that is the whole
+        // distinction between the servicing dimension and the moratorium (09 § 2.3: one
+        // says when interest is paid, the other when principal is). Pairing it with
+        // capitalising or deferring servicing is a contradiction, and it used to pass.
+        //
+        // What made it worse than a missing guard: ScheduleBuilder honours servicing only
+        // through the moratorium's kind. holidaySteps maps PRINCIPAL_ONLY to CHARGE
+        // whatever the servicing says, and amortisingAccrual returns DEFER only when the
+        // moratorium is ABSENT. So the contradiction was resolved silently in favour of the
+        // kind: DeferredSimple(settlementDate) with a PRINCIPAL_ONLY holiday deferred
+        // nothing anywhere, the contractual settlement date was discarded, and the ladder
+        // came out rung-for-rung identical to the serviced one. CapitalisedEachPeriod with
+        // the same pairing capitalised nothing. Education loans and IDC are exactly this
+        // shape, and the difference between capitalising and deferring simple is 34.6 bp.
+        //
+        // Refused here rather than honoured in the builder because the input is genuinely
+        // contradictory — there is no correct ladder for "interest is serviced" and
+        // "interest is not serviced" at once, and picking either silently is how the
+        // 34.6 bp goes missing.
+        if (moratorium.kind() == Moratorium.MoratoriumKind.PRINCIPAL_ONLY
+            && !servicing.leavesAsCashEachPeriod()) {
+            conflicts.add(
+                "a PRINCIPAL_ONLY holiday services interest each period while principal is"
+                    + " suspended, but servicing " + servicing.label() + " does not pay interest"
+                    + " as it accrues. Use FULL_INTEREST_CAPITALISED or"
+                    + " FULL_INTEREST_DEFERRED_SIMPLE to suspend both, or ServicedEachPeriod to"
+                    + " suspend only principal — the builder honours the moratorium kind, so"
+                    + " this pairing would otherwise bill the serviced ladder and discard the"
+                    + " servicing silently");
+        }
         if (disbursement instanceof DisbursementProfile.UtilisationDriven
             && !(principal instanceof PrincipalProfile.BulletAtMaturity
                 || noPrincipalUntilMaturity)) {
