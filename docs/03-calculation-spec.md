@@ -886,7 +886,7 @@ period close.
 | IC-1 | `GCA₀` = net cash flow at inception | Initial recognition |
 | TR-1 | Terminal EIR-leg GCA = 0 on a full-term, event-free contract | Contract close |
 | INV-1 | Σ EIR interest over life = Σ contractual interest + net integral fee ± catch-ups | Contract close |
-| INV-2 | `EIR > contractual` iff net integral fee is income; `<` iff cost; `=` iff nil | Post-solve |
+| INV-2 | `EIR > contractual` iff net integral fee is income; `<` iff cost; indistinguishable within 1e-6 p.a. iff nil or immaterial | Post-solve |
 | INV-3 | Σ cash received = principal + Σ contractual interest (on billed flows) | Contract close |
 | INV-4 | Unamortised fee balance = contractual GCA − EIR GCA | Every period |
 | CU-1 | EIR unchanged across a catch-up restatement | Event |
@@ -903,6 +903,18 @@ period close.
 | SL-2 | Σ journal debits = Σ journal credits, per run and per contract | Every posting |
 | DT-1 | Re-run of a closed period reproduces published figures bit-identically | Nightly replay |
 | TG-1 | Every Tier 3 population has a current, in-date equivalence test on file | Annual |
+
+**On INV-2's third limb.** "Equals it when there is none" cannot be read as exact equality. A
+borrower is billed an instalment rounded to the paise, so a zero-fee loan does not reprice exactly
+at its coupon: on 1,000,000 at 1% a month the residual spread is −5.3e-8 over 24 months, +5.1e-8
+over 60 and −2.1e-8 over 240 — arbitrarily signed, and set by which way the last paise went rather
+than by anything about the contract. Read literally the invariant therefore fails on every zero-fee
+contract in the book, and a control that fires on a whole legitimate population teaches reviewers to
+dismiss it. The limb is a **band of 1e-6 p.a.**: nineteen times the largest artefact above, and one
+five-thousandth of the smallest spread the check must catch — case 1's 56.6 basis points for 5,000
+of net fee. Inside the band the result passes and records that the ordering was not resolvable,
+which is the honest report, because an immaterial fee produces an immaterial spread whose sign
+carries no information.
 
 Structure-specific invariants ST-3 … ST-12 extend this table and are stated in
 [09 § 7](09-cashflow-structures.md#7-structure-specific-invariants). ST-9 in particular constrains

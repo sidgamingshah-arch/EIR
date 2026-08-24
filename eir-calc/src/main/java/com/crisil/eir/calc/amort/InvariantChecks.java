@@ -29,6 +29,17 @@ import java.util.Objects;
  */
 public final class InvariantChecks {
 
+    /**
+     * The effective-annual spread inside which INV-2's ordering is not resolvable.
+     *
+     * <p>Published rather than private because it is a policy figure, not an
+     * implementation detail: it decides when a fee is too small for its sign to be
+     * checkable. Derived in {@link #feeSignOrdering} — 0.0001% a year, sitting nineteen
+     * times above the largest paise-rounding artefact measured on a zero-fee EMI loan
+     * and five thousand times below the smallest spread the check has to catch.
+     */
+    public static final BigDecimal ORDERING_EPSILON = new BigDecimal("0.000001");
+
     private InvariantChecks() {
     }
 
@@ -123,6 +134,25 @@ public final class InvariantChecks {
      * a monthly periodic rate and an actual-date annual rate are not comparable as
      * stored, and the effective annual figure is the one that means the same thing
      * in both.
+     *
+     * <p><strong>Why "equals it when there is none" needs a band.</strong> Taken as
+     * exact equality it is not an invariant at all: it fails on every zero-fee contract
+     * in the book. A borrower is billed an instalment rounded to the paise, so a
+     * zero-fee EMI loan does not reprice exactly at its coupon, and the residual spread
+     * is both tiny and arbitrarily signed — measured on 1,000,000 at 1% a month, it is
+     * -5.3e-8 over 24 months, +5.1e-8 over 60 and -2.1e-8 over 240. Nothing about the
+     * contract changed; only the direction the last paise rounded. A control that fires
+     * on a whole legitimate population is worse than no control, because it teaches a
+     * reviewer to dismiss INV-2 breaches.
+     *
+     * <p>{@link #ORDERING_EPSILON} is the band inside which the ordering is not
+     * resolvable, and it is chosen with five orders of magnitude of daylight on both
+     * sides: nineteen times the largest rounding artefact measured above, and one part
+     * in five thousand of the smallest spread the check has to catch — reference case
+     * 1's 5.66e-3, being 13.248094% against 12.682503%, 56.6 basis points for 5,000 of
+     * net fee. Inside the band the result passes and says the ordering was
+     * indistinguishable, which is the honest report: an immaterial fee produces an
+     * immaterial spread, and its sign carries no information either way.
      */
     public static InvariantResult feeSignOrdering(Rate eir, Rate contractualRate, Money netIntegralFee) {
         Objects.requireNonNull(eir, "eir");
@@ -132,6 +162,12 @@ public final class InvariantChecks {
         String detail = "EIR " + eir.effectiveAnnual().toPlainString() + " vs contractual "
             + contractualRate.effectiveAnnual().toPlainString() + " against net fee "
             + netIntegralFee.atPresentationScale();
+        if (spread.abs().compareTo(ORDERING_EPSILON) <= 0) {
+            return InvariantResult.pass(InvariantId.INV_2, detail
+                + " — spread " + spread.toPlainString() + " is inside the resolvable band "
+                + ORDERING_EPSILON.toPlainString() + ", so the ordering carries no information "
+                + "and neither does its sign");
+        }
         if (spread.signum() == expected) {
             return InvariantResult.pass(InvariantId.INV_2, detail);
         }

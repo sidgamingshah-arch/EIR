@@ -280,6 +280,16 @@ class TwoLegReconciliationTest {
 
         assertThat(InvariantChecks.feeSignOrdering(consistent, CONTRACTUAL, fee).satisfied()).isTrue();
 
+        // A nil fee no longer demands exact equality — it cannot be met, because a
+        // borrower is billed to the paise and the resulting spread is arbitrarily
+        // signed. Within ORDERING_EPSILON the ordering is reported as unresolvable.
+        if (expectedSignum == 0) {
+            Rate justOff = Rate.monthly(bd("0.010000000500"));
+            InvariantResult inBand = InvariantChecks.feeSignOrdering(justOff, CONTRACTUAL, fee);
+            assertThat(inBand.satisfied()).isTrue();
+            assertThat(inBand.detail()).contains("inside the resolvable band");
+        }
+
         // And the contradictions fail: a fee income with a yield below the coupon, or a
         // fee cost with a yield above it, is either a classification sign error or a
         // solver that converged on the wrong root. One comparison catches both.

@@ -102,20 +102,44 @@ class InvariantBoundaryCasesTest {
             .as("plugging the residue into the final instalment yields fractionally more")
             .isPositive();
 
+        // INV-2 read as exact equality fails here, and this test used to assert that
+        // failure as the expected outcome. It is the right measurement and the wrong
+        // conclusion: nothing is wrong with this contract. The spread is a paise-rounding
+        // artefact, its magnitude is between 1e-9 and 1e-6 as asserted above, and its sign
+        // is set by which way the last paise went — negative under LMS_AUTHORITATIVE and
+        // positive under FINAL_PERIOD_PLUG on the very same instrument. A control that
+        // fires on every zero-fee contract in the book, in a direction that depends on a
+        // residue policy, teaches a reviewer to dismiss INV-2 breaches. So the invariant
+        // now carries a resolvable band and passes inside it, saying so in the detail.
         InvariantResult ordering = InvariantChecks.feeSignOrdering(
             solve(ProjectorRegistry.standard(), terms, List.of()), terms.contractualRate(),
             Money.zero(Money.INR));
         assertThat(ordering.satisfied())
-            .as("INV-2 as literally stated, on a zero-fee contract: %s", ordering.detail())
-            .isFalse();
+            .as("a zero-fee contract is sound and INV-2 must say so: %s", ordering.detail())
+            .isTrue();
+        assertThat(ordering.detail()).contains("inside the resolvable band");
+        assertThat(underLmsAuthoritative.abs()).isLessThan(InvariantChecks.ORDERING_EPSILON);
 
-        // One rupee of fee is already enough to restore the ordering on this instrument,
-        // which is why the derived floor is stated in rupees against the period count
-        // rather than as a percentage of principal.
+        // One rupee of fee also passes — and here the pass is uninformative rather than
+        // meaningful, because one rupee on a million moves the yield by far less than the
+        // rounding noise does. That is what the band is for: it does not claim to have
+        // verified an ordering it cannot see.
         InvariantResult withOneRupee = InvariantChecks.feeSignOrdering(
             solve(ProjectorRegistry.standard(), terms, integralFee(Money.inr("1"))),
             terms.contractualRate(), Money.inr("1"));
         assertThat(withOneRupee.satisfied()).isTrue();
+
+        // What must still fail: a material fee whose ordering runs the wrong way. Case 1's
+        // 5,000 of net fee received against a yield below the coupon is a classification
+        // sign error or a solver that took the wrong root, and it is five thousand times
+        // outside the band.
+        InvariantResult contradiction = InvariantChecks.feeSignOrdering(
+            Rate.monthly(new BigDecimal("0.009581469078")), Rate.monthly(new BigDecimal("0.01")),
+            Money.inr("5000"));
+        assertThat(contradiction.satisfied())
+            .as("the band must not swallow a real sign error")
+            .isFalse();
+        assertThat(contradiction.detail()).contains("ordering contradicts the fee sign");
     }
 
     /**
