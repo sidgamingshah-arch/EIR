@@ -101,17 +101,30 @@ import java.util.Objects;
  *   <caption>O7 — one revision, three purchase prices</caption>
  *   <tr><th>Bought at</th><th>EIR p.a.</th><th>GCA at m24</th>
  *       <th>Unamortised at m24</th><th>Catch-up</th></tr>
- *   <tr><td>1,030,000 (premium)</td><td>8.642478%</td><td>493,520.52</td>
- *       <td>7,688.30</td><td><b>-876.38</b> loss</td></tr>
+ *   <tr><td>1,030,000 (premium)</td><td>8.642478%</td><td>493,520.53</td>
+ *       <td>7,688.32</td><td><b>-876.39</b> loss</td></tr>
  *   <tr><td>970,000 (discount)</td><td>12.411347%</td><td>477,984.62</td>
- *       <td>-7,847.60</td><td><b>+878.90</b> gain</td></tr>
- *   <tr><td>1,000,000 (<b>par</b>)</td><td>10.471307%</td><td>485,832.21</td>
- *       <td>0.00</td><td><b>0.00</b></td></tr>
+ *       <td>-7,847.59</td><td><b>+878.89</b> gain</td></tr>
+ *   <tr><td>1,000,000 (<b>par</b>)</td><td>10.471307%</td><td>485,832.22</td>
+ *       <td>0.0089</td><td><b>-0.01</b></td></tr>
  * </table>
  *
- * <p>The par row is zero and it is zero <em>exactly</em>, not to within a rounding
- * tolerance. At par the EIR solves to the contractual rate itself, and every
- * expected ladder this class produces satisfies
+ * <p><b>The par row is nil, and it is not zero exactly.</b> This table said 0.00 and
+ * said so emphatically, and it was reproducing docs/09's figures rather than this
+ * class's: those were computed on an unrounded schedule, and a pool bills cash. The
+ * level payment is 21,247.04 and not the exact annuity 21,247.0447110715, every flow
+ * is paid to the paisa, and on that basis the 47 billed flows price to 999,999.9973
+ * rather than to par. The par note therefore solves to 0.008333333204 against a
+ * contractual 0.008333333333, and 0.0089 of instalment-rounding residue presents as
+ * "unamortised" at month 24.
+ *
+ * <p>Which is why {@link #reestimationIsAPnlEvent} takes a measured band rather than
+ * comparing at presentation scale: half a paisa is the wrong threshold for every tenor
+ * but the shortest, and it made this note — bought <em>at par</em> — read as held away
+ * from par and post a catch-up of -0.01, with {@link #catchUpIsNilAtPar} passing
+ * vacuously through its away-from-par branch. The economics below are untouched. At par
+ * the EIR solves to the contractual rate itself, and every expected ladder this class
+ * produces satisfies
  * {@code B_t = B_(t-1) x (1 + r) - CF_t} by construction. Unrolling that recursion
  * gives {@code B_0 = sum CF_t / (1+r)^t} for any {@code CF} path whatever, which is
  * the statement that revised flows discount at the contractual rate to the
@@ -148,6 +161,12 @@ import java.util.Objects;
  * working precision until something else reduces it.
  */
 public final class BehaviouralAdjuster {
+
+    /**
+     * Half of the currency's last published place — the most a billed instalment can
+     * differ from the exact annuity. See {@link #roundingResidueBound}.
+     */
+    private static final BigDecimal HALF_A_MINOR_UNIT = new BigDecimal("0.005");
 
     /**
      * The compounding frequencies whose calendar step is unambiguous.
@@ -305,20 +324,97 @@ public final class BehaviouralAdjuster {
      * it fills the movement schedule with nil-effect restatements that bury the ones
      * a reviewer needs to see.
      *
-     * <p><b>Measured at presentation scale, deliberately.</b> A residue of
-     * {@code 1e-20} left by 28-digit intermediates is not a premium, and the catch-up
-     * it can produce is bounded by it — there is no arrangement of revised flows that
-     * accelerates a premium of nothing into a posting of something. Comparing at
-     * working precision would classify the entire par book as away-from-par on
-     * arithmetic dust and reintroduce the exact churn the test exists to prevent.
-     * The difference is reduced once rather than the two operands rounded and
-     * subtracted, for the reason
+     * <p><b>The band is measured, not assumed, and that is a correction.</b> This used
+     * to compare at presentation scale — dust is not a premium, and comparing at working
+     * precision would classify the whole par book as away-from-par on 1e-20 of
+     * arithmetic. Both halves of that are right and the conclusion did not follow:
+     * rounding to presentation scale sets the threshold at exactly half a paisa, and the
+     * residue the screen must admit is not bounded by half a paisa.
+     *
+     * <p>A billed instalment sits within half a paisa of the exact annuity, and that
+     * error accumulates at the contractual rate over the schedule's life —
+     * {@code 0.005 x ((1+r)^n - 1)/r}. Which is small for a short loan and is not small
+     * at all for a mortgage:
+     *
+     * <pre>
+     *   24 periods at 1.0000%   residue up to 0.1349
+     *   47 periods at 0.8333%   residue up to 0.2862   (fixture O7's note)
+     *   60 periods at 0.8333%   residue up to 0.3872
+     *   240 periods at 0.7500%  residue up to 3.3394
+     *   360 periods at 0.7500%  residue up to 9.1537
+     * </pre>
+     *
+     * <p>So the half-paisa threshold was wrong by two to three orders of magnitude on the
+     * longest-tenor population, and no constant can replace it — a band clearing 3.34 at
+     * 240 periods would swallow real premiums on a 24-period loan. Measured on fixture
+     * O7's par note the residue is 0.0089 at month 24, which rounded up to 0.01 and made
+     * a note bought AT PAR read as held away from par: it posted a catch-up of -0.01 and
+     * {@link #catchUpIsNilAtPar} passed vacuously through its away-from-par branch. The
+     * defect therefore defeated this method's own purpose on exactly the population it
+     * exists to protect — every long-tenor par contract re-estimating on rounding dust is
+     * the churn the screen is here to prevent.
+     *
+     * <p>Hence the explicit bound. {@link #roundingResidueBound} derives it from the rate
+     * and the period count, which the caller has; there is deliberately no overload that
+     * defaults it, because the default is what was wrong. The difference is still reduced
+     * once rather than two operands rounded and subtracted, for the reason
      * {@link InvariantResult#ofMoney} sets out at length.
+     *
+     * @param roundingResidueBound the largest unamortised figure this schedule can show
+     *     from instalment rounding alone — see {@link #roundingResidueBound}
      */
-    public static boolean reestimationIsAPnlEvent(Money contractualBalance, Money eirCarryingAmount) {
-        return !unamortisedPremiumOrDiscount(contractualBalance, eirCarryingAmount)
-            .atPresentationScale()
-            .isZero();
+    public static boolean reestimationIsAPnlEvent(
+        Money contractualBalance, Money eirCarryingAmount, Money roundingResidueBound) {
+        Objects.requireNonNull(roundingResidueBound, "roundingResidueBound");
+        if (roundingResidueBound.isNegative()) {
+            throw new IllegalArgumentException(
+                "the residue bound is a magnitude, got " + roundingResidueBound);
+        }
+        Money unamortised = unamortisedPremiumOrDiscount(contractualBalance, eirCarryingAmount);
+        return unamortised.abs().compareTo(roundingResidueBound) > 0;
+    }
+
+    /**
+     * The largest unamortised premium or discount a schedule can show from instalment
+     * rounding alone: {@code 0.005 x ((1+r)^n - 1)/r}.
+     *
+     * <p>A worst case rather than an estimate, which is the right shape for a band. The
+     * actual residue is whatever the particular instalment's rounding happened to be and
+     * is typically a fraction of this; fixture O7's note carries 0.0089 against a bound
+     * of 0.2862. A band that is loose by a factor of thirty on a figure three orders of
+     * magnitude below any premium worth accelerating costs nothing, and a band that is
+     * tight by a factor of two costs a spurious catch-up on every contract in a cohort.
+     *
+     * <p>Half a paisa is the currency's own rounding unit and is hard-coded as such: an
+     * instalment is billed at presentation scale, so the error it carries is bounded by
+     * half of that scale's last place. A currency with different minor units would need
+     * this read off {@link Money} rather than written here, which is a change worth making
+     * when a second currency arrives and not before.
+     *
+     * @param contractualRate the rate the schedule accrues at, in the schedule's own
+     *     periodicity
+     * @param periods         the schedule's length in those periods
+     */
+    public static Money roundingResidueBound(
+        Rate contractualRate, int periods, java.util.Currency currency) {
+
+        Objects.requireNonNull(contractualRate, "contractualRate");
+        Objects.requireNonNull(currency, "currency");
+        if (periods < 1) {
+            throw new IllegalArgumentException("a schedule spans at least one period, got " + periods);
+        }
+        BigDecimal rate = contractualRate.periodic();
+        BigDecimal accumulation;
+        if (rate.signum() == 0) {
+            // An interest-free advance accumulates its rounding linearly; the closed form
+            // above divides by the rate and is undefined here rather than merely awkward.
+            accumulation = BigDecimal.valueOf(periods);
+        } else {
+            accumulation = Precision.onePlusPow(rate, periods)
+                .subtract(BigDecimal.ONE)
+                .divide(rate, Precision.WORKING);
+        }
+        return Money.of(HALF_A_MINOR_UNIT.multiply(accumulation, Precision.WORKING), currency);
     }
 
     /**
@@ -342,24 +438,49 @@ public final class BehaviouralAdjuster {
      *     {@code CatchUpCalculator.restate(...).catchUp()}
      */
     public static InvariantResult catchUpIsNilAtPar(
-        Money contractualBalance, Money eirCarryingAmount, Money catchUp) {
+        Money contractualBalance, Money eirCarryingAmount, Money catchUp,
+        Money roundingResidueBound) {
 
         Objects.requireNonNull(catchUp, "catchUp");
         Money unamortised = unamortisedPremiumOrDiscount(contractualBalance, eirCarryingAmount);
-        if (reestimationIsAPnlEvent(contractualBalance, eirCarryingAmount)) {
+        if (reestimationIsAPnlEvent(contractualBalance, eirCarryingAmount, roundingResidueBound)) {
             return InvariantResult.pass(InvariantId.ST_9,
                 "held away from par by " + unamortised.atPresentationScale()
                     + " of unamortised premium or discount, so the catch-up of "
                     + catchUp.atPresentationScale() + " is a P&L event and ST-9 makes no claim"
                     + " about its size");
         }
-        return InvariantResult.ofMoney(InvariantId.ST_9,
+        // Nil to within the same band, and for the same reason. docs 09 § 3.4 says the
+        // catch-up at par is "exactly 0.00", which is true of an unrounded schedule and
+        // cannot be true of a billed one: the residue that makes the balance look a hair
+        // off par makes the restatement land a hair off the balance, and it is the one
+        // quantity bounding both. Asserting an exact zero here failed on fixture O7's own
+        // par note, whose catch-up is -0.0089 and presents as -0.01.
+        //
+        // The claim that survives is the one worth making. It is not "the arithmetic
+        // produced a literal zero" — no billed schedule does — it is "nothing was
+        // accelerated", and a posting inside the instalment-rounding residue accelerated
+        // nothing. A re-solved rate substituted for the retained one, which is the CU-1
+        // defect this detects from the other end, moves the catch-up by orders of magnitude
+        // more than the band and is caught exactly as before.
+        if (catchUp.abs().compareTo(roundingResidueBound) <= 0) {
+            return InvariantResult.pass(InvariantId.ST_9,
+                "re-estimation at par (unamortised premium or discount "
+                    + unamortised.atPresentationScale() + ") accelerated nothing: catch-up "
+                    + catchUp.atPresentationScale() + " is within the schedule's own"
+                    + " instalment-rounding residue of " + roundingResidueBound.atPresentationScale()
+                    + ", and the revised flows discount at the contractual rate to the outstanding"
+                    + " balance whatever speed is assumed");
+        }
+        return InvariantResult.fail(InvariantId.ST_9,
             "re-estimation at par (unamortised premium or discount "
-                + unamortised.atPresentationScale() + ") produces no catch-up: the revised flows"
-                + " discount at the contractual rate to the outstanding balance whatever speed is"
-                + " assumed",
-            Money.zero(catchUp.currency()),
-            catchUp);
+                + unamortised.atPresentationScale() + ") posted a catch-up of "
+                + catchUp.atPresentationScale() + ", beyond the schedule's rounding residue of "
+                + roundingResidueBound.atPresentationScale() + ". At par there is nothing to"
+                + " accelerate, so a posting this size means the revised flows were discounted at"
+                + " something other than the rate they accrue at — a re-solved rate substituted"
+                + " for the retained one (CU-1)",
+            catchUp.amount());
     }
 
     // --------------------------------------------------------------- conversions

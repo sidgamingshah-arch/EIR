@@ -74,6 +74,20 @@ import org.junit.jupiter.params.provider.CsvSource;
  */
 class BehaviouralAdjusterTest {
 
+    /**
+     * Fixture O7's note: 47 monthly periods at 10% a year, band 0.2862.
+     *
+     * <p>The screen's threshold is the schedule's own worst-case instalment-rounding
+     * residue rather than a constant, because the figure spans two orders of magnitude
+     * across ordinary tenors — 0.13 at 24 periods, 3.34 at 240 — and the screen used to
+     * compare at presentation scale, fixing it at half a paisa for all of them.
+     */
+    private static Money o7Band() {
+        return BehaviouralAdjuster.roundingResidueBound(
+            Rate.monthly(new BigDecimal("0.10").divide(new BigDecimal("12"), Precision.WORKING)),
+            47, Money.INR);
+    }
+
     // -------------------------------------------------------------- O6, the mortgage
 
     /** O6 principal: 5,000,000. */
@@ -1736,6 +1750,35 @@ class BehaviouralAdjusterTest {
         }
 
         @Test
+        @DisplayName("the band is the schedule's own worst-case rounding residue, and it grows with tenor")
+        void theBandIsMeasuredFromTheSchedule() {
+            // A billed instalment sits within half a paisa of the exact annuity, and that
+            // error accumulates at the contractual rate: 0.005 x ((1+r)^n - 1)/r. Which is
+            // why no constant can serve the book — the figure spans two orders of magnitude
+            // across ordinary tenors, and the screen used to compare at presentation scale,
+            // fixing the threshold at exactly half a paisa for all of them.
+            assertThat(presented(BehaviouralAdjuster.roundingResidueBound(
+                Rate.monthly(bd("0.01")), 24, Money.INR)))
+                .as("24 periods at 1.00%")
+                .isEqualByComparingTo(bd("0.13"));
+            assertThat(presented(o7Band()))
+                .as("47 periods at 0.8333% — fixture O7's note")
+                .isEqualByComparingTo(bd("0.29"));
+            assertThat(presented(BehaviouralAdjuster.roundingResidueBound(
+                Rate.monthly(bd("0.0075")), 240, Money.INR)))
+                .as("240 periods at 0.75% — a mortgage, where the old half-paisa threshold was"
+                    + " wrong by two orders of magnitude")
+                .isEqualByComparingTo(bd("3.34"));
+
+            // An interest-free advance accumulates linearly; the closed form divides by the
+            // rate and is undefined rather than merely awkward there.
+            assertThat(presented(BehaviouralAdjuster.roundingResidueBound(
+                Rate.monthly(bd("0")), 24, Money.INR))).isEqualByComparingTo(bd("0.12"));
+            assertThatIllegalArgumentException().isThrownBy(() ->
+                BehaviouralAdjuster.roundingResidueBound(Rate.monthly(bd("0.01")), 0, Money.INR));
+        }
+
+        @Test
         @DisplayName("the screen is false at par and true either side of it, by one paisa")
         void theScreenKeysOnTheUnamortisedBalance() {
             // The method a batch calls before it calls CatchUpCalculator, and calling it in
@@ -1751,17 +1794,30 @@ class BehaviouralAdjusterTest {
             // discount are separately capable of reading as zero by accident.
             Money contractual = Money.inr("485832.21");
 
-            assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(contractual, contractual))
+            Money band = o7Band();
+
+            assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(contractual, contractual, band))
                 .isFalse();
+            // A paisa either side is now INSIDE this note's band of 0.2862 and correctly reads
+            // as par: on a 47-period schedule a paisa of unamortised balance is not
+            // distinguishable from the residue the billed instalment leaves. That is the whole
+            // correction — the old screen called it a premium and posted a catch-up on it.
             assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                contractual, Money.inr("485832.22"))).isTrue();
+                contractual, Money.inr("485832.22"), band)).isFalse();
             assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                contractual, Money.inr("485832.20"))).isTrue();
-            // docs 09 § 3.4's premium and discount rows on the O7 note.
+                contractual, Money.inr("485832.20"), band)).isFalse();
+            // Both directions past the band, because a premium and a discount are separately
+            // capable of reading as zero by accident.
             assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                contractual, Money.inr("493520.52"))).isTrue();
+                contractual, Money.inr("485832.50"), band)).isTrue();
             assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                contractual, Money.inr("477984.62"))).isTrue();
+                contractual, Money.inr("485831.92"), band)).isTrue();
+            // docs 09 § 3.4's premium and discount rows on the O7 note — four orders of
+            // magnitude outside the band, which is what a real premium looks like.
+            assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
+                contractual, Money.inr("493520.52"), band)).isTrue();
+            assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
+                contractual, Money.inr("477984.62"), band)).isTrue();
         }
 
         @Test
@@ -1776,20 +1832,37 @@ class BehaviouralAdjusterTest {
             // Comparing at working precision would classify the ENTIRE par book as
             // away-from-par on dust and reintroduce the exact churn the screen exists to
             // prevent, on the one population where the correct answer is known in advance
-            // without computing it. A sub-half-paisa residue is the same case at a scale a
-            // reader could nearly see: 0.004 is not a premium either.
+            // without computing it.
+            //
+            // Where this test used to stop — and where it was wrong — is the boundary. It
+            // pinned 0.004 as dust and 0.005 as a premium, calibrating the screen on nothing
+            // longer than a 24-period loan. Fixture O7's own par note carries 0.0089 of
+            // residue at month 24, so it read as held away from par, posted a catch-up of
+            // -0.01, and made ST-9 pass vacuously through its away-from-par branch. The
+            // boundary is now the schedule's own band, and the assertions below are stated
+            // against it rather than against half a paisa.
             Money contractual = Money.inr("485832.21");
+            Money band = o7Band();
 
             assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                contractual, Money.inr("485832.21000000000000000001"))).isFalse();
+                contractual, Money.inr("485832.21000000000000000001"), band)).isFalse();
+            // The measured O7 residue: 0.0089403078975236707538 at month 24.
             assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                contractual, Money.inr("485832.214"))).isFalse();
+                contractual, Money.inr("485832.2189403078975236707538"), band))
+                .as("the par note's own instalment-rounding residue is not a premium")
+                .isFalse();
+            // Either side of the band, so it cannot be widened without a test failing. Stated
+            // as figures rather than as contractual.plus(band): Money.plus and Money.minus
+            // both round at 28 significant digits, so an assertion sitting exactly on the
+            // bound measures that rounding rather than the screen. The band here is 0.2862.
             assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                contractual, Money.inr("485832.206"))).isFalse();
-            // Half a paisa rounds away from zero under HALF_UP, so it does leave par. The
-            // boundary is asserted so the tolerance cannot be widened without a test failing.
+                contractual, Money.inr("485832.49"), band))
+                .as("0.28 of unamortised balance is inside this note's rounding band")
+                .isFalse();
             assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                contractual, Money.inr("485832.215"))).isTrue();
+                contractual, Money.inr("485832.50"), band))
+                .as("0.29 is outside it, so it is a premium worth accelerating")
+                .isTrue();
         }
 
         @Test
@@ -1805,18 +1878,19 @@ class BehaviouralAdjusterTest {
             // instrument, which is exactly how the substitution presents.
             Money contractual = Money.inr("485832.21");
             InvariantResult breach = BehaviouralAdjuster.catchUpIsNilAtPar(
-                contractual, contractual, Money.inr("-876.38"));
+                contractual, contractual, Money.inr("-876.38"), o7Band());
 
             assertThat(breach.satisfied()).isFalse();
             assertThat(breach.id()).isEqualTo(InvariantId.ST_9);
             assertThat(breach.deviation()).isEqualByComparingTo(bd("-876.38"));
             assertThat(breach.detail())
                 .contains("re-estimation at par")
-                .contains("discount at the contractual rate to the outstanding balance whatever"
-                    + " speed is assumed");
+                .as("the message names what a posting this size means, which is the point of"
+                    + " detecting it: CU-1 from the other end")
+                .contains("a re-solved rate substituted for the retained one (CU-1)");
 
             InvariantResult held = BehaviouralAdjuster.catchUpIsNilAtPar(
-                contractual, contractual, Money.zero(Money.INR));
+                contractual, contractual, Money.zero(Money.INR), o7Band());
             assertThat(held.satisfied()).isTrue();
             assertThat(held.deviation()).isEqualByComparingTo(BigDecimal.ZERO);
         }
@@ -1834,7 +1908,7 @@ class BehaviouralAdjusterTest {
             // against a 485,832.21 pool balance is 7,688.31 of unamortised premium, and the
             // -876.38 catch-up is what the CPR revision from 10% to 20% costs there.
             InvariantResult result = BehaviouralAdjuster.catchUpIsNilAtPar(
-                Money.inr("485832.21"), Money.inr("493520.52"), Money.inr("-876.38"));
+                Money.inr("485832.21"), Money.inr("493520.52"), Money.inr("-876.38"), o7Band());
 
             assertThat(result.satisfied()).isTrue();
             assertThat(result.detail())
@@ -1845,7 +1919,7 @@ class BehaviouralAdjusterTest {
             // And a nil catch-up away from par is not a breach either: ST-9 is a claim about
             // the par population only, in both directions.
             assertThat(BehaviouralAdjuster.catchUpIsNilAtPar(
-                Money.inr("485832.21"), Money.inr("493520.52"), Money.zero(Money.INR))
+                Money.inr("485832.21"), Money.inr("493520.52"), Money.zero(Money.INR), o7Band())
                 .satisfied()).isTrue();
         }
 
@@ -1861,10 +1935,26 @@ class BehaviouralAdjusterTest {
             // differencing them straddled a boundary and reported a one-paise breach.
             Money contractual = Money.inr("485832.21");
 
+            // Restated against the band. These two used to be 0.004 passing and 0.01 failing,
+            // which put the boundary at half a paisa — the calibration that made fixture O7's
+            // own par note, whose catch-up is -0.0089, report a breach. Both are inside this
+            // schedule's residue of 0.2862 and neither accelerated anything.
             assertThat(BehaviouralAdjuster.catchUpIsNilAtPar(
-                contractual, contractual, Money.inr("0.004")).satisfied()).isTrue();
+                contractual, contractual, Money.inr("0.004"), o7Band()).satisfied()).isTrue();
             assertThat(BehaviouralAdjuster.catchUpIsNilAtPar(
-                contractual, contractual, Money.inr("0.01")).satisfied()).isFalse();
+                contractual, contractual, Money.inr("0.01"), o7Band()).satisfied()).isTrue();
+            assertThat(BehaviouralAdjuster.catchUpIsNilAtPar(
+                contractual, contractual, Money.inr("-0.0089"), o7Band()).satisfied())
+                .as("fixture O7's own par catch-up")
+                .isTrue();
+            // And beyond the band it is a breach again, so the band cannot be widened
+            // silently: a posting a lender would actually see is still caught.
+            assertThat(BehaviouralAdjuster.catchUpIsNilAtPar(
+                contractual, contractual, Money.inr("0.50"), o7Band()).satisfied()).isFalse();
+            assertThat(BehaviouralAdjuster.catchUpIsNilAtPar(
+                contractual, contractual, Money.inr("-0.50"), o7Band()).satisfied())
+                .as("both directions, because a sign error is the defect this detects")
+                .isFalse();
         }
 
         @Test
@@ -1882,7 +1972,7 @@ class BehaviouralAdjusterTest {
                 .withMessageContaining("currency mismatch");
             assertThatNullPointerException()
                 .isThrownBy(() -> BehaviouralAdjuster.catchUpIsNilAtPar(
-                    Money.inr("1"), Money.inr("1"), null));
+                    Money.inr("1"), Money.inr("1"), null, o7Band()));
         }
     }
 

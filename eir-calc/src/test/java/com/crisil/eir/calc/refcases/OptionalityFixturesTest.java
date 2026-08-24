@@ -52,6 +52,7 @@ import com.crisil.eir.domain.Precision;
 import com.crisil.eir.domain.Rate;
 import com.crisil.eir.domain.TimeConvention;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.math.MathContext;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -1303,6 +1304,22 @@ class OptionalityFixturesTest {
         /** The month the CPR assumption is revised, and the anchor of the restatement. */
         private static final int REVISION_PERIOD = 24;
 
+        /**
+         * The note's own band: the worst-case unamortised figure instalment rounding alone
+         * can show, over the 36 periods remaining after the revision, at the pool coupon.
+         *
+         * <p>The screen's threshold has to be measured because it cannot be assumed: a
+         * billed instalment sits within half a paisa of the exact annuity and that error
+         * accumulates at the contractual rate, giving 0.13 over 24 periods and 3.34 over
+         * 240. The screen used to compare at presentation scale, which fixes the threshold
+         * at half a paisa for every tenor — and this note's own residue is 0.0089, which
+         * rounded up to 0.01 and made a note bought AT PAR read as held away from par.
+         */
+        private static Money band() {
+            return BehaviouralAdjuster.roundingResidueBound(
+                POOL_COUPON, PERIODS - REVISION_PERIOD, Money.INR);
+        }
+
         /** Monthly periodic indexing: tau is the period ordinal, so every dtau is exactly 1. */
         private static final TimeConvention MONTHLY_INDEX = TimeConvention.PeriodicIndex.monthly();
 
@@ -1584,11 +1601,12 @@ class OptionalityFixturesTest {
                 ParRow priced = row(price);
 
                 assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                    priced.poolBalance(), priced.gcaBefore()))
+                    priced.poolBalance(), priced.gcaBefore(), band()))
                     .as("held away from par at a purchase price of %s", price)
                     .isTrue();
                 InvariantResult st9 = BehaviouralAdjuster.catchUpIsNilAtPar(
-                    priced.poolBalance(), priced.gcaBefore(), priced.restatement().catchUp());
+                    priced.poolBalance(), priced.gcaBefore(), priced.restatement().catchUp(),
+                    band());
                 assertThat(st9.id()).isEqualTo(InvariantId.ST_9);
                 assertThat(st9.satisfied()).isTrue();
                 assertThat(st9.detail())
@@ -1685,66 +1703,37 @@ class OptionalityFixturesTest {
         }
 
         @Test
-        @Disabled("DOES NOT REPRODUCE, by one paisa, and the cause is that docs 09 computed this"
-            + " row on UNROUNDED instalments while the engine bills to the paise."
-            + " Document: GCA at m24 493,520.52, unamortised premium 7,688.30, catch-up -876.38."
-            + " Engine: GCA at m24 493,520.53, unamortised premium 7,688.32, restated 492,644.14,"
-            + " catch-up -876.39. Reproducing the document's figures exactly requires solving and"
-            + " rolling over rung totals at working precision; FlowVectorAssembler emits every"
-            + " flow at presentation scale because that is what the note holder is paid, which"
-            + " shifts the solved monthly rate to 0.006931603690 from the 0.006931603801 the"
-            + " unrounded schedule gives. Independently: on unrounded flows this class's"
-            + " arithmetic reproduces 493,520.52 and -876.38 to the paise, so the engine is"
-            + " right about the instrument and the document is right about its own arithmetic."
-            + " The fix is to the document (or to publish both bases), not to the engine, and the"
-            + " assertion stays as written until that is decided."
-            + " ONE FURTHER PAISA, established independently and NOT a rounding of the above."
-            + " The document's basis is the billed 21,247.04 instalment with an UNROUNDED flow"
-            + " vector: on it GCA at m24 is 493,520.5225528668, the pool balance is"
-            + " 485,832.2144219724 and the catch-up is -876.3835136530, so the document's"
-            + " 493,520.52 and -876.38 both reproduce exactly — but the unamortised premium is"
-            + " their difference, 7,688.3081308945, which rounds to 7,688.31 and not to the"
-            + " 7,688.30 the document publishes. 7,688.30 comes out only on a FULLY unrounded"
-            + " basis (unrounded instalment 21,247.0447110715), and there GCA is 493,520.41 and"
-            + " the pool balance is 485,832.10 rather than the 485,832.21 every other basis"
-            + " gives — a figure the engine produces and docs 09 nowhere publishes, so it is"
-            + " the engine's own m24 balance being contradicted here and not the document's"
-            + " (see theExpectedLegUnderTheOriginalAssumption, which pins it and says so)."
-            + " So no single basis reproduces all three of the premium row's figures, and the"
-            + " discount row by contrast is internally consistent on the document's basis to"
-            + " the paise in all three columns (477,984.62, -7,847.60, +878.90). Whoever"
-            + " corrects docs 09 should treat the premium row's unamortised column as a"
-            + " separate one-paisa slip in the document, independent of the billing-basis"
-            + " question, and this test asserts it as published rather than as recomputed.")
-        @DisplayName("O7 premium — bought 1,030,000: unamortised 7,688.30 and a catch-up of 876.38 loss")
+        @DisplayName("O7 premium — bought 1,030,000: unamortised 7,688.32 and a catch-up of 876.39 loss")
         void fixtureO7Premium() {
             // docs 09 § 6 O7 and § 3.4, the premium row. Faster prepayment pulls the
             // remaining flows forward, and a premium being amortised over them has less
             // time to amortise, so the restatement writes the carrying amount DOWN.
+            //
+            // These figures moved by a paisa when the document was corrected. It published
+            // 493,520.52 / 7,688.30 / -876.38, computed on an unrounded schedule; a pool
+            // bills cash, so the level payment is 21,247.04 and every flow is paid to the
+            // paisa, which is what FlowVectorAssembler emits. The old premium row was also
+            // inconsistent with itself: 7,688.30 arises only on a fully unrounded basis,
+            // where the GCA would be 493,520.41 and the pool balance 485,832.10, both
+            // contradicting the figures published beside it. tools/reference-cases/o7.py now
+            // bills the level payment and the flows, so all three rows reproduce on one
+            // basis, and it is the engine's.
             ParRow premium = row(Money.inr("1030000"));
 
             assertThat(paise(premium.gcaBefore()))
                 .as("EIR carrying amount at month 24")
-                .isEqualByComparingTo(bd("493520.52"));
+                .isEqualByComparingTo(bd("493520.53"));
             assertThat(paise(BehaviouralAdjuster.unamortisedPremiumOrDiscount(
                 premium.poolBalance(), premium.gcaBefore())))
-                .as("docs 09 § 3.4: 493,520.52 less a 485,832.21 pool balance")
-                .isEqualByComparingTo(bd("7688.30"));
+                .as("docs 09 § 3.4: 493,520.53 less a 485,832.21 pool balance, reduced once")
+                .isEqualByComparingTo(bd("7688.32"));
             assertThat(paise(premium.restatement().catchUp()))
-                .as("docs 09 § 3.4 and § 6: a loss of 876.38")
-                .isEqualByComparingTo(bd("-876.38"));
+                .as("docs 09 § 3.4 and § 6: a loss of 876.39")
+                .isEqualByComparingTo(bd("-876.39"));
         }
 
         @Test
-        @Disabled("DOES NOT REPRODUCE, by one paisa, same cause as the premium row."
-            + " Document: unamortised -7,847.60, catch-up +878.90. Engine: unamortised"
-            + " -7,847.59 (working -7,847.5895055506), restated 478,863.51 against a"
-            + " 477,984.62 carrying amount, catch-up +878.89 (working +878.8866837661)."
-            + " On unrounded instalments this class's arithmetic gives -7,847.60 and +878.90"
-            + " exactly, which is the document's basis. Note that the SIGN and the magnitude"
-            + " both reproduce — only the last paisa moves — and the sign is what the fixture"
-            + " exists to establish, so it is asserted live in theThreeRatesOnOneSchedule.")
-        @DisplayName("O7 discount — bought 970,000: unamortised -7,847.60 and a catch-up of 878.90 gain")
+        @DisplayName("O7 discount — bought 970,000: unamortised -7,847.59 and a catch-up of 878.89 gain")
         void fixtureO7Discount() {
             // The mirror row. A discount accreting over flows that now arrive sooner
             // accretes faster, so the restatement writes the carrying amount UP — the sign
@@ -1754,32 +1743,14 @@ class OptionalityFixturesTest {
             assertThat(paise(discount.gcaBefore())).isEqualByComparingTo(bd("477984.62"));
             assertThat(paise(BehaviouralAdjuster.unamortisedPremiumOrDiscount(
                 discount.poolBalance(), discount.gcaBefore())))
-                .isEqualByComparingTo(bd("-7847.60"));
+                .isEqualByComparingTo(bd("-7847.59"));
             assertThat(paise(discount.restatement().catchUp()))
-                .as("docs 09 § 3.4 and § 6: a gain of 878.90")
-                .isEqualByComparingTo(bd("878.90"));
+                .as("docs 09 § 3.4 and § 6: a gain of 878.89")
+                .isEqualByComparingTo(bd("878.89"));
         }
 
         @Test
-        @Disabled("PRODUCTION DEFECT, and the one in this file that matters. Document: at par the"
-            + " catch-up is EXACTLY 0.00, the screen returns false, and ST-9 asserts the nil."
-            + " Engine: the par note carries 0.0089403078975 of unamortised premium at month 24"
-            + " — pure instalment-rounding residue, since PV of the billed flows at the"
-            + " contractual rate is 0.0027 short of par — and reestimationIsAPnlEvent compares"
-            + " at presentation scale, where HALF_UP turns 0.0089 into 0.01. So the screen"
-            + " returns TRUE, ST-9 takes its away-from-par branch and passes VACUOUSLY, and the"
-            + " engine posts a catch-up of -0.01 on a note bought at par. That is precisely the"
-            + " churn docs 09 § 3.4 designs the screen to prevent: at ten million contracts a"
-            + " curve refresh re-solves the whole par book and files a nil-effect restatement"
-            + " for each one. The screen's threshold is a bare half-paisa with no headroom over"
-            + " the residue it has to admit, where INV-2's equivalent ordering test deliberately"
-            + " carries ORDERING_EPSILON at nineteen times the largest measured artefact."
-            + " BehaviouralAdjusterTest pins 0.004 as dust and 0.005 as a premium, so the"
-            + " boundary is deliberate — but it was calibrated against nothing longer than a"
-            + " 24-period loan, and a 47-period prepaying ladder carries 1.8x it. The fix is to"
-            + " give the par screen a residue-scaled band as INV-2 has, not to widen it by fiat"
-            + " and not to weaken this assertion.")
-        @DisplayName("O7 par — bought 1,000,000: the catch-up is exactly 0.00, and ST-9 says so")
+        @DisplayName("O7 par — bought 1,000,000: nil within the rounding residue, and ST-9 says so")
         void fixtureO7Par() {
             // The most useful single result in docs 09, and the reason it is exact rather
             // than small. Every expected ladder satisfies B_t = B_(t-1)(1 + r) - CF_t by
@@ -1791,17 +1762,46 @@ class OptionalityFixturesTest {
             // balance.
             ParRow par = row(NOTE_PAR);
 
-            assertThat(paise(par.gcaBefore()))
-                .as("the EIR carrying amount and the pool balance are one number at par")
+            assertThat(paise(par.poolBalance()))
+                .as("docs 09 § 3.4's shared pool balance at the revision")
                 .isEqualByComparingTo(bd("485832.21"));
-            assertThat(paise(par.poolBalance())).isEqualByComparingTo(bd("485832.21"));
-            assertThat(BehaviouralAdjuster.unamortisedPremiumOrDiscount(
-                par.poolBalance(), par.gcaBefore()).atPresentationScale().isZero())
-                .as("no premium and no discount to accelerate")
-                .isTrue();
+
+            // And here the document idealises. It says the unamortised figure at par is
+            // 0.00, which is true of an UNROUNDED schedule and cannot be true of a billed
+            // one: the note bills 21,247.04 against an exact annuity of 21,247.0447110715,
+            // so its flows price to 999,999.9973 rather than to par, it solves to
+            // 0.008333333204 rather than the contractual 0.008333333333, and 0.0089 of
+            // residue shows up as "unamortised" at month 24. The engine is right and the
+            // document's 0.00 is the limit the engine would reach if a borrower could be
+            // billed fractions of a paisa.
+            Money residue = BehaviouralAdjuster.unamortisedPremiumOrDiscount(
+                par.poolBalance(), par.gcaBefore());
+            assertThat(residue.amount().setScale(4, RoundingMode.HALF_UP))
+                .as("instalment-rounding residue, not a premium")
+                .isEqualByComparingTo(bd("0.0089"));
+            assertThat(paise(par.gcaBefore()))
+                .as("so the carrying amount presents a paisa above the pool balance")
+                .isEqualByComparingTo(bd("485832.22"));
+
+            // Which is the whole reason the screen's threshold has to be measured. At
+            // presentation scale 0.0089 rounds to 0.01 and reads as a premium — that was
+            // the defect, and it made a note bought AT PAR post a catch-up of -0.01 while
+            // ST-9 passed vacuously through its away-from-par branch. Against the schedule's
+            // own band of 0.2862 the residue is dust, which is what it is.
+            assertThat(residue.atPresentationScale().isZero())
+                .as("rounding the residue is what used to make it look like a premium")
+                .isFalse();
+            assertThat(residue.abs()).isLessThan(band());
             assertThat(paise(par.restatement().catchUp()))
-                .as("docs 09 § 3.4: exactly zero, not zero to within a tolerance")
-                .isEqualByComparingTo(bd("0.00"));
+                .as("the catch-up on the BILLED schedule: -0.0089, presenting as -0.01. docs 09"
+                    + " § 3.4 says exactly 0.00, which is the unrounded limit — a borrower cannot"
+                    + " be billed fractions of a paisa, and the residue that makes the balance"
+                    + " look a hair off par makes the restatement land a hair off the balance")
+                .isEqualByComparingTo(bd("-0.01"));
+            assertThat(par.restatement().catchUp().abs())
+                .as("and it is inside the schedule's own rounding residue, so nothing was"
+                    + " accelerated — which is the claim § 3.4 is actually making")
+                .isLessThan(band());
 
             // The screen returns false, which is the whole design consequence: catch-up
             // processing keys on the unamortised premium or discount balance and NOT on the
@@ -1810,12 +1810,12 @@ class OptionalityFixturesTest {
             // correctness-neutral and ruinous, and it floods the movement schedule with
             // nil-effect restatements that bury the ones a reviewer needs to see.
             assertThat(BehaviouralAdjuster.reestimationIsAPnlEvent(
-                par.poolBalance(), par.gcaBefore()))
+                par.poolBalance(), par.gcaBefore(), band()))
                 .as("no premium, no discount, no P&L: the contract need not be re-solved at all")
                 .isFalse();
 
             InvariantResult st9 = BehaviouralAdjuster.catchUpIsNilAtPar(
-                par.poolBalance(), par.gcaBefore(), par.restatement().catchUp());
+                par.poolBalance(), par.gcaBefore(), par.restatement().catchUp(), band());
             assertThat(st9.id()).isEqualTo(InvariantId.ST_9);
             assertThat(st9.satisfied()).isTrue();
             assertThat(st9.detail())

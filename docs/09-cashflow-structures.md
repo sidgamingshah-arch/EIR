@@ -226,15 +226,40 @@ Fixture [O7](#o7), and the most useful single result in this document.
 
 A securitisation note, pool coupon 10%, CPR assumption revised 10% → 20% at month 24:
 
-| Purchase price | Unamortised at m24 | Catch-up |
-|---|---:|---:|
-| 1,030,000 (premium) | 7,688.30 | **−876.38** loss |
-| 970,000 (discount) | −7,847.60 | **+878.90** gain |
-| 1,000,000 (**par**) | 0.00 | **0.00** |
+| Purchase price | GCA at m24 | Unamortised at m24 | Catch-up |
+|---|---:|---:|---:|
+| 1,030,000 (premium) | 493,520.53 | 7,688.32 | **−876.39** loss |
+| 970,000 (discount) | 477,984.62 | −7,847.59 | **+878.89** gain |
+| 1,000,000 (**par**) | 485,832.22 | 0.0089 | **−0.01** |
 
-At par the catch-up is zero, and correctly so: with no premium or discount there is nothing for
-a change in prepayment speed to accelerate, because the revised flows always discount to the
+Pool balance at m24 is 485,832.21 in all three cases; only the carrying amount differs.
+
+At par the catch-up is nil, and correctly so: with no premium or discount there is nothing for a
+change in prepayment speed to accelerate, because the revised flows always discount to the
 outstanding balance at the contractual rate.
+
+> **Why "nil" and not "0.00", and why these figures moved.** This table previously read
+> 7,688.30 / −7,847.60 / −876.38 / +878.90 and **0.00** at par, computed on an *unrounded*
+> schedule. A pool bills cash: the level payment is 21,247.04, not the exact annuity
+> 21,247.0447110715, and every flow is paid to the paisa — which is what
+> `FlowVectorAssembler` emits. On that basis the 47 billed flows price to 999,999.9973 rather
+> than to par, the par note solves to 0.008333333204 rather than the contractual
+> 0.008333333333, and **0.0089 of instalment-rounding residue** shows up as "unamortised" at
+> month 24.
+>
+> So the par row's catch-up is −0.01, not 0.00. The economics of §3.4 are untouched — at par
+> there is nothing to accelerate — but "exactly zero" is the limit a schedule reaches only if
+> a borrower can be billed fractions of a paisa. What the engine asserts (invariant ST-9) is
+> that a catch-up at par is nil **to within the schedule's own instalment-rounding residue**,
+> and that bound is measured rather than assumed: `0.005 × ((1+r)^n − 1)/r`, which is 0.13 over
+> 24 periods and **3.34 over 240**. Comparing at presentation scale instead fixes the threshold
+> at half a paisa for every tenor, and it made this very note — bought *at par* — read as held
+> away from par, post a catch-up, and take ST-9's away-from-par branch where it asserts nothing.
+>
+> The premium row was additionally inconsistent with itself: 7,688.30 arises only on a fully
+> unrounded basis, where the GCA would be 493,520.41 and the pool balance 485,832.10, both of
+> which contradict the figures published beside it. The generator now bills the level payment
+> *and* every flow, so all three rows reproduce on one basis — the engine's.
 
 > **Design consequence.** A behavioural-assumption change is a P&L event **only for an
 > instrument held away from par.** The engine must therefore key catch-up processing on the
@@ -394,7 +419,9 @@ Mortgage 5,000,000 at 9% p.a., 240 months, net fee 50,000, EMI 44,986.30:
 <a name="o7"></a>
 ### O7 — The par test
 See [§ 3.4](#34-the-par-test--when-optionality-and-behaviour-are-pl-events-at-all).
-Premium −876.38, discount +878.90, par 0.00.
+Premium −876.39, discount +878.89, par −0.01 — nil to within the schedule's own
+instalment-rounding residue, which is the claim ST-9 makes and the reason the screen's
+threshold is measured rather than fixed at half a paisa.
 
 <a name="o8"></a>
 ### O8 — Lease with residual value, and INV-2 in both directions

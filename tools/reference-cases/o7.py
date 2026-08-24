@@ -14,7 +14,13 @@ def pool_run(opening, level, rate, cpr, cap=400):
         if p > bal: p = bal
         after = bal - p
         pre = after*m
-        flows[t] = intr + p + pre
+        # Billed, for the same reason the level payment is. A pool pays cash, and
+        # FlowVectorAssembler emits every rung total at presentation scale because a
+        # holder cannot be paid a fraction of a paisa. Leaving the flows unrounded here
+        # while rounding the level was a third basis, reproducing neither the engine nor
+        # the unrounded ideal, and it is why no single basis reproduced all three columns
+        # of the premium row.
+        flows[t] = q(intr + p + pre)
         bal = after - pre
         bals.append(bal)
     return flows, bals, len(flows)
@@ -23,7 +29,13 @@ print("="*78)
 print("O7  SECURITISATION NOTE BOUGHT AWAY FROM PAR - the B5.4.6 catch-up")
 print("="*78)
 face = D('1000000'); cpn = D('0.10')/12; term = 60
-LEVEL = emi(face, cpn, term)
+# BILLED, not exact. A borrower cannot be paid fractions of a paisa, so the pool
+# bills a level payment rounded to the currency's last place, and FlowVectorAssembler
+# emits every rung total at presentation scale for the same reason. This line read
+# emi(face, cpn, term) — the unrounded annuity 21,247.0447110715 — which is why the
+# figures this file produced could not be reproduced by the engine, and why no single
+# basis reproduced all three columns of the premium row.
+LEVEL = q(emi(face, cpn, term))
 print(f"  Pool face {q(face)}, coupon 10.00% p.a., {term}m contractual term")
 print(f"  Level payment fixed at origination: {q(LEVEL)}")
 print(f"  Contractual effective rate: {q(annualise(cpn)*100,6)}% p.a.\n")
