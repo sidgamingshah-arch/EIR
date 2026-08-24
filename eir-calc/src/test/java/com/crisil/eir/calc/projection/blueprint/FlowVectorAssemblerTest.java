@@ -1038,9 +1038,6 @@ class FlowVectorAssemblerTest {
         }
 
         @Test
-        @Disabled("DEFECT: ST-3 is emitted three times and ST-5 twice under one invariant"
-            + " id per projection, which is the defect PenalChargeScreen.combine exists to"
-            + " prevent. See the comment below.")
         @DisplayName("DEFECT: every invariant identifier carries exactly one result per projection")
         void everyInvariantIdentifierCarriesExactlyOneResultPerProjection() {
             // The generalisation of the rule PC-1 already follows, and the reason PC-1
@@ -1091,8 +1088,10 @@ class FlowVectorAssemblerTest {
             // appending expected.invariants() is correct in isolation, and the double
             // counting only arises because the projector also gathers them itself.
             //
-            // Not fixed here: this is a test-writing change, and a silent fix buried in
-            // one would be worse than a documented failure.
+            // Fixed by InvariantResult.oneResultPerInvariant, applied where this method
+            // assembles the stages' results. Conjoined rather than deduplicated: dropping
+            // the later results would drop the behavioural claim, which is the one with
+            // independent content.
             BlueprintProjection projection =
                 new BlueprintProjector(case1()).projectBlueprint(case1Fees());
 
@@ -1101,6 +1100,19 @@ class FlowVectorAssemblerTest {
                     .as("results carrying %s", id)
                     .isLessThanOrEqualTo(1);
             }
+
+            // And the conjunction kept the evidence rather than picking a winner. Both
+            // ST-3 claims are stated in the one result, so a reader can still tell which
+            // routes were asserted — a pass on the ladder alone means something different
+            // from a pass on the ladder and the behavioural leg.
+            InvariantResult st3 = projection.invariants().stream()
+                .filter(result -> result.id() == InvariantId.ST_3)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("ST-3 was not asserted at all"));
+            assertThat(st3.satisfied()).isTrue();
+            assertThat(st3.detail())
+                .as("the ladder's claim and the behavioural claim both survive: %s", st3.detail())
+                .contains(";");
         }
 
         @Test

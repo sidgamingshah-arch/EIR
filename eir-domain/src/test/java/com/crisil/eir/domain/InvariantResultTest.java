@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import java.math.BigDecimal;
 import java.util.Currency;
+import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -222,6 +223,94 @@ class InvariantResultTest {
                     InvariantId.IC_1, "GCA0 = net cash flow at inception",
                     Money.inr("495000.00"), Money.inr("495000.01")).orThrow())
                 .withMessageContaining("IC_1");
+        }
+    }
+
+    @Nested
+    @DisplayName("a named invariant gets exactly one answer per period")
+    class Conjunction {
+
+        // The problem this solves, found three times before it was generalised. PC-1 was
+        // asserted twice per LMS projection with the two routes disagreeing; ST-2 twice per
+        // Stage 3 decomposition; ST-3 three times per blueprint projection, two of them the
+        // same statement and the third a different claim. In every case the conjunction was
+        // still enforced, so no breach was lost — but anything resolving the invariant by
+        // name got whichever result came first, which on ST-3 was the one that passed.
+
+        @Test
+        @DisplayName("a breach anywhere fails the conjunction, whichever order the results arrive in")
+        void aBreachAnywhereFailsTheWhole() {
+            InvariantResult passed = InvariantResult.pass(InvariantId.ST_3, "the ladder ties");
+            InvariantResult failed = InvariantResult.fail(
+                InvariantId.ST_3, "the expected leg does not tie", new BigDecimal("-1200.00"));
+
+            assertThat(InvariantResult.conjunction(List.of(passed, failed)).satisfied()).isFalse();
+            assertThat(InvariantResult.conjunction(List.of(failed, passed)).satisfied()).isFalse();
+            assertThat(InvariantResult.conjunction(List.of(passed, passed)).satisfied()).isTrue();
+            assertThat(InvariantResult.conjunction(List.of(passed, failed)).deviation())
+                .as("the breach's own magnitude survives, not a zero from the passing result")
+                .isEqualByComparingTo(new BigDecimal("-1200.00"));
+        }
+
+        @Test
+        @DisplayName("distinct evidence is kept and identical evidence collapses")
+        void evidenceIsKeptWithoutStuttering() {
+            // Which routes were asserted is the part worth keeping: a pass on one route
+            // means something different from a pass on all of them. But two copies of one
+            // statement is a stutter, and the common ST-3 case is exactly that.
+            InvariantResult ladder = InvariantResult.pass(InvariantId.ST_3, "the ladder ties");
+            InvariantResult behavioural =
+                InvariantResult.pass(InvariantId.ST_3, "the expected leg ties");
+
+            assertThat(InvariantResult.conjunction(List.of(ladder, behavioural)).detail())
+                .isEqualTo("the ladder ties; the expected leg ties");
+            assertThat(InvariantResult.conjunction(List.of(ladder, ladder, ladder)).detail())
+                .as("the same statement gathered three times reads once")
+                .isEqualTo("the ladder ties");
+        }
+
+        @Test
+        @DisplayName("a single result passes through untouched rather than being reworded")
+        void oneResultIsItself() {
+            InvariantResult only = InvariantResult.pass(InvariantId.IC_1, "as at inception");
+            assertThat(InvariantResult.conjunction(List.of(only))).isSameAs(only);
+        }
+
+        @Test
+        @DisplayName("conjoining across invariants is refused: a conjunction is one invariant's own results")
+        void mixedIdentifiersAreRefused() {
+            assertThatIllegalArgumentException()
+                .isThrownBy(() -> InvariantResult.conjunction(List.of(
+                    InvariantResult.pass(InvariantId.ST_3, "a"),
+                    InvariantResult.pass(InvariantId.ST_5, "b"))))
+                .withMessageContaining("cannot conjoin");
+            // An empty conjunction would be a control that silently vanished.
+            assertThatIllegalArgumentException()
+                .isThrownBy(() -> InvariantResult.conjunction(List.of()))
+                .withMessageContaining("at least one result");
+        }
+
+        @Test
+        @DisplayName("collapsing a mixed list leaves one result per invariant, in first-appearance order")
+        void collapsingAMixedListPreservesOrder() {
+            List<InvariantResult> gathered = List.of(
+                InvariantResult.pass(InvariantId.ST_3, "the ladder ties"),
+                InvariantResult.pass(InvariantId.ST_5, "terminal as intended"),
+                InvariantResult.pass(InvariantId.ST_3, "the expected leg ties"),
+                InvariantResult.pass(InvariantId.ST_5, "terminal as intended"),
+                InvariantResult.pass(InvariantId.PC_1, "screened"));
+
+            List<InvariantResult> collapsed = InvariantResult.oneResultPerInvariant(gathered);
+
+            assertThat(collapsed).hasSize(3);
+            assertThat(collapsed.stream().map(InvariantResult::id))
+                .as("first-appearance order, so a report reads in the order things were computed")
+                .containsExactly(InvariantId.ST_3, InvariantId.ST_5, InvariantId.PC_1);
+            assertThat(collapsed.get(0).detail()).isEqualTo("the ladder ties; the expected leg ties");
+            assertThat(collapsed.get(1).detail())
+                .as("the duplicated ST-5 collapses to one statement")
+                .isEqualTo("terminal as intended");
+            assertThat(collapsed).isUnmodifiable();
         }
     }
 

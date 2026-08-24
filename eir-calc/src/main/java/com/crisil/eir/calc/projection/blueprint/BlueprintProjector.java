@@ -305,13 +305,29 @@ public final class BlueprintProjector implements CashflowProjector {
         asserted.add(PenalChargeScreen.overFeePostings(fees));
         asserted.add(calendarCheck);
 
+        // One result per invariant, because a named control an auditor asks for by name
+        // gets one answer. Gathering the stages' own results the way this method does
+        // published ST-3 three times and ST-5 twice on a plain projection: the ladder
+        // asserts both, and BehaviouralAdjustment.of appends the expected ladder's
+        // results too, which under a contractual overlay ARE the ladder's. Two of the
+        // three ST-3s were therefore the same statement twice — noise — and the third a
+        // different claim under the same identifier: the ladder's "scheduled principal +
+        // terminal = advanced" against the behavioural "principal recovered on the
+        // expected leg = on the contractual leg". Under a prepayment curve that moves
+        // principal in amount rather than in time those disagree, and anything resolving
+        // ST-3 by identifier got whichever came first — the ladder's, the one that passes.
+        //
+        // Conjoined rather than deduplicated: dropping later results would drop the
+        // behavioural claim, which is the one with independent content. See
+        // InvariantResult.conjunction, which is the general form of the fix PC-1 already
+        // carried and ST-2 needed after it.
         ProjectionResult projection = new ProjectionResult(
             contractual,
             expected,
             assembly.initialCarryingAmount(),
             choice.convention(),
             expected.equals(contractual),
-            asserted);
+            InvariantResult.oneResultPerInvariant(asserted));
 
         // ST-10 is asserted rather than reported, and it is the one invariant in this
         // pipeline that cannot fail for a data reason. A calendar that can move a due

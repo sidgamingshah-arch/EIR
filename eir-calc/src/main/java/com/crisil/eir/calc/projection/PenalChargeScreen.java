@@ -127,29 +127,17 @@ public final class PenalChargeScreen {
         if (assertions.size() == 1) {
             return assertions.get(0);
         }
-        StringBuilder detail = new StringBuilder();
-        BigDecimal deviation = null;
-        boolean satisfied = true;
         for (InvariantResult assertion : assertions) {
             if (assertion.id() != InvariantId.PC_1) {
                 throw new IllegalArgumentException(
                     "only PC-1 assertions combine here, got " + assertion.id());
             }
-            if (detail.length() > 0) {
-                detail.append("; ");
-            }
-            detail.append(assertion.detail());
-            if (!assertion.satisfied()) {
-                satisfied = false;
-                if (deviation == null) {
-                    deviation = assertion.deviation();
-                }
-            }
         }
-        return satisfied
-            ? InvariantResult.pass(InvariantId.PC_1, detail.toString())
-            : InvariantResult.fail(InvariantId.PC_1, detail.toString(),
-                deviation == null ? BigDecimal.ZERO : deviation);
+        // The conjunction itself is general — the same problem turned up on ST-2 and then
+        // on ST-3, and the third time is what moved it to InvariantResult. What stays here
+        // is the PC-1-specific part: refusing any other id, so that a caller cannot quietly
+        // fold an unrelated control into the penal-charge screen's answer.
+        return InvariantResult.conjunction(assertions);
     }
 
     /**
