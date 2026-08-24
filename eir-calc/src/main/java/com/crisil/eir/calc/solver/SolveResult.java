@@ -27,6 +27,15 @@ import java.util.Objects;
  *                              solve examined, Newton and bisection together. Cost
  *                              telemetry for the 10M-contract close window (4.6), not
  *                              a correctness signal
+ * @param safeguardSteps        how many of those iterations replaced a rejected
+ *                              tangent step with a bisection of the current bracket
+ *                              (4.2 step 3). Unlike {@link SolverMethod}, this
+ *                              <em>does</em> move with the shape of a vector — step
+ *                              EMIs, moratoria with capitalisation, balloons and
+ *                              tranched drawdowns raise it while still terminating in
+ *                              the Newton phase — so it is the profile signal worth
+ *                              monitoring across a population. Zero on a well-behaved
+ *                              vector, and zero whenever no rate was solved
  * @param residualAtStoredRate  {@code |f(r)|} re-evaluated at the <em>rounded</em>
  *                              12dp rate, not at the raw solved value. It is the
  *                              published rate that must reproduce the published
@@ -43,6 +52,7 @@ public record SolveResult(
     SolveStatus status,
     SolverMethod method,
     int iterations,
+    int safeguardSteps,
     BigDecimal residualAtStoredRate,
     List<BigDecimal> candidateRoots,
     String diagnostic) {
@@ -53,6 +63,10 @@ public record SolveResult(
         candidateRoots = candidateRoots == null ? List.of() : List.copyOf(candidateRoots);
         if (iterations < 0) {
             throw new IllegalArgumentException("iterations must be non-negative, got " + iterations);
+        }
+        if (safeguardSteps < 0 || safeguardSteps > iterations) {
+            throw new IllegalArgumentException("safeguardSteps must lie in [0, " + iterations
+                + "], got " + safeguardSteps);
         }
         if (status.carriesRate()) {
             if (rate == null || method == null || residualAtStoredRate == null) {
@@ -67,27 +81,29 @@ public record SolveResult(
 
     /** A unique root, or a multiple-root vector disambiguated to exactly one (4.4(1)). */
     public static SolveResult solved(Rate rate, SolverMethod method, int iterations,
-            BigDecimal residualAtStoredRate, List<BigDecimal> candidateRoots, String diagnostic) {
-        return new SolveResult(rate, SolveStatus.SOLVED, method, iterations, residualAtStoredRate,
-            candidateRoots, diagnostic);
+            int safeguardSteps, BigDecimal residualAtStoredRate, List<BigDecimal> candidateRoots,
+            String diagnostic) {
+        return new SolveResult(rate, SolveStatus.SOLVED, method, iterations, safeguardSteps,
+            residualAtStoredRate, candidateRoots, diagnostic);
     }
 
     /** Several roots in the plausible band; the nearest to contractual, flagged (4.4(2)). */
     public static SolveResult requiresReview(Rate rate, SolverMethod method, int iterations,
-            BigDecimal residualAtStoredRate, List<BigDecimal> candidateRoots, String diagnostic) {
-        return new SolveResult(rate, SolveStatus.REQUIRES_REVIEW, method, iterations,
+            int safeguardSteps, BigDecimal residualAtStoredRate, List<BigDecimal> candidateRoots,
+            String diagnostic) {
+        return new SolveResult(rate, SolveStatus.REQUIRES_REVIEW, method, iterations, safeguardSteps,
             residualAtStoredRate, candidateRoots, diagnostic);
     }
 
     /** No sign change on the ladder. Exception queue, never a defaulted rate (4.3). */
     public static SolveResult noSolution(String diagnostic) {
-        return new SolveResult(null, SolveStatus.NO_SOLUTION, null, 0, null, List.of(), diagnostic);
+        return new SolveResult(null, SolveStatus.NO_SOLUTION, null, 0, 0, null, List.of(), diagnostic);
     }
 
     /** Multiple roots that the band could not resolve to one. Exception queue (4.4(3)). */
     public static SolveResult multipleRoots(List<BigDecimal> candidateRoots, int iterations,
             String diagnostic) {
-        return new SolveResult(null, SolveStatus.MULTIPLE_ROOTS, null, iterations, null,
+        return new SolveResult(null, SolveStatus.MULTIPLE_ROOTS, null, iterations, 0, null,
             candidateRoots, diagnostic);
     }
 

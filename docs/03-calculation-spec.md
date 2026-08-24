@@ -298,7 +298,11 @@ Newton–Raphson with an analytic derivative, inside a guaranteed bracket, falli
      Scan r over a fixed ladder: -0.9999, -0.5, -0.1, 0, 0.001, 0.01, 0.05,
      0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0   (per-period or annual per convention)
      Find adjacent pairs with a sign change in f.
-     0 sign changes  -> NoSolution        (4.3)
+     A node where |f| <= tol_abs is itself the root: take it, refine nothing.
+     0 sign changes  -> ESCALATE the ladder to
+                        -0.999999999999, -0.9999999, -0.99999, 100, 1e4, 1e6, 1e12
+                        and rescan. Still 0 -> NoSolution  (4.3)
+                        A root found only here -> REQUIRES_REVIEW, never SOLVED.
      >1 sign changes -> MultipleRoots     (4.4)
 
 2. SEED
@@ -317,6 +321,8 @@ Newton–Raphson with an analytic derivative, inside a guaranteed bracket, falli
      Tier 1 exposures use a tightened tolerance (3.9, 10).
      Hard cap 100 iterations, then pure bisection over the bracket
      for 200 iterations.
+     The first test fires here, at working precision; step 5's rounding is
+     what puts the PUBLISHED residual back outside tol_abs -- see 4.2.1.
 
 5. ROUND
      Round to 12dp HALF_UP. Re-evaluate |f| at the rounded rate and
@@ -329,11 +335,87 @@ interest capitalisation, IDC, FITL creation, tranched project finance. Bisection
 with a sign change is guaranteed to converge, so the fallback path cannot fail to terminate.
 Newton–Raphson is there for speed, not for correctness.
 
+Note, though, that under the cap of 100 the *phase* fallback is unreachable: every accepted point
+replaces a bracket endpoint, so a Newton phase that bisects on all 100 iterations has halved the
+bracket 100 times, and the width test in step 4 fires long before. The guarantee is real and the
+path is not exercised. What does happen on irregular profiles is that individual steps are
+safeguarded inside the Newton phase, and that count — not the reported phase — is the signal to
+monitor across a population.
+
+### 4.2.1 What the convergence test can actually deliver
+
+`tol_abs` says how small a residual is worth chasing. It does not say how small a residual survives
+**publication**, and those are different numbers.
+
+The refinement runs at 28 significant digits, where `tol_abs` is comfortably reachable: an ordinary
+instrument converges on the residual test in three to seven iterations. Then step 5 rounds the rate
+to 12dp, moving it by up to half a unit in its last place, and the residual comes back up by roughly
+`|f'|·10⁻¹²/2`. That figure — `residualAtStoredRate` — is the one recorded on the computation and the
+one a reviewer sees. Measured on annuities priced net of a 0.5% integral fee, so the root is not
+itself a 12dp grid point:
+
+| Instrument | `residualAtStoredRate` | `tol_abs` | inside? |
+|---|---:|---:|:--:|
+| 50,000 consumer durable, 12 EMIs | 2.5e-08 | 1e-10 | no |
+| 50,000 consumer durable, 24 EMIs | 2.5e-07 | 1e-10 | no |
+| 1,000,000 EMI loan, 12 months | 3.9e-07 | 1e-10 | no |
+| 1,000,000 EMI loan, 24 months | 4.1e-06 | 1e-10 | no |
+| 1,000,000,000 facility, 24 months | 4.9e-03 | 1e-07 | no |
+
+Across that sweep **none of the 36 published rates satisfied `tol_abs`**, by two to five orders of
+magnitude. Price the same annuities *without* a fee and all 36 satisfy it, at 1e-23 to 4.5e-18 —
+which is not the solver doing better but the fixture putting the true root exactly on a 12dp grid
+point, so that step 5 has nothing to round. A test built that way measures its own construction, and this
+document previously reasoned from exactly that kind of fixture.
+
+None of this is a defect in the solver or in the tolerance: refining past the twelfth decimal place
+cannot change a published figure, so there is nothing to buy by chasing further. But it has to be
+**stated**, because otherwise a reviewer reading a recorded residual of 4.1e-06 against a `tol_abs`
+of 1e-10 has no way to tell that this is what a 12dp rate leaves rather than evidence that the solve
+went wrong.
+
+The engine therefore treats `max(tol_abs, rounding floor)` as the bound a published rate must
+satisfy. Missing `tol_abs` alone is the ordinary case and carries no information. Missing both means
+the refinement did not reach the root, and the computation is marked `REQUIRES_REVIEW` rather than
+reported as converged.
+
+**A corollary worth its own line.** A loan priced at its contractual rate has its root exactly on a
+ladder node — 1% a month *is* the node `0.01` — and `f` there is around 1e-21: non-zero, so the
+bracket is not degenerate, and the root is the bracket's own lower endpoint. `f` is convex and
+decreasing, so every tangent step from inside the bracket lands *past* the root and outside the
+bracket, is refused by the step-3 safeguard, and pure bisection walks the bracket down to 1e-14.
+That is 41 iterations for a root the scan had already found, on the modal instrument in the book,
+in a close window that has to price ten million contracts (4.6). Hence the second line of step 1:
+ask whether a bracket endpoint is already inside `tol_abs` before refining. It costs nothing — the
+scan has both residuals in hand — and it is safe precisely because `tol_abs` is tighter than the
+half-ULP of a stored rate, so a node inside it rounds to the same published rate as the true root.
+
 ### 4.3 No solution
 
-No sign change over the ladder means no economically meaningful rate exists — total inflows do not
-exceed the initial outflow, or the vector is malformed. The contract fails into the exception queue
-with the flow vector attached.
+No sign change over the ladder **or its escalation** means no root exists: `f`'s own coefficient
+sequence never changes sign, so it cannot cross zero at any rate. A facility drawn twice and never
+repaid is the case. The contract fails into the exception queue with the flow vector attached.
+
+**"Total inflows do not exceed the initial outflow" is *not* this case**, and the spec said it was
+until the engine was built against it. For a vector of one outflow at inception and receipts
+afterwards, `f` runs from `+∞` as `r → -100%⁺` — discounting at a negative rate inflates — to
+`-GCA₀` as `r → ∞`, continuously. It therefore always crosses zero: a unique rate above -100%
+exists whatever the recovery. A token recovery of 50.00 against 1,000,000.00 advanced a month
+earlier has an EIR, and it is exactly -99.995% per month.
+
+What failed was reach, not existence. A ladder node caps the money multiple the scan can bracket at
+`(1+node)^τ`, and that cap collapses toward 1 as τ falls: the top node 10.0 brackets a multiple of
+11 over a year and only 1.006591 over a single day. A one-day drawing of 10,000,000.00 with a
+100,000.00 integral fee at 6.75% ACT/365F repays 10,001,849.32 against 9,900,000.00 — a multiple of
+1.010288 and an unambiguous **4,092.4331% annual effective** — and sat above the ladder. That is
+the whole short-tenor population, which is the Tier 3 population (10).
+
+Hence escalation, and hence `REQUIRES_REVIEW` rather than `SOLVED` for anything it finds. A root out
+there is one of two things and both need a person: a tenor too short to carry the fee loaded onto
+it, where the annualisation is right and the presentation is a policy question (4.5); or a recovery
+so far below the advance that the answer is impairment rather than interest. Reporting *which rate*
+the vector implies is strictly more useful than reporting that none exists — and it does not send a
+reviewer hunting a fee misclassification that is not there.
 
 **It is never defaulted to zero, and never to the contractual rate.** Silently falling back to the
 contractual rate is the defect that quietly reproduces the pre-ACPIR position while appearing to

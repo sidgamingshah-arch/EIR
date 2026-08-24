@@ -171,14 +171,46 @@ class Case07SolverStressTest {
     // -------------------------------------------------------- must raise, never guess
 
     @Test
-    @DisplayName("total inflows below the initial outflow: NO_SOLUTION, and no rate at all")
-    void noSignChangeOnTheLadderIsNoSolution() {
+    @DisplayName("a root the ladder cannot reach is reported and flagged, never published and never guessed")
+    void aRootOutsideTheLadderIsFlaggedNotDefaulted() {
+        // The fixture's own premise, corrected. "Total inflows below the initial outflow"
+        // is not the no-solution case: for a vector of one outflow then receipts, f(r)
+        // runs from +infinity at r -> -100% to -target as r grows and is continuous, so a
+        // unique root above -100% always exists. This one is at -99.995% per month, and
+        // the ladder's -0.9999 floor is simply not low enough to bracket it. See the
+        // "Why total inflows <= initial outflow is not the no-solution case" section of
+        // docs/reference-cases/case-07-solver-stress.md.
         FlowVector tokenRecovery = FlowVector.of(DISBURSEMENT, Money.INR, List.of(
             CashFlow.of(DISBURSEMENT, 0, Money.inr("-1000000"), FlowKind.DISBURSEMENT),
             CashFlow.of(DISBURSEMENT.plusMonths(1), 1, Money.inr("50"), FlowKind.PRINCIPAL)));
 
         SolveResult result = solver.solve(SolveRequest.atInception(
             tokenRecovery, MONTHLY, ONE_PERCENT_MONTHLY.periodic()));
+
+        assertThat(result.status())
+            .as("a rate exists, so NO_SOLUTION would be false; it is nowhere near bookable, "
+                + "so SOLVED would be worse")
+            .isEqualTo(SolveStatus.REQUIRES_REVIEW);
+        assertThat(result.status().requiresApproval()).isTrue();
+        assertThat(result.rateOrThrow().periodic()).isEqualByComparingTo(bd("-0.999950000000"));
+        // The thing this case is actually for: whatever happens, not the contractual rate.
+        assertThat(result.rateOrThrow().periodic())
+            .isNotEqualByComparingTo(ONE_PERCENT_MONTHLY.periodic());
+        assertThat(result.rateOrThrow().periodic()).isNotEqualByComparingTo(bd("0"));
+    }
+
+    @Test
+    @DisplayName("a facility drawn twice and never repaid has no root at all: NO_SOLUTION, and no rate")
+    void aVectorWithNoSignChangeAtAllIsNoSolution() {
+        // What the row above used to test, on a vector where it is actually true. f's
+        // coefficient sequence never changes sign here, so f cannot cross zero at any
+        // rate and no escalation of the ladder can invent one.
+        FlowVector neverRepaid = FlowVector.of(DISBURSEMENT, Money.INR, List.of(
+            CashFlow.of(DISBURSEMENT, 0, Money.inr("-1000000"), FlowKind.DISBURSEMENT),
+            CashFlow.of(DISBURSEMENT.plusMonths(12), 12, Money.inr("-100000"), FlowKind.DISBURSEMENT)));
+
+        SolveResult result = solver.solve(SolveRequest.atInception(
+            neverRepaid, MONTHLY, ONE_PERCENT_MONTHLY.periodic()));
 
         assertThat(result.status()).isEqualTo(SolveStatus.NO_SOLUTION);
         assertThat(result.status().routesToExceptionQueue())

@@ -33,7 +33,10 @@ import java.util.Objects;
  * <em>per month</em> — economically absurd, and harmless: a bracket is not a
  * forecast, it only has to contain the root. The ladder carries no economic
  * judgement at all. That lives in {@link PlausibleBand}, which is applied to the
- * annualised root, where the units are unambiguous.
+ * annualised root, where the units are unambiguous. Under {@code ActualDate} the
+ * units are annual effective and tau is a year fraction, which makes the same ladder
+ * reach very differently on a one-day drawing than on a twenty-year term loan — see
+ * {@link #ESCALATION}, which closes that gap without charging the whole book for it.
  *
  * <p><strong>What counts as a root.</strong> An adjacent pair of ladder nodes with
  * opposite signs, or a node where {@code f} is exactly zero — the interest-free
@@ -51,12 +54,14 @@ import java.util.Objects;
  * with subtly different discounting from the solve that produced the rate is the
  * defect that quietly converts a B5.4.6 event into a B5.4.5 one. Inside a refinement
  * every present value is kept for as long as it can be used again, so no point is
- * discounted twice; the only deliberate re-evaluation is at the two ends of the
- * ladder when composing a no-solution diagnostic, where an exception-queue entry that
- * shows its working is worth two present values. On the common path the fourteen-node
- * ladder scan therefore costs more than the four Newton iterations that follow it, and
- * it is still scanned in full — see {@link #scan}. The incremental discount-factor
- * recurrence of 4.6 is deliberately not taken: see the note on {@link Residual}.
+ * discounted twice. The deliberate re-evaluations are all on failure paths, where an
+ * exception-queue entry that shows its working is worth a few present values: the two
+ * ends of the ladder when composing a no-solution diagnostic, the escalation nodes of
+ * {@link #ESCALATION}, and the residual at a root that stopped on bracket width. On
+ * the common path the fourteen-node ladder scan therefore costs more than the four
+ * Newton iterations that follow it, and it is still scanned in full — see
+ * {@link #scan}. The incremental discount-factor recurrence of 4.6 is deliberately
+ * not taken: see the note on {@link Residual}.
  */
 public final class BracketedNewtonSolver implements RateSolver {
 
@@ -82,6 +87,53 @@ public final class BracketedNewtonSolver implements RateSolver {
         new BigDecimal("2.0"),
         new BigDecimal("5.0"),
         new BigDecimal("10.0"));
+
+    /**
+     * Nodes consulted only when {@link #LADDER} finds no sign change at all.
+     *
+     * <p><strong>Why a fixed ladder is not enough on its own.</strong> Under
+     * {@code ActualDate} the solved rate is annual effective and tau is a year
+     * fraction, so a ladder node caps the <em>money multiple</em> the scan can
+     * bracket at {@code (1+node)^tau} — and as tau falls that cap collapses toward 1.
+     * The top node 10.0 brackets a multiple of 11 over a year, but only 1.006591 over
+     * one day and 1.047061 over seven. A single-day money-market drawing of
+     * 10,000,000 with a 100,000 integral fee and 6.75% ACT/365F contractual interest
+     * repays 10,001,849.32 against a 9,900,000 outflow — a multiple of 1.010288,
+     * which is a perfectly ordinary instrument and a mathematically unambiguous
+     * annual effective rate of 4,092.4331%. It sits above the top of the ladder. The
+     * same collapse happens downward: the bottom node -0.9999 brackets a loss of only
+     * 2.49% over one day.
+     *
+     * <p>So the whole short-tenor population — which is exactly the Tier 3 population,
+     * where a documented approximation is applied to instruments too small or too
+     * short to solve individually (10) — would come back {@code NO_SOLUTION} for
+     * vectors whose root exists, is unique, and is simply out of reach. That is the
+     * defect this list closes.
+     *
+     * <p><strong>Why escalation rather than a longer ladder.</strong> The scan runs on
+     * every solve and already costs more than the Newton iterations that follow it
+     * (4.6), so nodes added to {@link #LADDER} are paid for on all ten million
+     * contracts. These are paid for only on a vector the ladder failed, which is a
+     * vector otherwise headed for the exception queue — where twenty extra present
+     * values are free. Escalation is still fixed, ordered and published, so two runs
+     * of the same contract remain comparable.
+     *
+     * <p>The extremes are set by what a stored rate can express, not by economics.
+     * {@code -0.999999999999} is the closest node to -100% that survives rounding to
+     * {@link Precision#RATE_SCALE} without becoming exactly -1, where the discount
+     * factor is undefined; it brackets a 7.29% loss over one day. The top 1e12
+     * brackets a 7.86% gain over one day. Nothing here is a forecast — a bracket only
+     * has to contain the root, and economic judgement lives in {@link PlausibleBand},
+     * applied to the annualised result.
+     */
+    public static final List<BigDecimal> ESCALATION = List.of(
+        new BigDecimal("-0.999999999999"),
+        new BigDecimal("-0.9999999"),
+        new BigDecimal("-0.99999"),
+        new BigDecimal("100"),
+        new BigDecimal("10000"),
+        new BigDecimal("1000000"),
+        new BigDecimal("1000000000000"));
 
     /**
      * Below this the tangent is flat enough that {@code f/f'} is numerically
@@ -111,14 +163,34 @@ public final class BracketedNewtonSolver implements RateSolver {
         }
         Residual residual = new Residual(request);
         BigDecimal toleranceAbsolute = request.absoluteTolerance();
-        List<Bracket> brackets = scan(residual);
+        List<Bracket> brackets = scan(residual, LADDER);
+        boolean escalated = false;
         if (brackets.isEmpty()) {
-            return SolveResult.noSolution(noSolutionDiagnostic(request, residual));
+            brackets = scan(residual, extendedLadder());
+            escalated = true;
+            if (brackets.isEmpty()) {
+                return SolveResult.noSolution(noSolutionDiagnostic(request, residual));
+            }
         }
         if (brackets.size() == 1) {
-            return single(request, residual, brackets.get(0), toleranceAbsolute);
+            return single(request, residual, brackets.get(0), toleranceAbsolute, escalated);
         }
-        return disambiguate(request, residual, brackets, toleranceAbsolute);
+        return disambiguate(request, residual, brackets, toleranceAbsolute, escalated);
+    }
+
+    /**
+     * {@link #LADDER} and {@link #ESCALATION} merged and sorted ascending.
+     *
+     * <p>Rebuilt rather than cached because it is reached only on the failure path,
+     * and a mutable static that a hot path never reads is a worse trade than the
+     * allocation.
+     */
+    private static List<BigDecimal> extendedLadder() {
+        List<BigDecimal> nodes = new ArrayList<>(LADDER.size() + ESCALATION.size());
+        nodes.addAll(LADDER);
+        nodes.addAll(ESCALATION);
+        nodes.sort(BigDecimal::compareTo);
+        return nodes;
     }
 
     // ---------------------------------------------------------------- step 1
@@ -132,17 +204,17 @@ public final class BracketedNewtonSolver implements RateSolver {
      * IRR, and a scan that stops early would return the first one it met without
      * ever knowing the others were there.
      */
-    private static List<Bracket> scan(Residual residual) {
+    private static List<Bracket> scan(Residual residual, List<BigDecimal> ladder) {
         List<Bracket> brackets = new ArrayList<>();
         BigDecimal previousNode = null;
         BigDecimal previousValue = null;
-        for (BigDecimal node : LADDER) {
+        for (BigDecimal node : ladder) {
             BigDecimal value = residual.at(node);
             if (value.signum() == 0) {
-                brackets.add(new Bracket(node, node, value));
+                brackets.add(new Bracket(node, node, value, value));
             } else if (previousValue != null && previousValue.signum() != 0
                 && previousValue.signum() != value.signum()) {
-                brackets.add(new Bracket(previousNode, node, previousValue));
+                brackets.add(new Bracket(previousNode, node, previousValue, value));
             }
             previousNode = node;
             previousValue = value;
@@ -163,11 +235,42 @@ public final class BracketedNewtonSolver implements RateSolver {
      * bracket endpoint whose residual sign it shares, so the bracket only ever
      * shrinks and never loses its sign change. That invariant is what lets the
      * bisection fallback start from the narrowed bracket instead of the original one.
+     *
+     * <p><strong>Two different reasons to stop, and they are not the same claim.</strong>
+     * Every phase terminates either because the residual came inside {@code tol_abs} or
+     * because the bracket became narrower than {@code rateEpsilon}. The first says the
+     * root was found; the second says only that no further iteration could move a rate
+     * stored to twelve decimal places. Here, at 28 significant digits, {@code tol_abs} is
+     * comfortably reachable and the residual test is normally what fires — three to seven
+     * iterations on an ordinary instrument. It is step 5's rounding, not this loop, that
+     * puts the <em>published</em> residual back outside {@code tol_abs}; see
+     * {@link SolverTolerance#attainableResidual}.
+     *
+     * <p>Which test fired travels out on {@link Refinement#withinTolerance}, and it is
+     * deliberately not on its own grounds to flag a solve — flagging every width exit was
+     * tried and it flagged the whole long-tenor book, which
+     * {@code SolverRoundTripPropertiesTest} caught. What {@link #finish} flags is a
+     * residual outside the rounding floor as well, which a width exit on a
+     * well-conditioned vector cannot produce and which therefore means the refinement did
+     * not reach the root at all. Both facts travel so the diagnostic can say which
+     * happened instead of leaving a reviewer to infer it.
      */
     private static Refinement refine(Residual residual, Bracket bracket, BigDecimal seed,
             SolverTolerance tolerance, BigDecimal toleranceAbsolute) {
         if (bracket.isDegenerate()) {
-            return new Refinement(bracket, bracket.low(), SolverMethod.NEWTON, 0, false);
+            // f is exactly zero at the node, so the residual test is satisfied outright.
+            return new Refinement(bracket, bracket.low(), SolverMethod.NEWTON, 0, 0, true, false,
+                true, bracket.valueLow());
+        }
+        BigDecimal settledEndpoint = bracket.endpointWithinTolerance(toleranceAbsolute);
+        if (settledEndpoint != null) {
+            BigDecimal settledValue = settledEndpoint.compareTo(bracket.low()) == 0
+                ? bracket.valueLow() : bracket.valueHigh();
+            // See Bracket.endpointWithinTolerance: the scan already found the root, and
+            // iterating toward a root that sits on the bracket's own endpoint is this
+            // algorithm's slowest path rather than its fastest.
+            return new Refinement(bracket, settledEndpoint, SolverMethod.NEWTON, 0, 0, true, false,
+                true, settledValue);
         }
         boolean seeded = seed != null;
         BigDecimal low = bracket.low();
@@ -189,9 +292,11 @@ public final class BracketedNewtonSolver implements RateSolver {
             }
         }
         int iterations = 0;
+        int safeguards = 0;
         while (iterations < tolerance.maxNewtonIterations()) {
             if (converged(value, toleranceAbsolute) || narrowerThan(low, high, tolerance.rateEpsilon())) {
-                return new Refinement(bracket, rate, SolverMethod.NEWTON, iterations, seeded);
+                return new Refinement(bracket, rate, SolverMethod.NEWTON, iterations, safeguards,
+                    converged(value, toleranceAbsolute), seeded, false, value);
             }
             iterations++;
             BigDecimal next = null;
@@ -209,6 +314,7 @@ public final class BracketedNewtonSolver implements RateSolver {
                 }
             }
             if (next == null) {
+                safeguards++;
                 next = midpoint(low, high);
                 nextValue = residual.at(next);
             }
@@ -222,7 +328,8 @@ public final class BracketedNewtonSolver implements RateSolver {
                 high = rate;
             }
             if (movement.compareTo(tolerance.rateEpsilon()) <= 0) {
-                return new Refinement(bracket, rate, SolverMethod.NEWTON, iterations, seeded);
+                return new Refinement(bracket, rate, SolverMethod.NEWTON, iterations, safeguards,
+                    converged(value, toleranceAbsolute), seeded, false, value);
             }
         }
         for (int step = 0; step < tolerance.maxBisectionIterations(); step++) {
@@ -231,7 +338,8 @@ public final class BracketedNewtonSolver implements RateSolver {
             BigDecimal middleValue = residual.at(middle);
             if (converged(middleValue, toleranceAbsolute)
                 || narrowerThan(low, high, tolerance.rateEpsilon())) {
-                return new Refinement(bracket, middle, SolverMethod.BISECTION_FALLBACK, iterations, seeded);
+                return new Refinement(bracket, middle, SolverMethod.BISECTION_FALLBACK, iterations,
+                    safeguards, converged(middleValue, toleranceAbsolute), seeded, false, middleValue);
             }
             if (middleValue.signum() == valueLow.signum()) {
                 low = middle;
@@ -243,9 +351,13 @@ public final class BracketedNewtonSolver implements RateSolver {
         // Unreachable in practice: 200 halvings shrink the widest possible bracket
         // to under 1e-59, far inside the rate epsilon, so the width test above
         // always fires first. Returning the midpoint keeps the guarantee explicit
-        // rather than resting on that arithmetic.
-        return new Refinement(bracket, midpoint(low, high), SolverMethod.BISECTION_FALLBACK,
-            iterations, seeded);
+        // rather than resting on that arithmetic. The residual is measured rather
+        // than assumed even here, because the one thing this path must not do is
+        // claim convergence it cannot demonstrate.
+        BigDecimal settled = midpoint(low, high);
+        BigDecimal settledValue = residual.at(settled);
+        return new Refinement(bracket, settled, SolverMethod.BISECTION_FALLBACK, iterations,
+            safeguards, converged(settledValue, toleranceAbsolute), seeded, false, settledValue);
     }
 
     private static boolean converged(BigDecimal value, BigDecimal toleranceAbsolute) {
@@ -259,6 +371,7 @@ public final class BracketedNewtonSolver implements RateSolver {
     private static boolean strictlyInside(BigDecimal rate, BigDecimal low, BigDecimal high) {
         return rate.compareTo(low) > 0 && rate.compareTo(high) < 0;
     }
+
 
     /** A bracket this narrow already locates the root well inside storage scale. */
     private static boolean narrowerThan(BigDecimal low, BigDecimal high, BigDecimal epsilon) {
@@ -286,11 +399,16 @@ public final class BracketedNewtonSolver implements RateSolver {
     // --------------------------------------------------- single root, step 5
 
     private static SolveResult single(SolveRequest request, Residual residual, Bracket bracket,
-            BigDecimal toleranceAbsolute) {
+            BigDecimal toleranceAbsolute, boolean escalated) {
         Refinement refinement = refine(residual, bracket, seedIn(request, bracket),
             request.tolerance(), toleranceAbsolute);
         StringBuilder note = new StringBuilder(context(request))
-            .append(": a single root on the ladder; ")
+            .append(escalated
+                ? ": a single root, bracketed only after escalating the ladder to ["
+                    + ESCALATION.get(0).toPlainString() + " .. "
+                    + ESCALATION.get(ESCALATION.size() - 1).toPlainString()
+                    + "] because the standard ladder found no sign change; "
+                : ": a single root on the ladder; ")
             .append(refinement.pathNote());
         if (!request.band().contains(refinement.root(), request.convention().periodsPerYear())) {
             // Not an error and not a downgrade. The band is a tie-break between
@@ -305,7 +423,8 @@ public final class BracketedNewtonSolver implements RateSolver {
                 .append(", which disambiguates between roots and does not invalidate one");
         }
         return finish(request, residual, refinement, SolveStatus.SOLVED,
-            List.of(refinement.root()), refinement.iterations(), note.toString());
+            List.of(refinement.root()), refinement.iterations(), refinement.safeguardSteps(),
+            note.toString(), escalated);
     }
 
     // ------------------------------------------------- multiple roots, 4.4
@@ -316,16 +435,18 @@ public final class BracketedNewtonSolver implements RateSolver {
      * queue. Every candidate root is recorded on every path.
      */
     private static SolveResult disambiguate(SolveRequest request, Residual residual,
-            List<Bracket> brackets, BigDecimal toleranceAbsolute) {
+            List<Bracket> brackets, BigDecimal toleranceAbsolute, boolean escalated) {
         List<Refinement> refinements = new ArrayList<>(brackets.size());
         List<BigDecimal> candidates = new ArrayList<>(brackets.size());
         int iterations = 0;
+        int safeguards = 0;
         for (Bracket bracket : brackets) {
             Refinement refinement = refine(residual, bracket, seedIn(request, bracket),
                 request.tolerance(), toleranceAbsolute);
             refinements.add(refinement);
             candidates.add(refinement.root());
             iterations += refinement.iterations();
+            safeguards += refinement.safeguardSteps();
         }
         int periodsPerYear = request.convention().periodsPerYear();
         List<Refinement> inBand = new ArrayList<>(refinements.size());
@@ -334,7 +455,8 @@ public final class BracketedNewtonSolver implements RateSolver {
                 inBand.add(refinement);
             }
         }
-        String head = context(request) + ": " + candidates.size() + " roots on the ladder, "
+        String head = context(request) + ": " + candidates.size() + " roots on the "
+            + (escalated ? "escalated ladder, " : "ladder, ")
             + describe(candidates) + ", refined in " + iterations + " iterations across "
             + brackets.size() + " brackets";
         if (inBand.size() == 1) {
@@ -343,7 +465,8 @@ public final class BracketedNewtonSolver implements RateSolver {
                 + "plausible band " + request.band().label() + ": " + brief(chosen.root())
                 + " (" + brief(PlausibleBand.annualEffective(chosen.root(), periodsPerYear))
                 + " annual effective); " + chosen.pathNote();
-            return finish(request, residual, chosen, SolveStatus.SOLVED, candidates, iterations, note);
+            return finish(request, residual, chosen, SolveStatus.SOLVED, candidates, iterations,
+                safeguards, note, escalated);
         }
         if (inBand.size() > 1) {
             if (!request.hasSeed()) {
@@ -363,7 +486,7 @@ public final class BracketedNewtonSolver implements RateSolver {
                 + ". Computed and usable, flagged for approval rather than blocked; "
                 + chosen.pathNote();
             return finish(request, residual, chosen, SolveStatus.REQUIRES_REVIEW, candidates,
-                iterations, note);
+                iterations, safeguards, note, escalated);
         }
         return SolveResult.multipleRoots(candidates, iterations, head
             + "; none lies in the plausible band " + request.band().label()
@@ -403,25 +526,117 @@ public final class BracketedNewtonSolver implements RateSolver {
      * calculation nobody performs.
      */
     private static SolveResult finish(SolveRequest request, Residual residual, Refinement refinement,
-            SolveStatus status, List<BigDecimal> candidates, int iterations, String diagnostic) {
+            SolveStatus status, List<BigDecimal> candidates, int iterations, int safeguardSteps,
+            String diagnostic, boolean escalated) {
         Rate rate = request.convention().toRate(refinement.root());
         BigDecimal atStored = residual.at(rate.periodic()).abs();
-        return new SolveResult(rate, status, refinement.method(), iterations, atStored,
-            candidates, diagnostic);
+        SolveStatus reported = status;
+        StringBuilder note = new StringBuilder(diagnostic);
+        if (escalated) {
+            // A root the standard ladder could not bracket lies, by construction, outside
+            // [-99.99%, +1000%] in the convention's units — far outside anything the
+            // plausible band admits. Two very different instruments arrive here and both
+            // want the same treatment. A one-day drawing carrying a 1% fee really does
+            // yield 4,092% annual effective and the arithmetic is impeccable, but whether
+            // that figure should be booked as presented is the sub-year presentation
+            // question of 4.5, which is policy and not the solver's. A token recovery of
+            // 50 against 1,000,000 advanced really does yield -99.995% per month, and
+            // what it needs is an impairment, not an interest rate. In both cases a rate
+            // exists, the engine should say what it is rather than claim none exists — and
+            // in neither case should it publish it unread.
+            reported = SolveStatus.REQUIRES_REVIEW;
+            note.append("; reached only by escalating the ladder, so the root lies outside the "
+                + "standard bracket entirely and is flagged for approval rather than published: a "
+                + "rate this far out is either a very short tenor carrying a fee it cannot amortise "
+                + "(4.5) or a recovery so far below the advance that the answer is impairment, not "
+                + "interest");
+        }
+        // The residual bound a published rate must satisfy, which is not tol_abs alone:
+        // see SolverTolerance.attainableResidual. Ordered so the common path costs nothing.
+        // The residual at the root is carried on the refinement, and the derivative — one
+        // full-vector evaluation — is taken only where the cheap test has already failed,
+        // which is where the answer might actually change.
+        BigDecimal atRoot = refinement.residualAtRoot().abs();
+        if (atRoot.compareTo(request.absoluteTolerance()) > 0) {
+            BigDecimal slope = residual.slopeAt(refinement.root());
+            BigDecimal publishable =
+                request.tolerance().publishableResidual(request.target().amount(), slope);
+            if (atRoot.compareTo(publishable) > 0) {
+                reported = SolveStatus.REQUIRES_REVIEW;
+                note.append("; the residual at the returned root, ").append(brief(atRoot))
+                    .append(", exceeds even what a rate stored to ").append(Precision.RATE_SCALE)
+                    .append("dp could leave behind on this vector (").append(brief(publishable))
+                    .append("), so the refinement did not reach the root")
+                    .append(refinement.withinTolerance() ? "" : " and stopped on bracket width")
+                    .append(". Computed and usable, flagged for approval rather than reported as "
+                        + "converged");
+            }
+        }
+        return new SolveResult(rate, reported, refinement.method(), iterations, safeguardSteps,
+            atStored, candidates, note.toString());
     }
 
     // ----------------------------------------------------------- diagnostics
 
     private static String noSolutionDiagnostic(SolveRequest request, Residual residual) {
-        BigDecimal lowest = LADDER.get(0);
-        BigDecimal highest = LADDER.get(LADDER.size() - 1);
-        return context(request) + ": no sign change over the ladder ["
+        List<BigDecimal> extended = extendedLadder();
+        BigDecimal lowest = extended.get(0);
+        BigDecimal highest = extended.get(extended.size() - 1);
+        String head = context(request) + ": no sign change over the ladder or its escalation ["
             + lowest.toPlainString() + " .. " + highest.toPlainString() + "], f("
             + lowest.toPlainString() + ") = " + brief(residual.at(lowest)) + ", f("
-            + highest.toPlainString() + ") = " + brief(residual.at(highest))
-            + ". No economically meaningful rate exists: either total inflows do not exceed the "
-            + "initial outflow or the vector is malformed. Exception queue with the flow vector "
-            + "attached — never defaulted to zero and never to the contractual rate (4.3).";
+            + highest.toPlainString() + ") = " + brief(residual.at(highest)) + ". ";
+        // Whether a root exists at all is decided by the sign pattern of the residual's
+        // own coefficient sequence, and it is worth saying which case this is. With a
+        // single sign change Descartes gives exactly one root in (-100%, infinity), so
+        // the vector does have a rate and the honest report is that it lies beyond the
+        // escalated ladder — not the older wording, which asserted that no rate existed
+        // and sent a reviewer looking for a fee misclassification that is not there.
+        int changes = residualSignChanges(request);
+        String cause = changes == 1
+            ? "The residual sequence changes sign exactly once, so a unique rate above -100% "
+                + "does exist and it lies outside even the escalated bracket. Under a short tau "
+                + "that is what an ordinary instrument looks like: the bracketable money "
+                + "multiple is (1+node)^tau, which collapses toward 1 as tau falls. Treat this "
+                + "as an out-of-reach root, not as a missing one — and read it as a signal about "
+                + "the projection, most often a fee that has been loaded onto a tenor too short "
+                + "to carry it."
+            : changes == 0
+                ? "The residual sequence never changes sign, so f(r) cannot cross zero and no "
+                    + "rate is determined: every flow after the anchor points the same way as "
+                    + "the target. The vector is malformed."
+                : "The residual sequence changes sign " + changes + " times, so any root that "
+                    + "exists is one of several and none was reachable. Tranched drawdowns and "
+                    + "restructurings with fresh disbursement produce this shape.";
+        return head + cause + " Exception queue with the flow vector attached — never defaulted "
+            + "to zero and never to the contractual rate (4.3).";
+    }
+
+    /**
+     * Sign changes in {@code f}'s own coefficient sequence: {@code -target} at the
+     * anchor, then the future flows in date order.
+     *
+     * <p>Not {@link Discounting#signChanges}, which counts over the vector. The two
+     * agree at initial recognition, where the inception leg <em>is</em> the negated
+     * target by invariant IC-1, and they part company on a mid-life re-solve (6.2),
+     * where the vector holds only the remaining flows and the target arrives
+     * separately. It is {@code f} whose roots are being counted, so it is {@code f}'s
+     * sequence that decides.
+     */
+    private static int residualSignChanges(SolveRequest request) {
+        int changes = 0;
+        int previous = -request.target().amount().signum();
+        for (CashFlow flow : request.flows().future()) {
+            int signum = flow.amount().signum();
+            if (signum == 0) {
+                continue;
+            }
+            if (previous != 0 && signum != previous) {
+                changes++;
+            }
+            previous = signum;
+        }
+        return changes;
     }
 
     /**
@@ -473,10 +688,57 @@ public final class BracketedNewtonSolver implements RateSolver {
      *
      * <p>Degenerate where a ladder node is itself an exact root.
      */
-    private record Bracket(BigDecimal low, BigDecimal high, BigDecimal valueLow) {
+    private record Bracket(BigDecimal low, BigDecimal high, BigDecimal valueLow,
+        BigDecimal valueHigh) {
 
         boolean isDegenerate() {
             return low.compareTo(high) == 0;
+        }
+
+        /**
+         * An endpoint whose residual is already inside {@code tol_abs}, or {@code null}.
+         *
+         * <p>The scan has both residuals in hand, so this costs nothing, and it is worth
+         * asking because the answer is very often yes on the commonest instrument in the
+         * book: an EMI loan priced at its contractual rate has its root exactly on a
+         * ladder node, since 1% a month <em>is</em> the node 0.01. {@code f} there is
+         * around 1e-21 — not exactly zero, so the bracket is not degenerate, and the
+         * root is the bracket's own lower endpoint.
+         *
+         * <p>Left to iterate, that vector is close to the worst case for a bracketed
+         * Newton method rather than the best. {@code f} is convex and decreasing, so a
+         * tangent step taken from anywhere inside the bracket lands <em>past</em> the
+         * root and outside the bracket — 0.00639, then 0.00913, then 0.00979, creeping
+         * up on 0.01 from below and never once landing inside it. Every step is
+         * therefore refused by the safeguard, and pure bisection walks the bracket down
+         * to {@code rateEpsilon}: 41 iterations, measured, for a root the scan had
+         * already found. Answering the question here costs nothing and settles it in
+         * none.
+         *
+         * <p><strong>Safe, with the bound stated rather than asserted.</strong> A residual
+         * inside {@code tol_abs} puts the node within about {@code tol_abs / |f'|} of the
+         * root, and the node and the true root round to the same published rate as long as
+         * that is below half a unit in the last place of a 12dp rate. So the condition is
+         * {@code |f'| > 2e12 * tol_abs} — which is {@code |f'| > 200} under the standard
+         * tolerance on a small exposure, {@code > 200,000} on a billion-rupee facility
+         * where {@code tol_abs} has scaled up with it, and {@code > 2} under the tightened
+         * Tier 1 setting. The smallest slope any real instrument produces is around 3.4e5,
+         * on a 50,000 twelve-month consumer durable — five orders of magnitude of headroom
+         * on the tightest of those thresholds, and {@code f'} only grows with exposure and
+         * tenor from there. The slope is deliberately not measured here to prove it per
+         * vector: that would cost a derivative evaluation on the majority of all solves,
+         * to buy a guarantee against a vector holding a few rupees spread over twenty
+         * periods.
+         *
+         * <p>This is not the near-zero tangency the class comment refuses — that is a node
+         * with the same sign on both sides and no bracket at all, and it still goes to the
+         * exception queue.
+         */
+        BigDecimal endpointWithinTolerance(BigDecimal toleranceAbsolute) {
+            if (valueLow.abs().compareTo(toleranceAbsolute) <= 0) {
+                return low;
+            }
+            return valueHigh.abs().compareTo(toleranceAbsolute) <= 0 ? high : null;
         }
 
         String label() {
@@ -486,21 +748,50 @@ public final class BracketedNewtonSolver implements RateSolver {
         }
     }
 
-    /** One bracket refined to a root, with how it got there. */
+    /**
+     * One bracket refined to a root, with how it got there.
+     *
+     * @param safeguardSteps  iterations in the Newton phase where the tangent step was
+     *                        rejected and a bisection of the current bracket was taken
+     *                        instead (4.2 step 3) — the profile signal
+     *                        {@link SolverMethod} is not
+     * @param withinTolerance whether the phase stopped because {@code |f|} came inside
+     *                        {@code tol_abs}, as against merely because the bracket
+     *                        became narrower than {@code rateEpsilon}
+     * @param settledOnScan   whether the scan had already located the root — an exactly
+     *                        zero node, or an endpoint inside {@code tol_abs} — so that
+     *                        no refinement ran and the seed never came into it
+     * @param residualAtRoot  {@code f} at {@link #root}. Carried rather than recomputed:
+     *                        every return site has just evaluated it, and {@link #finish}
+     *                        needs it. Two full-vector evaluations per solve is not a
+     *                        rounding error on ten million contracts (4.6)
+     */
     private record Refinement(
         Bracket bracket,
         BigDecimal root,
         SolverMethod method,
         int iterations,
-        boolean contractualSeed) {
+        int safeguardSteps,
+        boolean withinTolerance,
+        boolean contractualSeed,
+        boolean settledOnScan,
+        BigDecimal residualAtRoot) {
 
         String pathNote() {
             if (bracket.isDegenerate()) {
                 return "ladder node " + bracket.label() + " is itself an exact root, "
                     + "so no iteration was required";
             }
+            if (settledOnScan) {
+                return "ladder node " + root.toPlainString() + " of bracket " + bracket.label()
+                    + " already sits inside the residual tolerance, so the scan had located "
+                    + "the root and no iteration was required — the case of a loan priced at "
+                    + "its contractual rate, where that rate is itself a ladder node";
+            }
             return method + " settled in " + iterations + " iteration(s) within bracket "
-                + bracket.label() + (contractualSeed
+                + bracket.label()
+                + (safeguardSteps > 0 ? ", " + safeguardSteps + " of them safeguarded" : "")
+                + (contractualSeed
                     ? ", seeded from the contractual rate"
                     : ", seeded from the bracket midpoint as no contractual rate was supplied");
         }

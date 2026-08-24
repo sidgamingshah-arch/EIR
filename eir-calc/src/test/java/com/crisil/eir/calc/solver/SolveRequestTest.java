@@ -143,16 +143,23 @@ class SolveRequestTest {
         // sitting on a NO_SOLUTION would be the guessed figure this engine refuses to
         // produce — so the record refuses to be constructed either way.
         assertThatThrownBy(() -> SolveResult.solved(
-            null, SolverMethod.NEWTON, 1, BigDecimal.ZERO, List.of(), "no rate supplied"))
+            null, SolverMethod.NEWTON, 1, 0, BigDecimal.ZERO, List.of(), "no rate supplied"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("must carry a rate");
         assertThatThrownBy(() -> new SolveResult(Rate.monthly(bd("0.01")), SolveStatus.NO_SOLUTION,
-            SolverMethod.NEWTON, 0, BigDecimal.ZERO, List.of(), "guessed"))
+            SolverMethod.NEWTON, 0, 0, BigDecimal.ZERO, List.of(), "guessed"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("must carry no rate");
         assertThatThrownBy(() -> SolveResult.multipleRoots(List.of(bd("0.1")), -1, "negative iterations"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("iterations must be non-negative");
+        // A safeguard count above the iteration count would be a telemetry figure that
+        // cannot have happened, and a monitoring signal nobody can trust is worse than
+        // none — so the record refuses it rather than publishing it.
+        assertThatThrownBy(() -> SolveResult.solved(Rate.monthly(bd("0.01")), SolverMethod.NEWTON,
+            3, 4, BigDecimal.ZERO, List.of(), "more safeguards than iterations"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("safeguardSteps must lie in [0, 3]");
     }
 
     @Test

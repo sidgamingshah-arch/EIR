@@ -76,14 +76,18 @@ class SolverConvergenceTest {
         assertThat(result.rate().effectiveAnnual().setScale(6, RoundingMode.HALF_UP))
             .isEqualByComparingTo(bd("0.459967"));
 
-        // The method is recorded because it is the cheapest signal about the shape of a
-        // vector. Here the safeguarded Newton phase gets there: at this magnitude a raw
-        // tangent step from the contractual seed overshoots, and the safeguards of 4.2
-        // step 3 replace the overshooting step with a bisection of the current bracket
-        // rather than abandoning the solve — which still counts as NEWTON, because what
-        // BISECTION_FALLBACK records is that the iteration cap was reached, not that an
-        // individual step was bisected.
+        // The Newton phase gets there, and BISECTION_FALLBACK records that the iteration
+        // cap was reached rather than that an individual step was bisected — which under
+        // the specification's cap of 100 it never is, see SolverMethod.
+        //
+        // The comment here used to say the safeguards of 4.2 step 3 fire on this vector,
+        // because a raw tangent step from the contractual seed overshoots at this
+        // magnitude. Measured, they do not: this solve records zero safeguarded steps,
+        // and across an eighty-eight vector sweep the only shape that raised the count was
+        // an unseeded step-up EMI. Asserted rather than described, in
+        // SolverAttainableResidualTest.safeguardStepsAreTheProfileSignal.
         assertThat(result.method()).isEqualTo(SolverMethod.NEWTON);
+        assertThat(result.safeguardSteps()).isZero();
         assertThat(result.iterations()).isLessThanOrEqualTo(SolverTolerance.MAX_NEWTON_ITERATIONS);
         assertThat(result.diagnostic()).contains("bracket [0.01, 0.05]");
     }

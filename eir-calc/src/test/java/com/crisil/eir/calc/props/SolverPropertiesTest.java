@@ -113,14 +113,18 @@ class SolverPropertiesTest {
      * unrepresentable, and a test that stops checking would not notice the type
      * changing.
      *
-     * <p>Two families, both structurally hopeless rather than merely awkward: a
-     * facility that never repays — every future flow an outflow, so {@code f(r)} is
-     * negative at every rung of the ladder — and a token recovery, where the whole
-     * receipt is a twenty-thousandth of the advance and even the ladder's lowest
-     * rung at -99.99% cannot discount it up to the target.
+     * <p>Two families, and they fail differently — which is the point, because the
+     * property that protects the ledger is not "no rate" but "no <em>published</em>
+     * rate". A facility that never repays has every future flow an outflow, so
+     * {@code f} never changes sign and genuinely has no root: {@code NO_SOLUTION}. A
+     * token recovery worth a twenty-thousandth of the advance does have a root, at
+     * exactly -99.995% per month, and the standard ladder's -0.9999 floor cannot reach
+     * it; the engine escalates, finds it, and flags it. Neither family may ever come
+     * back {@code SOLVED}, and neither may ever come back carrying the contractual seed
+     * or a zero — that is the invariant, and it holds across both.
      */
     @Property(tries = 10000, seed = "20270410")
-    void aVectorWithNothingToCollectIsNeverGivenARate(
+    void aVectorWithNothingToCollectIsNeverGivenAPublishedRate(
             @ForAll @LongRange(min = 1_000_000L, max = 10_000_000_000L) long advancePaise,
             @ForAll @IntRange(min = 1, max = 3000) int seedBasisPoints,
             @ForAll @IntRange(min = 1, max = 60) int periods,
@@ -135,21 +139,41 @@ class SolverPropertiesTest {
         SolveResult result = solver.solve(SolveRequest.atInception(
             vector, TimeConvention.PeriodicIndex.monthly(), seed));
 
-        assertThat(result.status()).isEqualTo(SolveStatus.NO_SOLUTION);
-        assertThat(result.status().routesToExceptionQueue()).isTrue();
-        assertThat(result.status().carriesRate()).isFalse();
-        assertThat(result.hasRate()).isFalse();
-        assertThat(result.rate())
-            .as("never the contractual seed %s, never zero, never anything (4.3)",
-                seed.toPlainString())
-            .isNull();
-        assertThat(result.method()).isNull();
-        assertThat(result.residualAtStoredRate()).isNull();
-        assertThat(result.candidateRoots()).isEmpty();
+        // Holds across both families: nothing here is ever publishable, and nothing here
+        // is ever the contractual rate or a zero. That is the defect of 4.3.
+        assertThat(result.status()).isNotEqualTo(SolveStatus.SOLVED);
+        assertThat(result.isSolved()).isFalse();
         assertThat(result.diagnostic()).isNotBlank();
-        assertThatThrownBy(result::rateOrThrow)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("NO_SOLUTION");
+        if (result.hasRate()) {
+            assertThat(result.rate().periodic())
+                .as("never the contractual seed %s", seed.toPlainString())
+                .isNotEqualByComparingTo(seed);
+            assertThat(result.rate().periodic()).isNotEqualByComparingTo(BigDecimal.ZERO);
+        }
+
+        if (tokenRecovery) {
+            // A twenty-thousandth recovered one period out is -99.995% a month whatever
+            // the advance, so the root is fixed and deep — and it is reported, flagged,
+            // rather than denied.
+            assertThat(result.status()).isEqualTo(SolveStatus.REQUIRES_REVIEW);
+            assertThat(result.status().requiresApproval()).isTrue();
+            assertThat(result.rateOrThrow().periodic())
+                .as("a recovery this far below the advance implies a deeply negative rate")
+                .isLessThan(new BigDecimal("-0.999"));
+            assertThat(result.diagnostic()).contains("escalating the ladder");
+        } else {
+            assertThat(result.status()).isEqualTo(SolveStatus.NO_SOLUTION);
+            assertThat(result.status().routesToExceptionQueue()).isTrue();
+            assertThat(result.status().carriesRate()).isFalse();
+            assertThat(result.hasRate()).isFalse();
+            assertThat(result.rate()).isNull();
+            assertThat(result.method()).isNull();
+            assertThat(result.residualAtStoredRate()).isNull();
+            assertThat(result.candidateRoots()).isEmpty();
+            assertThatThrownBy(result::rateOrThrow)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("NO_SOLUTION");
+        }
     }
 
     // ------------------------------------------------------------------ vectors
@@ -181,10 +205,10 @@ class SolverPropertiesTest {
     /**
      * One receipt worth a twenty-thousandth of the advance, one period out.
      *
-     * <p>The ladder's lowest rung is -99.99%, which multiplies a flow one period out
-     * by ten thousand. A recovery below a ten-thousandth of the advance therefore
-     * cannot be discounted up to the target at any rung, and no sign change exists
-     * to bracket.
+     * <p>The standard ladder's lowest rung is -99.99%, which multiplies a flow one
+     * period out by ten thousand. A recovery below a ten-thousandth of the advance
+     * therefore cannot be bracketed on the standard rungs — but the root is there, at
+     * -99.995% a month, and the escalated ladder reaches it.
      */
     private static FlowVector tokenRecoveryVector(Money advance) {
         Money recovery = advance.times(new BigDecimal("0.00005")).atPresentationScale();

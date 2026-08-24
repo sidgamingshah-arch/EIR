@@ -85,25 +85,42 @@ class SolverNoSolutionTest {
     }
 
     @Test
-    @DisplayName("total inflows below the initial outflow: no sign change on the ladder, so no rate")
-    void tokenRecoveryAgainstTheAdvanceHasNoRate() {
+    @DisplayName("total inflows far below the outflow: the rate exists, is -99.995% a month, and is never published")
+    void tokenRecoveryAgainstTheAdvanceIsFlaggedNotDefaulted() {
         // 1,000,000 advanced against a single token receipt of 50.00 a month later.
-        // f is negative at every node of the ladder, including its -0.9999 floor: even
-        // at minus ninety-nine point ninety-nine percent a month, 50.00 discounts to
-        // 500,000 and never reaches the 1,000,000 target. There is no economically
-        // meaningful rate, and the honest answer is the exception queue with the vector
-        // attached.
+        //
+        // This vector used to be the repo's example of "no economically meaningful rate
+        // exists", and that was wrong. f(r) tends to +infinity as r approaches -100% from
+        // above, because discounting at a negative rate inflates, and to -1,000,000 as r
+        // grows; it is continuous between them, so it must cross zero. It does, exactly
+        // once, at 50/1,000,000 - 1 = -99.995% per month. What the standard ladder could
+        // not do was reach it: its floor of -0.9999 multiplies a flow one period out by
+        // ten thousand, and this one needs twenty thousand.
+        //
+        // So the honest report is the rate, flagged. -99.995% a month is not an interest
+        // rate anyone books — the answer is an impairment — but telling a reviewer "your
+        // vector implies -99.995% a month" is strictly more actionable than telling them
+        // no rate exists and sending them to look for a fee misclassification that is not
+        // there.
         FlowVector vector = FlowVector.of(ANCHOR, Money.INR, List.of(
             CashFlow.of(ANCHOR, 0, Money.inr("-1000000"), FlowKind.DISBURSEMENT),
             CashFlow.of(ANCHOR.plusMonths(1), 1, Money.inr("50"), FlowKind.PRINCIPAL)));
 
         SolveResult result = solver.solve(SolveRequest.atInception(vector, MONTHLY, ONE_PERCENT_MONTHLY));
 
-        assertNothingWasGuessed(result, ONE_PERCENT_MONTHLY);
-        assertThat(result.candidateRoots()).isEmpty();
+        assertThat(result.status())
+            .as("computed and flagged, never published")
+            .isEqualTo(SolveStatus.REQUIRES_REVIEW);
+        assertThat(result.status().requiresApproval()).isTrue();
+        assertThat(result.rateOrThrow().periodic())
+            .as("50 recovered on 1,000,000 one month out is exactly -99.995% per month")
+            .isEqualByComparingTo(bd("-0.999950000000"));
+        assertThat(result.rateOrThrow().periodic())
+            .as("and nothing near the contractual seed, which is the defect this guards")
+            .isNotEqualByComparingTo(ONE_PERCENT_MONTHLY);
         assertThat(result.diagnostic())
-            .contains("no sign change over the ladder")
-            .contains("never defaulted to zero and never to the contractual rate");
+            .contains("escalating the ladder")
+            .contains("impairment, not interest");
     }
 
     @Test
@@ -119,8 +136,15 @@ class SolverNoSolutionTest {
         SolveResult result = solver.solve(SolveRequest.atInception(vector, MONTHLY, ONE_PERCENT_MONTHLY));
 
         assertNothingWasGuessed(result, ONE_PERCENT_MONTHLY);
-        assertThat(result.diagnostic()).contains("either total inflows do not exceed the initial outflow "
-            + "or the vector is malformed");
+        // This is the case that genuinely has no root: f's coefficient sequence never
+        // changes sign, so it cannot cross zero at any rate. The diagnostic now says so
+        // in those terms rather than offering "total inflows do not exceed the initial
+        // outflow" as an alternative explanation — that limb described a vector whose
+        // root is merely out of reach, which is a different report and a different
+        // status. See tokenRecoveryAgainstTheAdvanceIsFlaggedNotDefaulted.
+        assertThat(result.diagnostic())
+            .contains("never changes sign")
+            .contains("The vector is malformed");
     }
 
     @Test

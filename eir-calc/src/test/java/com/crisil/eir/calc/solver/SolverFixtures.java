@@ -82,6 +82,41 @@ final class SolverFixtures {
     }
 
     /**
+     * A level annuity priced at exactly 1% a month over {@code periods} months on
+     * 1,000,000 advanced — the modal instrument, and the one whose root sits exactly on
+     * ladder node 0.01.
+     */
+    static FlowVector levelAnnuityAtOnePercent(int periods) {
+        BigDecimal denominator = BigDecimal.ONE.subtract(
+            Precision.discountFactor(ONE_PERCENT_MONTHLY, BigDecimal.valueOf(periods)),
+            Precision.WORKING);
+        Money instalment = Money.inr("1000000").times(ONE_PERCENT_MONTHLY).dividedBy(denominator);
+        List<CashFlow> flows = new ArrayList<>();
+        flows.add(CashFlow.of(ANCHOR, 0, Money.inr("-1000000"), FlowKind.DISBURSEMENT));
+        for (int period = 1; period <= periods; period++) {
+            flows.add(CashFlow.of(
+                ANCHOR.plusMonths(period), period, instalment, FlowKind.COMBINED_EMI));
+        }
+        return FlowVector.of(ANCHOR, Money.INR, flows);
+    }
+
+    /**
+     * A step-up EMI: 30,000 a month for a year, then 70,000, against 1,000,000.
+     *
+     * <p>The one profile in an eighty-eight vector sweep that raised the safeguard
+     * count, which is what makes it the fixture for that assertion.
+     */
+    static FlowVector stepUpEmi() {
+        List<CashFlow> flows = new ArrayList<>();
+        flows.add(CashFlow.of(ANCHOR, 0, Money.inr("-1000000"), FlowKind.DISBURSEMENT));
+        for (int period = 1; period <= 24; period++) {
+            flows.add(CashFlow.of(ANCHOR.plusMonths(period), period,
+                Money.inr(period <= 12 ? "30000" : "70000"), FlowKind.COMBINED_EMI));
+        }
+        return FlowVector.of(ANCHOR, Money.INR, flows);
+    }
+
+    /**
      * Case 7's deep-discount instrument: the 24 Case 1 EMIs of 47,073.47 against
      * 780,000 advanced — a fee above 20% of principal.
      */
