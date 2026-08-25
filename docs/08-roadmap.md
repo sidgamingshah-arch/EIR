@@ -113,23 +113,55 @@ forbids.
 
 ---
 
-## Phase 2 — Policy, routing and persistence (Nov 2026–Jan 2027)
+## Phase 2 — Policy, routing and persistence (Nov 2026–Jan 2027) — **CODE DELIVERED**
 
-| Workstream | Deliverable | Requirements |
-|---|---|---|
-| `eir-policy` | Versioned policy and fee rule sets; maker–checker; **mandatory** impact preview | FR-201…210 |
-| **Routing table** | Driver→mechanism mapping as versioned data, not code | FR-504…507, [ADR-0006](adr/0006-configurable-event-routing.md) |
-| Tier assignment | Tier 1/2/3 with equivalence-test tracking | FR-107, FR-411…412 |
-| `eir-persistence` | Bitemporal schema, partitioning, Flyway migrations | [04](04-data-model.md) |
-| Exception queue | All categories; per-contract failure isolation | FR-905 |
-| Fee & cost taxonomy | **The critical path.** Fee master with EIR-eligibility flags; `cost_function` sourcing from HR and cost-centre data | FR-203 |
+| Workstream | Deliverable | Requirements | State |
+|---|---|---|---|
+| `eir-policy` | Versioned policy and fee rule sets; maker–checker; **mandatory** impact preview | FR-201…210 | `policy/{approval,preview,registry}` — five states, not a flag; the activation gate refuses EFFECTIVE without a preview for *that draft* |
+| **Routing table** | Driver→mechanism mapping as versioned data, not code | FR-504…507, [ADR-0006](adr/0006-configurable-event-routing.md) | `policy/routing` — a text format displaces `ofSpecDefaults`, and a registry selects the version in force |
+| Tier assignment | Tier 1/2/3 with equivalence-test tracking | FR-107, FR-411…412 | `policy/tier` — the TG-1 evaluator that was previously a label with no logic |
+| `eir-persistence` | Bitemporal schema, partitioning, Flyway migrations | [04](04-data-model.md) | **DDL only.** Two PostgreSQL 16 migrations, 54 tables, verified by execution. No ORM — see below |
+| Exception queue | All categories; per-contract failure isolation | FR-905 | `policy/exception` — the ten categories of 04 § 3, with the barrier that captures a per-contract failure instead of propagating it |
+| Fee & cost taxonomy | **The critical path.** Fee master with EIR-eligibility flags; `cost_function` sourcing from HR and cost-centre data | FR-203 | `policy/fee` — the rule set, resolver, cost-function type, commitment thresholds and exclusion rules. **The sourcing half is not code and is not done** |
 
-**Exit gate:** a fee code cannot reach the engine unclassified; a policy version cannot be approved
-without an impact preview; the routing table can be changed without a code deploy.
+**Exit gate: met in code.** A fee code cannot reach the engine unclassified — an unmapped code
+returns a refusal naming the key and files under `UNMAPPED_FEE_CODE`, never a default. A policy
+version cannot go effective without an impact preview for that draft's content fingerprint. The
+routing table changes without a code deploy: a table emitted to text, edited, re-parsed and
+registered produces the routed decision, with the fixed-rate override still in code where its
+premise belongs.
+
+**What "delivered" does not mean here.** Three qualifications, because the gate is about code and
+the phase is not:
+
+- **The fee and cost taxonomy's critical path is untouched.** What exists is the machinery that
+  classifies a fee once someone has said what it is. The months-long exercise § 0 names — sourcing HR
+  and cost-centre data along the ACPIR 53 selling-agent-versus-appraisal line it is structured along
+  neither — is a data problem owned with other teams, and nothing here advances it.
+- **`eir-persistence` is DDL, not persistence.** The root enforcer bans JPA, Hibernate, Spring and
+  Jackson across every module, so wiring an ORM needs that ban restructured — a shared root-pom
+  change that deserves its own attention. Migrations use Flyway's naming so that wiring is an
+  addition rather than a rewrite.
+- **Four invariants are specified but not published.** `PG_1` (no version effective without a current
+  preview), `RT_1` (every routed event resolves to a table in force), `PV_1` (a policy version
+  resolves for every date in a closed period) and `RS_1` (every fee code has a per-code default) were
+  each identified by the unit that needed them. They are absent from `InvariantId`, so those four
+  checks currently return plain data or borrow another id. Until they exist, four controls are
+  computed and not asserted.
 
 > **Start the fee and cost taxonomy in Phase 0, not Phase 2.** It appears here because that is where
 > it completes, but it is the longest-lead item in the programme and it depends on other teams. If
 > only one thing starts early, it is this.
+
+**The integration lesson repeated, and is worth stating twice.** Phase 1 recorded that "a green build
+across independently-written packages is evidence of nothing until something exercises the seams."
+Phase 2's units were built in parallel and every one was green on its own module before merge — and
+the schema's two halves still could not be joined. `V1` wrote surrogate keys as `UUID` and `V2` as
+`BIGINT`, because 04 calls `contract_id` a "surrogate key" and never states its SQL type; applied to
+a live cluster, all seventeen of `V2`'s foreign keys into `V1`'s tables failed to form while both
+migrations reported success. No unit's tests could see it, because no unit could see the other's
+file. It was found by **executing the DDL**, not by reading it, which is why the module README makes
+execution the verification and says plainly that a zero exit from `psql` is not the check.
 
 ---
 
