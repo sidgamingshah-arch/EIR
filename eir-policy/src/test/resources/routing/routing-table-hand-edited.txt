@@ -1,0 +1,23 @@
+# The same approved table as routing-table-2027-1.txt, as a human would actually type it:
+# aligned '=' signs, indented rows, the route block in a different order, an extra
+# comment in the middle, and no trailing newline. It must parse to an equal RoutingTable,
+# because a policy owner edits this file in a text editor and not through the emitter.
+
+  version.id            = RT-2027.1
+  version.description   = Calculation specification 03 section 6.1, adopted as bank policy for the ACPIR 2026 first year: re-estimations providing consideration for the time value of money or for credit risk adjust the EIR (B5.4.5), and pre-determined adjustments compensating for neither route to a B5.4.6 catch-up.
+  version.effectiveFrom = 2027-04-01
+  version.maker         = policy.author@bank.example
+  version.checker       = policy.approver@bank.example
+  version.approvedOn    = 2027-02-26
+
+# B5.4.5 — consideration for the time value of money or for market credit risk.
+  route.NEGOTIATED                   = MODIFICATION_TEST
+  route.TIME_VALUE_OF_MONEY          = RESET
+  route.CREDIT_RISK_MARKET           = RESET
+
+# B5.4.6 — pre-determined steps and the entity's own revised estimates.
+  route.ESG_LINKED                   = CATCH_UP
+  route.CREDIT_RATCHET_PREDETERMINED = CATCH_UP
+  route.STEP_UP_PREDETERMINED        = CATCH_UP
+  route.BEHAVIOURAL_ESTIMATE         = CATCH_UP
+  route.DISBURSEMENT_TIMING          = CATCH_UP

@@ -1,0 +1,27 @@
+# EIR routing table — rate driver to mechanism, as approved versioned data (ADR-0006).
+#
+# One 'key = value' per line; a line starting with '#' is a comment; blank lines are
+# ignored. Dates are ISO-8601. In a value, \n, \r, \t and \\ are the only escapes.
+#
+# Every rate driver needs exactly one route row. A partial table is refused rather than
+# defaulted: a defaulted routing is a silently wrong routing (ADR-0006, FR-504).
+#
+# Changing a row is a maker-checker event, not an edit — issue a NEW version.id. Every
+# routed event stores the version id that routed it, so two mappings sharing one id
+# make a closed period irreproducible on replay.
+
+version.id = RT-2027.1
+version.description = Calculation specification 03 section 6.1, adopted as bank policy for the ACPIR 2026 first year: re-estimations providing consideration for the time value of money or for credit risk adjust the EIR (B5.4.5), and pre-determined adjustments compensating for neither route to a B5.4.6 catch-up.
+version.effectiveFrom = 2027-04-01
+version.maker = policy.author@bank.example
+version.checker = policy.approver@bank.example
+version.approvedOn = 2027-02-26
+
+route.TIME_VALUE_OF_MONEY = RESET
+route.CREDIT_RISK_MARKET = RESET
+route.CREDIT_RATCHET_PREDETERMINED = CATCH_UP
+route.ESG_LINKED = CATCH_UP
+route.STEP_UP_PREDETERMINED = CATCH_UP
+route.BEHAVIOURAL_ESTIMATE = CATCH_UP
+route.DISBURSEMENT_TIMING = CATCH_UP
+route.NEGOTIATED = MODIFICATION_TEST
