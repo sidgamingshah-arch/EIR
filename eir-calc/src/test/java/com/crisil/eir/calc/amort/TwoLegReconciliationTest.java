@@ -278,14 +278,17 @@ class TwoLegReconciliationTest {
         Rate equal = CONTRACTUAL;
         Rate consistent = expectedSignum > 0 ? above : expectedSignum < 0 ? below : equal;
 
-        assertThat(InvariantChecks.feeSignOrdering(consistent, CONTRACTUAL, fee).satisfied()).isTrue();
+        // A par-priced schedule, so the gap is nil and the fee alone sets the ordering.
+        Money atPar = Money.zero(Money.INR);
+        assertThat(InvariantChecks.feeSignOrdering(consistent, CONTRACTUAL, fee, atPar).satisfied())
+            .isTrue();
 
-        // A nil fee no longer demands exact equality — it cannot be met, because a
-        // borrower is billed to the paise and the resulting spread is arbitrarily
-        // signed. Within ORDERING_EPSILON the ordering is reported as unresolvable.
+        // A nil fee does not demand exact equality — it cannot be met, because a borrower is
+        // billed to the paise. Inside ORDERING_EPSILON the ordering is unresolvable.
         if (expectedSignum == 0) {
             Rate justOff = Rate.monthly(bd("0.010000000500"));
-            InvariantResult inBand = InvariantChecks.feeSignOrdering(justOff, CONTRACTUAL, fee);
+            InvariantResult inBand =
+                InvariantChecks.feeSignOrdering(justOff, CONTRACTUAL, fee, atPar);
             assertThat(inBand.satisfied()).isTrue();
             assertThat(inBand.detail()).contains("inside the resolvable band");
         }
@@ -295,11 +298,48 @@ class TwoLegReconciliationTest {
         // solver that converged on the wrong root. One comparison catches both.
         if (expectedSignum != 0) {
             Rate contradictory = expectedSignum > 0 ? below : above;
-            InvariantResult breach = InvariantChecks.feeSignOrdering(contradictory, CONTRACTUAL, fee);
+            InvariantResult breach =
+                InvariantChecks.feeSignOrdering(contradictory, CONTRACTUAL, fee, atPar);
             assertThat(breach.satisfied()).isFalse();
             assertThat(breach.id()).isEqualTo(InvariantId.INV_2);
-            assertThat(breach.detail()).contains("ordering contradicts the fee sign");
+            assertThat(breach.detail()).contains("ordering contradicts the fee net of the par gap");
         }
+    }
+
+    @Test
+    @DisplayName("the par gap is the baseline, so a gap larger than the fee reverses the ordering")
+    void theParGapIsTheBaseline() {
+        // The correction this check needed. The comparison is sign(EIR - coupon) against
+        // sign(F - G), and the old check was that comparison with G assumed to be zero. On a
+        // schedule that does not price to par at its coupon G is not zero, and where it
+        // exceeds the fee the arithmetically correct spread is NEGATIVE on a fee RECEIVED.
+        //
+        // The broken-first-period fixture is exactly that: a 49-day first period gives
+        // G = 6,192.66 against F = 5,000, so F - G = -1,192.66. Measured on it, the fee did
+        // lift the yield — 12.020935% to 12.554370%, a 53.3 bp lift against what the same
+        // billed schedule yields on its own — and the EIR still sat 12.8 bp BELOW the naive
+        // (1.01)^12 - 1 of 12.682503%. Under the old baseline that sound contract was an
+        // INV-2 breach.
+        Rate belowTheCoupon = Rate.annualEffective(bd("0.125543702714"));
+        Money feeReceived = Money.inr("5000");
+        Money brokenPeriodGap = Money.inr("6192.66");
+
+        assertThat(InvariantChecks.feeSignOrdering(
+            belowTheCoupon, CONTRACTUAL, feeReceived, brokenPeriodGap).satisfied())
+            .as("a fee received with a larger par gap orders BELOW the coupon, correctly")
+            .isTrue();
+        // And with the gap assumed away it is the breach it used to be reported as.
+        assertThat(InvariantChecks.feeSignOrdering(
+            belowTheCoupon, CONTRACTUAL, feeReceived, Money.zero(Money.INR)).satisfied())
+            .as("which is what the old baseline did on every non-par schedule")
+            .isFalse();
+
+        // The band is money now, so a fee the gap very nearly cancels is unresolvable rather
+        // than being asserted on the strength of arithmetic noise.
+        InvariantResult cancelled = InvariantChecks.feeSignOrdering(
+            CASE1_EIR, CONTRACTUAL, Money.inr("5000"), Money.inr("5000.005"));
+        assertThat(cancelled.satisfied()).isTrue();
+        assertThat(cancelled.detail()).contains("inside the resolvable band");
     }
 
     @Test
@@ -311,7 +351,8 @@ class TwoLegReconciliationTest {
         Rate annualCoupon = Rate.annualEffective(CONTRACTUAL.effectiveAnnual());
 
         assertThat(CASE1_EIR.periodic()).isLessThan(annualCoupon.periodic());
-        assertThat(InvariantChecks.feeSignOrdering(CASE1_EIR, annualCoupon, NET_INTEGRAL_FEE).satisfied())
+        assertThat(InvariantChecks.feeSignOrdering(
+            CASE1_EIR, annualCoupon, NET_INTEGRAL_FEE, Money.zero(Money.INR)).satisfied())
             .isTrue();
     }
 

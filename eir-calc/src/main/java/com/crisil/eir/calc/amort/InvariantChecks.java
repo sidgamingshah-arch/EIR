@@ -34,11 +34,14 @@ public final class InvariantChecks {
      *
      * <p>Published rather than private because it is a policy figure, not an
      * implementation detail: it decides when a fee is too small for its sign to be
-     * checkable. Derived in {@link #feeSignOrdering} — 0.0001% a year, sitting nineteen
-     * times above the largest paise-rounding artefact measured on a zero-fee EMI loan
-     * and five thousand times below the smallest spread the check has to catch.
+     * checkable. A <em>money</em> band, since {@link #feeSignOrdering} compares the fee net
+     * of the par gap — one paisa, ten thousand times above the arithmetic noise in computing
+     * that gap and five hundred thousand times below reference case 1's 5,000 of fee net of
+     * gap. It was 1e-6 p.a. while the baseline was the annualised coupon, which both hid a
+     * residue that is now measured and varied three hundredfold in economic terms across the
+     * book.
      */
-    public static final BigDecimal ORDERING_EPSILON = new BigDecimal("0.000001");
+    public static final Money ORDERING_EPSILON = Money.inr("0.01");
 
     private InvariantChecks() {
     }
@@ -145,33 +148,73 @@ public final class InvariantChecks {
      * on a whole legitimate population is worse than no control, because it teaches a
      * reviewer to dismiss INV-2 breaches.
      *
-     * <p>{@link #ORDERING_EPSILON} is the band inside which the ordering is not
-     * resolvable, and it is chosen with five orders of magnitude of daylight on both
-     * sides: nineteen times the largest rounding artefact measured above, and one part
-     * in five thousand of the smallest spread the check has to catch — reference case
-     * 1's 5.66e-3, being 13.248094% against 12.682503%, 56.6 basis points for 5,000 of
-     * net fee. Inside the band the result passes and says the ordering was
-     * indistinguishable, which is the honest report: an immaterial fee produces an
-     * immaterial spread, and its sign carries no information either way.
+     * <p><strong>And the baseline is the par gap, not the annualised coupon.</strong>
+     * That correction is the substance of this check. {@code contractualRate.effectiveAnnual()}
+     * annualises the quoted periodic rate as though every period were a whole one, and on a
+     * schedule that does not price to par at its coupon that is simply the wrong reference
+     * point. Writing {@code P} for par, {@code F} for the net integral fee and
+     *
+     * <pre>
+     *   G = P - PV(billed flows at the contractual rate)      the par gap
+     * </pre>
+     *
+     * <p>the identity is {@code sign(EIR_eff - coupon_eff) = sign(F - G)} wherever PV is
+     * monotone between the two rates — because the fee enters only the solve target, so the
+     * with-fee and without-fee problems are the same function of {@code r} differing by a
+     * constant. The old check was that comparison with {@code G} silently assumed to be zero.
+     *
+     * <p>It is not zero on two populations that are entirely ordinary. A loan disbursed on
+     * the 17th against a 5th-of-month due date has a 49-day first period and
+     * {@code G = 6,192.66} against {@code F = 5,000}, so {@code F - G = -1,192.66} and a
+     * <em>negative</em> spread is the arithmetically correct answer: measured, the fee lifted
+     * the yield from 12.020935% to 12.554370%, a 53.3 bp lift, while the EIR still sat 12.8 bp
+     * below the naive 12.682503%. And fixture S6's DeferredSimple schedule is perfectly
+     * uniform and carries {@code G = 6,056.91}. So uniformity was never the precondition this
+     * invariant needed — par pricing was.
+     *
+     * <p>{@code G} costs nothing to obtain. {@code TwoLegResult.reconcile} already holds the
+     * contractual leg's terminal balance, which is the uncollected residue rolled forward at
+     * the coupon, so {@code G} is that balance discounted back over the schedule's own tau.
+     * Verified against a direct {@code P - PV} to eight decimal places on the broken-period
+     * fixture: terminal 7,912.0641 over 2.052055 years gives 6,192.6630 either way.
+     *
+     * <p>{@link #ORDERING_EPSILON} is the band inside which the ordering is not resolvable,
+     * and with the baseline corrected it is a <em>money</em> band rather than a rate one. The
+     * residue that the rate band existed to hide is now the measured {@code G} and is
+     * subtracted, so what remains is only the arithmetic noise in computing {@code G} — about
+     * 1e-6 rupees from the 12dp stored rate. One paisa sits ten thousand times above that and
+     * five hundred thousand times below reference case 1's 5,000, and unlike a rate band it
+     * means the same thing at every tenor: 1e-6 p.a. was worth 0.018 INR on a seven-day
+     * drawing and 5.68 at 240 months, per million.
+     *
+     * @param parGap {@code P - PV(billed flows at the contractual rate)} — zero for a schedule
+     *     that prices to par at its coupon, and materially non-zero for a broken first period
+     *     or a deferred-interest schedule
      */
-    public static InvariantResult feeSignOrdering(Rate eir, Rate contractualRate, Money netIntegralFee) {
+    public static InvariantResult feeSignOrdering(
+        Rate eir, Rate contractualRate, Money netIntegralFee, Money parGap) {
+
         Objects.requireNonNull(eir, "eir");
         Objects.requireNonNull(contractualRate, "contractualRate");
+        Objects.requireNonNull(netIntegralFee, "netIntegralFee");
+        Objects.requireNonNull(parGap, "parGap");
         BigDecimal spread = eir.effectiveAnnual().subtract(contractualRate.effectiveAnnual());
-        int expected = netIntegralFee.signum();
+        Money net = netIntegralFee.minus(parGap);
         String detail = "EIR " + eir.effectiveAnnual().toPlainString() + " vs contractual "
             + contractualRate.effectiveAnnual().toPlainString() + " against net fee "
-            + netIntegralFee.atPresentationScale();
-        if (spread.abs().compareTo(ORDERING_EPSILON) <= 0) {
+            + netIntegralFee.atPresentationScale() + " less par gap "
+            + parGap.atPresentationScale();
+        if (net.abs().compareTo(ORDERING_EPSILON) <= 0) {
             return InvariantResult.pass(InvariantId.INV_2, detail
-                + " — spread " + spread.toPlainString() + " is inside the resolvable band "
-                + ORDERING_EPSILON.toPlainString() + ", so the ordering carries no information "
-                + "and neither does its sign");
+                + " — the fee net of the par gap is " + net.atPresentationScale()
+                + ", inside the resolvable band of " + ORDERING_EPSILON.atPresentationScale()
+                + ", so the ordering carries no information and neither does its sign");
         }
-        if (spread.signum() == expected) {
+        if (spread.signum() == net.signum()) {
             return InvariantResult.pass(InvariantId.INV_2, detail);
         }
-        return InvariantResult.fail(InvariantId.INV_2, detail + " — ordering contradicts the fee sign", spread);
+        return InvariantResult.fail(InvariantId.INV_2,
+            detail + " — ordering contradicts the fee net of the par gap", spread);
     }
 
     /**

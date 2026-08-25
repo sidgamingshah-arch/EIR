@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 import com.crisil.eir.calc.amort.AmortisationEngine;
 import com.crisil.eir.calc.amort.AmortisationResult;
 import com.crisil.eir.calc.amort.AmortisationRow;
+import com.crisil.eir.calc.amort.InvariantChecks;
 import com.crisil.eir.calc.projection.ProjectionResult;
 import com.crisil.eir.calc.projection.ResiduePolicy;
 import com.crisil.eir.calc.projection.blueprint.BehaviouralOverlay;
@@ -98,6 +99,11 @@ import org.junit.jupiter.api.Test;
  * a fee received lifts the yield — is a statement about a par instrument and it does
  * not survive a structure that is itself away from par, which is exactly why this
  * package asserts orderings against stated figures rather than against a rule of thumb.
+ *
+ * <p>That reading was also, for a time, what the engine asserted, and this fixture is
+ * where it broke: INV-2 now subtracts the measured par gap rather than assuming it away,
+ * and {@code theEirFallsBelowContractualDespiteFeeIncome} pins both directions of the
+ * correction against the independent price check.
  *
  * <h2>What is asserted, and why in this shape</h2>
  *
@@ -1193,21 +1199,43 @@ class StructureFixturesTest {
             // instrument whose contractual cash flows price to par at that rate, and this
             // one does not — the simple deferral put the schedule 6,056.91 below par before
             // the fee was considered at all, and 5,000 of fee income does not recover it.
-            //
-            // FINDING, recorded here because this is the fixture that surfaces it.
-            // InvariantChecks.feeSignOrdering states INV-2 as
-            // sign(EIR_eff - contractual_eff) == sign(netIntegralFee), passing only inside
-            // an ORDERING_EPSILON band of 1e-6. On S6 the spread is -6.3188e-4 against a
-            // net fee of +5,000, which is 632 times the band, so a two-leg reconciliation
-            // run over this fixture would report a BLOCKING INV-2 breach on an instrument
-            // where every figure is correct. The blueprint pipeline does not build a
-            // TwoLegResult, so nothing fails today; the hazard is live for whoever wires
-            // one to a DeferredSimple structure. The fix is in the invariant's premise and
-            // not in the fixture: INV-2 compares the EIR to the contractual rate as a
-            // proxy for comparing the carrying amount to par, and the proxy holds only
-            // where the contractual flows themselves price to par.
             assertThat(fixture.eir().effectiveAnnual())
                 .isLessThan(ONE_PERCENT_MONTHLY.effectiveAnnual());
+
+            // This fixture surfaced the defect in INV-2's premise, and it now pins the fix.
+            // The old statement was sign(EIR_eff - contractual_eff) == sign(netIntegralFee),
+            // inside a 1e-6 rate band. On S6 the spread is -6.3188e-4 against a net fee of
+            // +5,000 — 632 times that band — so a two-leg reconciliation over this fixture
+            // reported a BLOCKING INV-2 breach on an instrument where every figure is
+            // correct. Nothing failed at the time only because the blueprint pipeline builds
+            // no TwoLegResult; the hazard was live for whoever wired one to a DeferredSimple
+            // structure.
+            //
+            // The fix was in the premise, not the fixture. INV-2 compared the EIR to the
+            // contractual rate as a proxy for comparing the carrying amount to par, and that
+            // proxy holds only where the contractual flows themselves price to par. It now
+            // subtracts the par gap instead of assuming it away, so the ordering it asserts
+            // is sign(EIR - coupon) = sign(F - G).
+            //
+            // G is taken from the independent price check above rather than from
+            // TwoLegResult.parGap, deliberately: this file's whole discipline is that no
+            // expected value comes from the routine under test, and it is that independence
+            // which makes the two assertions below evidence rather than restatement.
+            Money parGap = Money.inr("1000000").minus(Money.inr(
+                presentValueAtOnePercent(fixture.projection().contractual()).toPlainString()));
+            assertThat(parGap.atPresentationScale())
+                .as("the 6,056.91 of present value simple deferral gave away")
+                .hasToString("INR 6056.91");
+
+            Money netFee = fixture.projected().assembly().netIntegralFee();
+            assertThat(InvariantChecks.feeSignOrdering(
+                fixture.eir(), ONE_PERCENT_MONTHLY, netFee, parGap).satisfied())
+                .as("F - G = 5,000 - 6,056.91 is negative, and so is the spread")
+                .isTrue();
+            assertThat(InvariantChecks.feeSignOrdering(
+                fixture.eir(), ONE_PERCENT_MONTHLY, netFee, Money.zero(Money.INR)).satisfied())
+                .as("and with the gap assumed away it is the blocking breach it used to be")
+                .isFalse();
 
             // And the fee is unambiguously income, read off the ASSEMBLY rather than off
             // the constant. This half is load-bearing — the claim is an EIR below

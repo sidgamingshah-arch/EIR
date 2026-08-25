@@ -3,6 +3,7 @@ package com.crisil.eir.calc.amort;
 import com.crisil.eir.domain.InvariantBreachException;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Money;
+import com.crisil.eir.domain.Precision;
 import com.crisil.eir.domain.Rate;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -111,7 +112,17 @@ public record TwoLegResult(
         List<InvariantResult> invariants = new ArrayList<>();
         invariants.add(InvariantChecks.lifetimeInterest(
             eirLeg.totalInterest(), contractualInterestBilled, netIntegralFee, totalCatchUps));
-        invariants.add(InvariantChecks.feeSignOrdering(eir, contractualRate, netIntegralFee));
+        // The par gap, from figures already in hand. The contractual leg's terminal balance
+        // IS the uncollected residue rolled forward at the coupon, so discounting it back
+        // over the schedule's own tau gives P - PV(billed flows at the contractual rate) —
+        // verified against a direct P - PV to eight decimal places on the broken-period
+        // fixture. Zero on a schedule that prices to par at its coupon, and materially
+        // non-zero on a broken first period or a deferred-interest schedule, which is why
+        // INV-2 needed it: the annualised coupon is the wrong baseline wherever G is not
+        // zero, and it is not zero on two entirely ordinary populations.
+        Money parGap = parGap(contractualLeg, contractualRate);
+        invariants.add(
+            InvariantChecks.feeSignOrdering(eir, contractualRate, netIntegralFee, parGap));
         invariants.add(InvariantChecks.billedCashReconciliation(
             contractualLeg.totalCash(),
             principalAdvanced,
@@ -122,6 +133,31 @@ public record TwoLegResult(
         List<InvariantResult> all = InvariantChecks.merge(
             InvariantChecks.merge(eirLeg.invariants(), contractualLeg.invariants()), invariants);
         return new TwoLegResult(rows, eirLeg, contractualLeg, netIntegralFee, totalCatchUps, all);
+    }
+
+    /**
+     * {@code P - PV(billed flows at the contractual rate)} — how far the billed schedule
+     * misses par at its own coupon.
+     *
+     * <p>Costs one fractional power and no solve. The contractual leg rolls forward at the
+     * coupon and its terminal balance is whatever the billed instalments failed to collect,
+     * so discounting that residue back over the accumulated tau recovers the shortfall at
+     * inception. {@code Money} carries 28 significant digits and rounds only at
+     * presentation, so the only error here is the 12dp stored contractual rate, worth about
+     * 1e-6 rupees.
+     *
+     * <p>Two quite different things make it non-zero and both matter. Instalment rounding
+     * leaves paise, which is dust. A schedule whose shape does not price to par at its
+     * coupon — a broken first period, interest deferred to a lump — leaves thousands, and
+     * that is a real feature of the instrument rather than an artefact.
+     */
+    public static Money parGap(AmortisationResult contractualLeg, Rate contractualRate) {
+        BigDecimal totalTau = BigDecimal.ZERO;
+        for (AmortisationRow row : contractualLeg.rows()) {
+            totalTau = totalTau.add(row.accrualExponent(), Precision.WORKING);
+        }
+        return contractualLeg.terminalBalance()
+            .times(Precision.discountFactor(contractualRate.periodic(), totalTau));
     }
 
     /** Par amount advanced — the contractual leg's opening balance. */

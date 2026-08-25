@@ -8,6 +8,7 @@ import com.crisil.eir.calc.amort.AmortisationRow;
 import com.crisil.eir.calc.amort.CatchUpCalculator;
 import com.crisil.eir.calc.amort.CatchUpResult;
 import com.crisil.eir.calc.amort.InvariantChecks;
+import com.crisil.eir.calc.amort.TwoLegResult;
 import com.crisil.eir.calc.projection.AnnuityProjector;
 import com.crisil.eir.calc.projection.ContractTerms;
 import com.crisil.eir.calc.projection.FeePosting;
@@ -102,31 +103,38 @@ class InvariantBoundaryCasesTest {
             .as("plugging the residue into the final instalment yields fractionally more")
             .isPositive();
 
-        // INV-2 read as exact equality fails here, and this test used to assert that
-        // failure as the expected outcome. It is the right measurement and the wrong
-        // conclusion: nothing is wrong with this contract. The spread is a paise-rounding
-        // artefact, its magnitude is between 1e-9 and 1e-6 as asserted above, and its sign
-        // is set by which way the last paise went — negative under LMS_AUTHORITATIVE and
-        // positive under FINAL_PERIOD_PLUG on the very same instrument. A control that
-        // fires on every zero-fee contract in the book, in a direction that depends on a
-        // residue policy, teaches a reviewer to dismiss INV-2 breaches. So the invariant
-        // now carries a resolvable band and passes inside it, saying so in the detail.
+        // INV-2 read as exact equality against the annualised coupon fails here, and this
+        // test has now said three different things about why. First it asserted the failure
+        // as expected. Then a resolvable band was added and it passed inside the band, which
+        // was true and uninformative. Neither was the real answer: the spread is not noise at
+        // all, it is the schedule's own par gap, and the gap has a SIGN that explains the
+        // spread's sign — which is why the sign flipped with the residue policy, negative
+        // under LMS_AUTHORITATIVE and positive under FINAL_PERIOD_PLUG on the same
+        // instrument. LMS bills the annuity rounded down and collects fractionally less than
+        // par; the plug collects fractionally more.
+        //
+        // With the baseline corrected the invariant passes for a reason rather than by
+        // tolerance: sign(EIR - coupon) = sign(F - G), and with F nil that is sign(-G).
+        Money gapUnderLms = parGapOf(ProjectorRegistry.standard(), terms);
         InvariantResult ordering = InvariantChecks.feeSignOrdering(
             solve(ProjectorRegistry.standard(), terms, List.of()), terms.contractualRate(),
-            Money.zero(Money.INR));
+            Money.zero(Money.INR), gapUnderLms);
         assertThat(ordering.satisfied())
             .as("a zero-fee contract is sound and INV-2 must say so: %s", ordering.detail())
             .isTrue();
-        assertThat(ordering.detail()).contains("inside the resolvable band");
-        assertThat(underLmsAuthoritative.abs()).isLessThan(InvariantChecks.ORDERING_EPSILON);
+        assertThat(gapUnderLms.isPositive())
+            .as("billing the annuity rounded down collects less than par, so the gap is"
+                + " positive and -G is negative, matching the spread's sign")
+            .isTrue();
+        assertThat(underLmsAuthoritative.signum()).isEqualTo(gapUnderLms.negate().signum());
 
-        // One rupee of fee also passes — and here the pass is uninformative rather than
-        // meaningful, because one rupee on a million moves the yield by far less than the
-        // rounding noise does. That is what the band is for: it does not claim to have
-        // verified an ordering it cannot see.
+        // One rupee of fee against a gap of the same order is genuinely unresolvable, and the
+        // band says so rather than asserting an ordering it cannot see. This is the case the
+        // rate band handled badly: 1e-6 p.a. is worth 0.018 INR on a seven-day drawing and
+        // 5.68 at 240 months, so what counted as "immaterial" varied three hundredfold.
         InvariantResult withOneRupee = InvariantChecks.feeSignOrdering(
             solve(ProjectorRegistry.standard(), terms, integralFee(Money.inr("1"))),
-            terms.contractualRate(), Money.inr("1"));
+            terms.contractualRate(), Money.inr("1"), gapUnderLms);
         assertThat(withOneRupee.satisfied()).isTrue();
 
         // What must still fail: a material fee whose ordering runs the wrong way. Case 1's
@@ -135,11 +143,12 @@ class InvariantBoundaryCasesTest {
         // outside the band.
         InvariantResult contradiction = InvariantChecks.feeSignOrdering(
             Rate.monthly(new BigDecimal("0.009581469078")), Rate.monthly(new BigDecimal("0.01")),
-            Money.inr("5000"));
+            Money.inr("5000"), Money.zero(Money.INR));
         assertThat(contradiction.satisfied())
-            .as("the band must not swallow a real sign error")
+            .as("neither the band nor the par gap may swallow a real sign error")
             .isFalse();
-        assertThat(contradiction.detail()).contains("ordering contradicts the fee sign");
+        assertThat(contradiction.detail())
+            .contains("ordering contradicts the fee net of the par gap");
     }
 
     /**
@@ -464,6 +473,19 @@ class InvariantBoundaryCasesTest {
                 projection.initialCarryingAmount(), projection.recommendedConvention(),
                 terms.periodicRate()))
             .rateOrThrow();
+    }
+
+    /**
+     * The schedule's own par gap, {@code P - PV(billed flows at the contractual rate)},
+     * computed the way {@code TwoLegResult.reconcile} computes it: the contractual leg's
+     * terminal balance discounted back over the accumulated tau.
+     */
+    private static Money parGapOf(ProjectorRegistry registry, ContractTerms terms) {
+        ProjectionResult projection = registry.project(terms, List.of());
+        AmortisationResult contractualLeg = AmortisationEngine.contractualLeg(
+            terms.principal(), terms.contractualRate(), projection.contractual(),
+            projection.recommendedConvention());
+        return TwoLegResult.parGap(contractualLeg, terms.contractualRate());
     }
 
     private static BigDecimal spreadOverContractual(

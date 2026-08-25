@@ -428,11 +428,23 @@ threshold is measured rather than fixed at half a paisa.
 Asset 1,000,000 at 11% p.a., 36 months, RV 200,000. PV of RV 144,001.06; rental 28,024.31;
 final period 228,024.31. Contractual effective 11.571884%.
 
-| Integral amount | GCA₀ | EIR p.a. | INV-2 |
-|---|---:|---:|---|
-| Fee **received** 12,000 | 988,000 | 12.377404% | EIR **above** contractual |
-| Cost **paid** 12,000 | 1,012,000 | 10.784759% | EIR **below** contractual |
-| None | 1,000,000 | 11.571890% | EIR **equals** contractual |
+The billed rental of 28,024.31 is the true annuity of 28,024.30702715317 rounded **up**, so this
+schedule over-collects. Its par gap is `G = P − PV(billed @ contractual) = ` **−0.09** — which is
+what makes the third row below interesting rather than trivial.
+
+| Integral amount | GCA₀ | `F` | `F − G` | EIR p.a. | INV-2 |
+|---|---:|---:|---:|---:|---|
+| Fee **received** 12,000 | 988,000 | +12,000 | +12,000.09 | 12.377404% | EIR **above** contractual |
+| Cost **paid** 12,000 | 1,012,000 | −12,000 | −11,999.91 | 10.784759% | EIR **below** contractual |
+| None | 1,000,000 | 0 | **+0.09** | 11.571890% | EIR **above** contractual, by 6.02e-8 |
+
+The third row does *not* say the rates are equal, and INV-2 does not claim they are. A nil fee
+against a −0.09 gap must price above the coupon, and the +6.02e-8 spread is exactly the ordering
+`sign(F − G)` predicts — nine times the one-paisa resolvable band, so the check resolves it rather
+than abstaining. Round the rental **down** instead and every sign in that row flips, which is the
+point: the residue is a property of the billed schedule, not noise to be tolerated. See
+[03 § 9](03-calculation-spec.md#9-invariants) on why the baseline is the par gap and not the
+annualised coupon, and [ADR-0009](adr/0009-par-gap-as-the-ordering-baseline.md) for the decision.
 
 The cheapest sign check in the engine, and it catches a whole class of fee-classification
 errors.

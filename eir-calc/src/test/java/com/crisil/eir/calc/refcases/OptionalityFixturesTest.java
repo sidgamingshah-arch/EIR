@@ -13,6 +13,7 @@ import com.crisil.eir.calc.amort.AmortisationResult;
 import com.crisil.eir.calc.amort.CatchUpCalculator;
 import com.crisil.eir.calc.amort.CatchUpResult;
 import com.crisil.eir.calc.amort.InvariantChecks;
+import com.crisil.eir.calc.amort.TwoLegResult;
 import com.crisil.eir.calc.projection.ConventionSelector;
 import com.crisil.eir.calc.projection.FeePosting;
 import com.crisil.eir.calc.projection.ResiduePolicy;
@@ -267,6 +268,26 @@ class OptionalityFixturesTest {
             .as("solve status was %s: %s", solved.status(), solved.diagnostic())
             .isTrue();
         return solved.rateOrThrow();
+    }
+
+    /**
+     * The schedule's par gap, derived as {@code TwoLegResult.reconcile} derives it: the
+     * contractual leg's terminal balance discounted back over the accumulated tau. INV-2's
+     * baseline, and non-zero here only by the rental-rounding residue — these schedules are
+     * uniform and do price to par at their coupon.
+     *
+     * <p>Par is the amount advanced at inception, not the initial carrying amount: the
+     * contractual leg rolls from the face principal and knows nothing of the fee.
+     */
+    private static Money parGapOf(BlueprintProjection projection, Rate contractualRate) {
+        TimeConvention convention = projection.projection().recommendedConvention();
+        Rate under = ConventionSelector.rateUnder(convention, contractualRate);
+        AmortisationResult contractualLeg = AmortisationEngine.contractualLeg(
+            projection.assembly().amountAdvancedAtInception(),
+            under,
+            projection.projection().contractual(),
+            convention);
+        return TwoLegResult.parGap(contractualLeg, under);
     }
 
     /** The EIR leg over the expected vector the rate was solved against. */
@@ -1259,18 +1280,30 @@ class OptionalityFixturesTest {
             Rate contractual = MORTGAGE_RATE;
             assertThat(effectiveAnnualPercent(contractual)).isEqualByComparingTo(bd("9.380690"));
 
+            BlueprintProjection fastest = project("0.25");
             Rate atZero = solvedEir(project("0"), MORTGAGE_RATE);
             Rate atEight = solvedEir(project("0.08"), MORTGAGE_RATE);
             Rate atFifteen = solvedEir(project("0.15"), MORTGAGE_RATE);
-            Rate atTwentyFive = solvedEir(project("0.25"), MORTGAGE_RATE);
+            Rate atTwentyFive = solvedEir(fastest, MORTGAGE_RATE);
 
             assertThat(atZero.effectiveAnnual()).isGreaterThan(contractual.effectiveAnnual());
             assertThat(atEight.effectiveAnnual()).isGreaterThan(atZero.effectiveAnnual());
             assertThat(atFifteen.effectiveAnnual()).isGreaterThan(atEight.effectiveAnnual());
             assertThat(atTwentyFive.effectiveAnnual()).isGreaterThan(atFifteen.effectiveAnnual());
 
+            // INV-2's baseline is the par gap of the CONTRACTUAL leg, which is the
+            // unaccelerated mortgage ladder: prepayment reshapes the expected vector the
+            // rate is solved over, not the schedule the borrower contracted for. A level
+            // mortgage prices to par at its own coupon, so the gap is the rental-rounding
+            // residue and nothing more, and the whole 50,000 of fee is left to explain the
+            // spread.
+            Money parGap = parGapOf(fastest, MORTGAGE_RATE);
+            assertThat(parGap.amount().abs())
+                .as("a level mortgage prices to par at its coupon: %s", parGap)
+                .isLessThan(bd("1"));
+
             InvariantResult inv2 =
-                InvariantChecks.feeSignOrdering(atTwentyFive, contractual, NET_FEE);
+                InvariantChecks.feeSignOrdering(atTwentyFive, contractual, NET_FEE, parGap);
             assertThat(inv2.id()).isEqualTo(InvariantId.INV_2);
             assertThat(inv2.satisfied())
                 .as("INV-2 at the fastest speed, where the spread is widest")
@@ -1692,8 +1725,11 @@ class OptionalityFixturesTest {
 
             Rate eir = solvedEir(par, POOL_COUPON);
             assertThat(eir.effectiveAnnual().subtract(POOL_COUPON.effectiveAnnual()).abs())
-                .as("so the par note's EIR sits inside INV-2's unresolvable band of the coupon")
-                .isLessThan(InvariantChecks.ORDERING_EPSILON);
+                .as("the par note's EIR sits a rounding artefact away from its coupon, not a"
+                    + " premium away — INV-2's baseline is now the measured par gap rather than"
+                    + " a band around the annualised coupon, so this is stated as the magnitude"
+                    + " it is")
+                .isLessThan(bd("0.000001"));
 
             Money carriedDrift = BehaviouralAdjuster.unamortisedPremiumOrDiscount(
                 row(NOTE_PAR).poolBalance(), row(NOTE_PAR).gcaBefore());
@@ -1942,7 +1978,8 @@ class OptionalityFixturesTest {
                 .isGreaterThan(LEASE_RATE.effectiveAnnual());
 
             InvariantResult inv2 = InvariantChecks.feeSignOrdering(
-                eir, LEASE_RATE, projection.assembly().netIntegralFee());
+                eir, LEASE_RATE, projection.assembly().netIntegralFee(),
+                parGapOf(projection, LEASE_RATE));
             assertThat(inv2.satisfied()).isTrue();
             assertTerminalCarryingAmountIsZero(eirLeg(projection, eir));
         }
@@ -1965,7 +2002,8 @@ class OptionalityFixturesTest {
             assertThat(eir.effectiveAnnual()).isLessThan(LEASE_RATE.effectiveAnnual());
 
             InvariantResult inv2 = InvariantChecks.feeSignOrdering(
-                eir, LEASE_RATE, projection.assembly().netIntegralFee());
+                eir, LEASE_RATE, projection.assembly().netIntegralFee(),
+                parGapOf(projection, LEASE_RATE));
             assertThat(inv2.satisfied()).isTrue();
             assertTerminalCarryingAmountIsZero(eirLeg(projection, eir));
         }
@@ -1981,10 +2019,11 @@ class OptionalityFixturesTest {
             //
             // So INV-2's "equals it when there is none" is NOT exact equality — taken that
             // way it is not an invariant at all, because it fails on every zero-fee contract
-            // in the book. What is asserted is what the invariant actually claims: the
-            // spread sits inside ORDERING_EPSILON, the result PASSES, and it records the
-            // ordering as unresolvable. An immaterial fee produces an immaterial spread and
-            // its sign carries no information either way.
+            // in the book. But nor is it unresolvable: the 0.09 of over-collected present
+            // value IS the schedule's par gap, and once INV-2 measures that gap instead of
+            // guessing at a rate band, the artefact stops being noise the check has to
+            // tolerate and becomes the thing the check reads the sign off. A nil fee against
+            // a −0.09 gap must yield a rate ABOVE the coupon, and does.
             BlueprintProjection projection = project(List.of());
             Rate eir = solvedEir(projection, LEASE_RATE);
 
@@ -1999,22 +2038,36 @@ class OptionalityFixturesTest {
             assertThat(spread.abs().round(new MathContext(3)))
                 .as("the rounded-rental artefact, to three significant figures")
                 .isEqualByComparingTo(bd("0.0000000602"));
-            assertThat(spread.abs())
-                .as("comfortably inside the band INV-2 declares unresolvable")
-                .isLessThan(InvariantChecks.ORDERING_EPSILON);
-            assertThat(spread.abs().multiply(BigDecimal.valueOf(16)))
-                .as("the band stands more than sixteen times above the artefact it has to admit")
-                .isLessThan(InvariantChecks.ORDERING_EPSILON);
+            // The artefact is no longer hidden by a band — it is the schedule's own par gap,
+            // measured, and with a nil fee it is what SETS the ordering: sign(EIR - coupon)
+            // = sign(F - G) = sign(-G). A rate band declared this unresolvable; the gap
+            // explains it, which is a stronger statement about the same number.
+            Money gap = parGapOf(projection, LEASE_RATE);
+            assertThat(spread.signum())
+                .as("a nil fee orders by the negated par gap, not by nothing")
+                .isEqualTo(gap.negate().signum());
+
+            assertThat(gap.atPresentationScale())
+                .as("the over-collected present value, measured rather than tolerated")
+                .hasToString("INR -0.09");
 
             InvariantResult inv2 = InvariantChecks.feeSignOrdering(
-                eir, LEASE_RATE, projection.assembly().netIntegralFee());
+                eir, LEASE_RATE, projection.assembly().netIntegralFee(), gap);
             assertThat(inv2.id()).isEqualTo(InvariantId.INV_2);
             assertThat(inv2.satisfied())
                 .as("INV-2 passes at a nil fee; it does not demand exact equality")
                 .isTrue();
+            // And it passes on the ORDERING route, not by abstention. 0.09 of over-collected
+            // present value is nine times ORDERING_EPSILON, so the check resolves the sign
+            // rather than declining to: the +6.02e-8 spread is what a −0.09 gap should
+            // produce. Under the old 1e-6 p.a. rate band the same number was reported as
+            // unresolvable — a true statement that explained nothing. Pinned on the detail
+            // string because it is the difference between the two baselines, and a revert to
+            // the coupon-annualised one would land back in the band branch silently.
             assertThat(inv2.detail())
-                .contains("inside the resolvable band")
-                .contains("the ordering carries no information");
+                .as("the gap resolves the ordering; it does not excuse it")
+                .contains("less par gap INR -0.09")
+                .doesNotContain("inside the resolvable band");
 
             // And the equality that must NOT be asserted, pinned so nobody adds it back.
             // A control that fires on every zero-fee contract in the book is worse than no

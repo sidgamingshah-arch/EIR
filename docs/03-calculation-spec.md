@@ -886,7 +886,7 @@ period close.
 | IC-1 | `GCA₀` = net cash flow at inception | Initial recognition |
 | TR-1 | Terminal EIR-leg GCA = 0 on a full-term, event-free contract | Contract close |
 | INV-1 | Σ EIR interest over life = Σ contractual interest + net integral fee ± catch-ups | Contract close |
-| INV-2 | `EIR > contractual` iff net integral fee is income; `<` iff cost; indistinguishable within 1e-6 p.a. iff nil or immaterial | Post-solve |
+| INV-2 | `sign(EIR − contractual) = sign(F − G)`, where `F` is the net integral fee and `G = P − PV(billed flows @ contractual)` is the schedule's par gap; unresolvable only where `\|F − G\| ≤ 0.01` | Post-solve |
 | INV-3 | Σ cash received = principal + Σ contractual interest (on billed flows) | Contract close |
 | INV-4 | Unamortised fee balance = contractual GCA − EIR GCA | Every period |
 | CU-1 | EIR unchanged across a catch-up restatement | Event |
@@ -936,17 +936,47 @@ yields one result per period, satisfied only if every applicable route is, with 
 each route's evidence. A pass on the fee route alone means something quite different from a pass on
 both, so the evidence is concatenated rather than replaced.
 
-**On INV-2's third limb.** "Equals it when there is none" cannot be read as exact equality. A
-borrower is billed an instalment rounded to the paise, so a zero-fee loan does not reprice exactly
-at its coupon: on 1,000,000 at 1% a month the residual spread is −5.3e-8 over 24 months, +5.1e-8
-over 60 and −2.1e-8 over 240 — arbitrarily signed, and set by which way the last paise went rather
-than by anything about the contract. Read literally the invariant therefore fails on every zero-fee
-contract in the book, and a control that fires on a whole legitimate population teaches reviewers to
-dismiss it. The limb is a **band of 1e-6 p.a.**: nineteen times the largest artefact above, and one
-five-thousandth of the smallest spread the check must catch — case 1's 56.6 basis points for 5,000
-of net fee. Inside the band the result passes and records that the ordering was not resolvable,
-which is the honest report, because an immaterial fee produces an immaterial spread whose sign
-carries no information.
+**On INV-2's baseline.** "Equals it when there is none" cannot be read as exact equality. A borrower
+is billed an instalment rounded to the paise, so a zero-fee loan does not reprice exactly at its
+coupon: on 1,000,000 at 1% a month the residual spread is −5.3e-8 over 24 months, +5.1e-8 over 60
+and −2.1e-8 over 240. Read literally the invariant therefore fails on every zero-fee contract in
+the book, and a control that fires on a whole legitimate population teaches reviewers to dismiss it.
+
+The wrong fix is a tolerance band on the *spread*, and it was the first one this engine shipped:
+1e-6 p.a., chosen as nineteen times the largest artefact above. A rate band is the wrong instrument
+twice over. It varies three hundredfold in economic terms across the book — 1e-6 p.a. is worth 0.018
+INR on a seven-day drawing and 5.68 at 240 months, per million — so one constant cannot be both
+tight enough to catch a small fee on a long tenor and loose enough to pass a rounded rental on a
+short one. And it treats a *knowable* number as noise: the artefact is not random, it is the
+schedule's own **par gap**, and it can be measured.
+
+So the baseline is the par gap, not the coupon:
+
+```
+G  =  P  −  PV(billed flows @ contractual rate)          the par gap
+INV-2:   sign(EIR − contractual)  =  sign(F − G)          F = net integral fee
+```
+
+`G` is zero for a schedule that does price to par at its coupon, the paise residue for one whose
+rental was rounded, and materially non-zero for a broken first period or a deferred-interest
+schedule — where the old formulation was not merely imprecise but *inverted*. `G` is not solved for:
+it falls out of the contractual leg already computed, as the terminal balance discounted back over
+the schedule's accumulated tau. On the broken-period fixture that is a terminal 7,912.0641 over
+2.052055 years, giving **G = 6,192.6630**, which agrees to eight decimal places with a direct
+`P − PV` — and it makes a *negative* spread the arithmetically correct answer there, since 5,000 of
+fee against a 6,192.66 gap is `F − G = −1,192.66`. Reusing the leg is what makes the correction
+affordable: one fractional power per contract, against a full solve — two to three orders of
+magnitude on a typical retail schedule, and the reason the invariant is not simply restated as a
+comparison against the contractual-only yield.
+
+What survives as a band is a **money** band of one paisa, and it now bounds only the arithmetic
+noise in computing `G` itself — about 1e-6 rupees from the 12dp stored rate. One paisa sits ten
+thousand times above that and five hundred thousand times below reference case 1's 5,000 of fee net
+of gap, and unlike a rate band it means the same thing at every tenor. Inside it the ordering
+genuinely carries no information; outside it, the ordering is resolved rather than excused. The lease fixture is the illustration: a nil fee against a
+par gap of −0.09 must yield a rate *above* the coupon, and the +6.02e-8 spread that the rate band
+once dismissed as unresolvable is now the answer the check predicts. The decision, its cost and the
+alternatives rejected are in [ADR-0009](adr/0009-par-gap-as-the-ordering-baseline.md).
 
 Structure-specific invariants ST-3 … ST-12 extend this table and are stated in
 [09 § 7](09-cashflow-structures.md#7-structure-specific-invariants). ST-9 in particular constrains

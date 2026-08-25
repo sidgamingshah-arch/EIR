@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.crisil.eir.calc.amort.AmortisationRow;
 import com.crisil.eir.calc.amort.InvariantChecks;
+import com.crisil.eir.calc.amort.TwoLegResult;
 import com.crisil.eir.domain.CashFlow;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Money;
@@ -89,8 +90,14 @@ class RateOrderingPropertiesTest {
             .as("the population's precondition holds for %s", pipeline.label())
             .isTrue();
 
+        // The par gap, from the pipeline's own contractual leg — the same derivation
+        // TwoLegResult.reconcile uses. This population is uniform-period, so the gap is only
+        // the instalment-rounding residue; it is passed rather than assumed nil because
+        // assuming it nil is precisely the defect this baseline correction fixed, and a
+        // property that assumes it would stop being able to see a regression.
         InvariantResult ordering = InvariantChecks.feeSignOrdering(
-            pipeline.eir(), contract.terms().contractualRate(), contract.netIntegralFee());
+            pipeline.eir(), contract.terms().contractualRate(), contract.netIntegralFee(),
+            TwoLegResult.parGap(pipeline.contractualLeg(), contract.terms().contractualRate()));
         assertThat(ordering.satisfied())
             .as("INV-2 for %s: %s", pipeline.label(), ordering.detail())
             .isTrue();

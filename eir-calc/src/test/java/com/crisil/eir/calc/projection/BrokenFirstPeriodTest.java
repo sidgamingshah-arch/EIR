@@ -4,8 +4,9 @@ import static com.crisil.eir.calc.projection.CaseFixtures.bd;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.crisil.eir.calc.amort.AmortisationEngine;
-import com.crisil.eir.calc.amort.InvariantChecks;
 import com.crisil.eir.calc.amort.AmortisationResult;
+import com.crisil.eir.calc.amort.InvariantChecks;
+import com.crisil.eir.calc.amort.TwoLegResult;
 import com.crisil.eir.calc.solver.BracketedNewtonSolver;
 import com.crisil.eir.calc.solver.SolveRequest;
 import com.crisil.eir.calc.solver.SolveResult;
@@ -116,8 +117,8 @@ class BrokenFirstPeriodTest {
     }
 
     @Test
-    @DisplayName("INV-2's baseline is wrong on a non-uniform schedule: the fee lifts the yield, and the invariant still breaches")
-    void invariantTwoUsesTheWrongBaselineOnANonUniformSchedule() {
+    @DisplayName("INV-2 on a non-uniform schedule: the fee lifts the yield, the par gap exceeds it, and a negative spread is correct")
+    void invariantTwoOrdersByTheParGapOnANonUniformSchedule() {
         ContractTerms terms = brokenFirstPeriod();
         ProjectionResult withFee =
             new AnnuityProjector().project(terms, CaseFixtures.case1Fees());
@@ -142,30 +143,59 @@ class BrokenFirstPeriodTest {
             .as("INV-2's economic claim, against the right baseline")
             .isGreaterThan(noFeeYield.effectiveAnnual());
 
-        // And INV-2 as implemented breaches anyway, on a contract with nothing wrong with
-        // it. It compares the EIR to contractualRate.effectiveAnnual() — the naive
-        // (1.01)^12 - 1 = 12.682503%, which annualises the quoted periodic rate as though
-        // every period were a whole month. Stretch the schedule with a 49-day first period
-        // and this contract's own contractual-only yield is 12.020935%, not 12.682503%; the
-        // EIR lands 12.8 basis points BELOW the naive figure and the ordering reads
-        // backwards.
+        // And INV-2 now agrees, because its baseline is the par gap rather than the naive
+        // annualised coupon. This test used to assert the OPPOSITE — that a sound
+        // fee-received contract was reported as an INV-2 breach — because the check compared
+        // the EIR to (1.01)^12 - 1 = 12.682503%, which annualises the quoted periodic rate as
+        // though every period were a whole month. Stretch the schedule with a 49-day first
+        // period and this contract's own contractual-only yield is 12.020935%; the EIR lands
+        // 12.8 bp BELOW the naive figure and the ordering read backwards.
+        //
+        // G = par - PV(billed flows at the contractual rate) = 6,192.66 here, against
+        // F = 5,000, so F - G = -1,192.66 and a negative spread is the arithmetically correct
+        // answer. sign(EIR - coupon) = sign(F - G) holds, and the invariant passes.
+        // 6,192.66 is a reference figure, computed independently as a direct P - PV. The
+        // engine's own derivation — the contractual leg's terminal balance discounted over
+        // the accumulated tau — is asserted against it here, because the two agreeing is what
+        // licenses reusing the leg instead of solving a second time.
+        Money parGap = Money.inr("6192.66");
+        TimeConvention convention = withFee.recommendedConvention();
+        Rate couponUnderConvention =
+            ConventionSelector.rateUnder(convention, terms.contractualRate());
+        AmortisationResult contractualLeg = AmortisationEngine.contractualLeg(
+            terms.principal(), couponUnderConvention, withFee.contractual(), convention);
+        assertThat(TwoLegResult.parGap(contractualLeg, couponUnderConvention)
+            .atPresentationScale())
+            .as("the engine's par gap against the independently computed one")
+            .isEqualTo(parGap);
+
         InvariantResult ordering = InvariantChecks.feeSignOrdering(
-            eir, terms.contractualRate(), Money.inr("5000"));
+            eir, terms.contractualRate(), Money.inr("5000"), parGap);
         assertThat(ordering.satisfied())
-            .as("a sound fee-received contract, reported as an INV-2 breach: %s", ordering.detail())
+            .as("a sound fee-received contract, now reported as sound: %s", ordering.detail())
+            .isTrue();
+
+        // The gap the old baseline produced, kept as the measurement that motivated the fix.
+        // It is over a hundred thousand times the resolvable band in money terms, so no
+        // widening of a tolerance could ever have absorbed it — the baseline had to change.
+        BigDecimal spreadAgainstNaiveCoupon = terms.contractualRate().effectiveAnnual()
+            .subtract(eir.effectiveAnnual());
+        assertThat(spreadAgainstNaiveCoupon.setScale(6, RoundingMode.HALF_UP))
+            .isEqualByComparingTo(bd("0.001281"));
+        assertThat(parGap.minus(Money.inr("5000")).abs())
+            .isGreaterThan(InvariantChecks.ORDERING_EPSILON.times(bd("1000")));
+
+        // Assuming the gap away is what the old check did on every non-par schedule, and it
+        // is asserted here so the correction cannot be quietly reverted.
+        assertThat(InvariantChecks.feeSignOrdering(
+            eir, terms.contractualRate(), Money.inr("5000"), Money.zero(Money.INR)).satisfied())
+            .as("the old baseline, on the same sound contract")
             .isFalse();
 
-        // Not something the resolvable band can absorb: the gap is over a thousand times
-        // ORDERING_EPSILON, so this needs the baseline corrected, not the tolerance widened.
-        BigDecimal gap = terms.contractualRate().effectiveAnnual()
-            .subtract(eir.effectiveAnnual());
-        assertThat(gap.setScale(6, RoundingMode.HALF_UP)).isEqualByComparingTo(bd("0.001281"));
-        assertThat(gap).isGreaterThan(InvariantChecks.ORDERING_EPSILON.multiply(bd("1000")));
-
-        // RateOrderingPropertiesTest already states the correct form as a property — "the
-        // fee moves the yield away from the yield the same billed schedule produces on its
-        // own" — and generates only uniform-period contracts, which is why the property
-        // passes while the invariant it duplicates is wrong here.
+        // RateOrderingPropertiesTest states the same law as a property — "the fee moves the
+        // yield away from the yield the same billed schedule produces on its own" — and
+        // generates only uniform-period contracts, which is why that property passed
+        // throughout while the invariant it duplicates was wrong here.
     }
 
     private Rate solve(ProjectionResult projection, ContractTerms terms) {

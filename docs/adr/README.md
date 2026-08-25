@@ -16,3 +16,4 @@ itself applies to closed accounting periods.
 | [0006](0006-configurable-event-routing.md) | Reset-versus-catch-up routing as versioned configuration | Accepted |
 | [0007](0007-spring-batch-for-runs.md) | Spring Batch for amortisation and close runs | Accepted |
 | [0008](0008-no-manual-rate-override.md) | No manual rate or balance override, anywhere, ever | Accepted |
+| [0009](0009-par-gap-as-the-ordering-baseline.md) | INV-2 orders against the schedule's par gap, not the annualised coupon | Accepted |
