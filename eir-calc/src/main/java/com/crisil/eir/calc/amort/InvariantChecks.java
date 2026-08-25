@@ -218,6 +218,77 @@ public final class InvariantChecks {
     }
 
     /**
+     * Invariant ST-13: a schedule whose structure implies par pricing does price to par at
+     * its own coupon.
+     *
+     * <p>This exists because {@link #feeSignOrdering} stopped providing it. That check used
+     * to compare the EIR against the annualised coupon and therefore breached — loudly and
+     * wrongly — on any schedule away from par. Correcting its baseline to subtract the
+     * measured par gap (ADR-0009) fixed the false breaches and, in the same motion, made the
+     * gap invisible: {@code F - G} orders correctly whether {@code G} is 0.09 or 6,192.66, so
+     * a schedule missing par by thousands now passes INV-2 on arithmetic that is entirely
+     * correct.
+     *
+     * <p>For a structure that is legitimately away from par — interest deferred simple, a
+     * discount instrument, a step coupon, an undrawn tranche — that is the right answer and
+     * there is nothing to report. For a plain annuity it is not. There the gap can only come
+     * from an input the engine was given: an instalment loaded at the wrong scale, a rate
+     * stored per annum where the schedule bills per month, a principal that disagrees with
+     * the ladder it was sized from. ACPIR requires the computation to be system-driven with
+     * no manual intervention (ADR-0008), which makes detecting a bad input the only available
+     * response to one.
+     *
+     * <p><b>Reported, not thrown</b> — and this is the deliberate difference from ST-10, the
+     * other calendar-and-structure control. ST-10 fails only when convention selection has
+     * gone wrong, which is an engine defect: nothing downstream can compensate, so
+     * {@code BlueprintProjector} throws and the contract yields no rate at all. ST-13 fails
+     * on a bad input, which is an exception-queue item: the contract is quarantined with its
+     * evidence, the rest of the close proceeds, and the fix goes to the feed rather than to
+     * the engine. A batch of ten million that aborts on one mis-keyed instalment is a worse
+     * control than one that reports it.
+     *
+     * <p>The band is {@code BehaviouralAdjuster.roundingResidueBound} — the same measured
+     * bound ST-9 uses, and measured rather than constant for the same reason: half a paisa
+     * per instalment accumulates at the coupon, reaching 0.13 over 24 periods, 3.34 over 240
+     * and 9.15 over 360, so no single figure serves a book spanning those tenors. A schedule
+     * billed under {@code LMS_AUTHORITATIVE} sits at -0.01 against a band of 0.19 on three
+     * years; a rate loaded per annum instead of per month misses by five figures.
+     *
+     * @param structureImpliesPar {@code ScheduleBlueprint.pricesAtParUnder} — false for every
+     *     structure that is legitimately away from par, in which case this passes without
+     *     examining the gap and says so
+     * @param parGap              {@code P - PV(billed flows at the contractual rate)}
+     * @param residueBound        the largest gap instalment rounding alone can produce on
+     *     this schedule, as a magnitude
+     */
+    public static InvariantResult parPricing(
+        boolean structureImpliesPar, Money parGap, Money residueBound) {
+
+        Objects.requireNonNull(parGap, "parGap");
+        Objects.requireNonNull(residueBound, "residueBound");
+        if (residueBound.isNegative()) {
+            throw new IllegalArgumentException("the residue bound is a magnitude, got " + residueBound);
+        }
+        if (!structureImpliesPar) {
+            return InvariantResult.pass(InvariantId.ST_13,
+                "the structure does not price at par at its coupon, so the gap of "
+                    + parGap.atPresentationScale() + " is the instrument rather than a defect"
+                    + " and ST-13 makes no claim about it");
+        }
+        String detail = "par gap " + parGap.atPresentationScale() + " against a rounding-residue"
+            + " bound of " + residueBound.atPresentationScale()
+            + " on a structure that prices at par";
+        if (parGap.abs().compareTo(residueBound) <= 0) {
+            return InvariantResult.pass(InvariantId.ST_13, detail);
+        }
+        return InvariantResult.fail(InvariantId.ST_13,
+            detail + " — the billed schedule does not price to par at the rate it bills at,"
+                + " which on this structure can only come from the terms the engine was given:"
+                + " an instalment, a rate or a principal that disagree with each other",
+            parGap.amount().abs().subtract(residueBound.amount()));
+    }
+
+    /**
      * Invariant INV-3: cash received reconciles to principal plus contractual
      * interest, on the flows actually billed.
      *

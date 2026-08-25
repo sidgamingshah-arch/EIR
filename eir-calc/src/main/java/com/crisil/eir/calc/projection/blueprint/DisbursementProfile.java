@@ -23,6 +23,18 @@ public sealed interface DisbursementProfile {
     /** A short label for the computation trace. */
     String label();
 
+    /**
+     * Whether the whole notional is in the borrower's hands on {@code valueDate}.
+     *
+     * <p>The par-pricing precondition ST-13 needs from this dimension, and the reason is
+     * arithmetic rather than economic: the contractual leg rolls forward from the full
+     * notional, so principal still undrawn at inception shows up in the par gap as itself.
+     * Measured on a three-draw facility advancing 400,000 at inception and 600,000 over the
+     * next six months, the gap is exactly 600,000.00 — the undrawn amount, to the paisa.
+     * Nothing is wrong with that facility; par is simply not a claim about it.
+     */
+    boolean advancesInFullAtInception(LocalDate valueDate);
+
     /** One advance on one date. The ordinary case. */
     record Single(LocalDate drawnOn, Money amount) implements DisbursementProfile {
 
@@ -42,6 +54,18 @@ public sealed interface DisbursementProfile {
         @Override
         public String label() {
             return "SINGLE";
+        }
+
+        @Override
+        public boolean advancesInFullAtInception(LocalDate valueDate) {
+            // Deliberately conservative on a late single draw. Measured, such a schedule
+            // still shows a par gap of 0.00, because the ladder anchors on the value date
+            // and the draw date does not currently reach the contractual vector. Returning
+            // true would therefore be correct today and would silently become a false
+            // breach the moment a delayed draw is projected as the period-1 outflow it is.
+            // A skipped check costs coverage on a rare case; a spurious one costs trust in
+            // the control on every case.
+            return drawnOn.equals(valueDate);
         }
     }
 
@@ -111,6 +135,16 @@ public sealed interface DisbursementProfile {
         public String label() {
             return "TRANCHED(" + projected.size() + " projected, " + actual.size() + " drawn)";
         }
+
+        @Override
+        public boolean advancesInFullAtInception(LocalDate valueDate) {
+            for (Tranche tranche : projected) {
+                if (!tranche.drawnOn().equals(valueDate)) {
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     /**
@@ -148,6 +182,14 @@ public sealed interface DisbursementProfile {
         @Override
         public String label() {
             return "UTILISATION_DRIVEN";
+        }
+
+        @Override
+        public boolean advancesInFullAtInception(LocalDate valueDate) {
+            // A revolver draws and repays at the borrower's discretion; there is no
+            // inception advance to be in full. ACPIR 54 already contemplates that no
+            // conventional EIR is struck here.
+            return false;
         }
     }
 }

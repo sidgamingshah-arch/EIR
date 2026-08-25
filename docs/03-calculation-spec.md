@@ -891,6 +891,7 @@ period close.
 | INV-4 | Unamortised fee balance = contractual GCA − EIR GCA | Every period |
 | CU-1 | EIR unchanged across a catch-up restatement | Event |
 | CU-2 | Catch-up = PV(revised, original EIR) − GCA_before | Event |
+| ST-13 | A schedule whose structure implies par pricing prices to par at its own coupon, within the measured instalment-rounding residue | Post-projection |
 | **ST-2** | **Stage 3: net-basis interest + ECL unwind = gross-basis interest**, plus the decomposition's accrual length and interest against the ledger row it decomposes | Every period |
 | S3-1 | Stage 3: GCA roll-forward, shadow unwind, suspense ledger and recognised income all reconcile | Every period |
 | S3-2 | Recognised interest income on a Stage 3 contract = 0 | Every period |
@@ -973,12 +974,18 @@ What survives as a band is a **money** band of one paisa, and it now bounds only
 noise in computing `G` itself — about 1e-6 rupees from the 12dp stored rate. One paisa sits ten
 thousand times above that and five hundred thousand times below reference case 1's 5,000 of fee net
 of gap, and unlike a rate band it means the same thing at every tenor. Inside it the ordering
-genuinely carries no information; outside it, the ordering is resolved rather than excused. The lease fixture is the illustration: a nil fee against a
+genuinely carries no information; outside it, the ordering is resolved rather than excused.
+
+Subtracting `G` costs one thing worth naming: the gap itself stops being visible to this check. A
+schedule the entity believes prices at par and that misses it by thousands now passes INV-2 on
+arithmetic that is entirely correct, where the old formulation caught it by accident — as one of the
+false breaches this correction removes. That control is replaced rather than dropped, by **ST-13**,
+which asks whether the structure implies par pricing before judging the gap. The lease fixture is the illustration: a nil fee against a
 par gap of −0.09 must yield a rate *above* the coupon, and the +6.02e-8 spread that the rate band
 once dismissed as unresolvable is now the answer the check predicts. The decision, its cost and the
 alternatives rejected are in [ADR-0009](adr/0009-par-gap-as-the-ordering-baseline.md).
 
-Structure-specific invariants ST-3 … ST-12 extend this table and are stated in
+Structure-specific invariants ST-3 … ST-13 extend this table and are stated in
 [09 § 7](09-cashflow-structures.md#7-structure-specific-invariants). ST-9 in particular constrains
 this section: a behavioural or option re-estimation on an instrument with a nil unamortised
 premium or discount must produce a catch-up of exactly zero, which is why catch-up processing keys

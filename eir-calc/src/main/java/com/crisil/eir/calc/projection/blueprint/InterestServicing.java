@@ -41,6 +41,28 @@ public sealed interface InterestServicing {
      */
     boolean leavesAsCashEachPeriod();
 
+    /**
+     * Whether interest is charged on the outstanding balance every period and then either
+     * paid or compounded into it — the condition under which the schedule's contractual
+     * flows price back to par at the contractual rate.
+     *
+     * <p>Measured, not assumed. Holding every other dimension fixed and discounting the
+     * projected contractual vector at the coupon gives a par gap of exactly zero for the
+     * three profiles that return true here, and for none of the two that return false:
+     * {@link DeferredSimple} leaves 6,056.87 on a three-year monthly advance of a million
+     * because simple accrual collects less than the compounding the discount assumes, and
+     * {@link DiscountedUpfront} leaves 301,075.05 because a discount instrument is *defined*
+     * away from par at its quoted yield.
+     *
+     * <p>Neither of those is an error, which is the point: this predicate exists so that
+     * ST-13 can tell a structure that is legitimately away from par from a schedule that
+     * should be at par and is not. It is deliberately not {@code compounds() ||
+     * leavesAsCashEachPeriod()} — that expression is accidentally correct today and would
+     * stop being so the moment a profile compounds something other than the period's own
+     * accrual.
+     */
+    boolean pricesAtParAtItsCoupon();
+
     /** Interest leaves as cash every period. */
     record ServicedEachPeriod() implements InterestServicing {
         @Override
@@ -55,6 +77,12 @@ public sealed interface InterestServicing {
 
         @Override
         public boolean leavesAsCashEachPeriod() {
+            return true;
+        }
+
+        @Override
+        public boolean pricesAtParAtItsCoupon() {
+            // interest paid as it accrues, so nothing is left to discount differently
             return true;
         }
     }
@@ -87,6 +115,12 @@ public sealed interface InterestServicing {
         public boolean leavesAsCashEachPeriod() {
             return false; // compounds into the balance instead
         }
+
+        @Override
+        public boolean pricesAtParAtItsCoupon() {
+            // compounding into the balance is exactly what the discount assumes
+            return true;
+        }
     }
 
     /**
@@ -118,6 +152,13 @@ public sealed interface InterestServicing {
         public boolean leavesAsCashEachPeriod() {
             return false; // accrues, then settles as a lump
         }
+
+        @Override
+        public boolean pricesAtParAtItsCoupon() {
+            // simple accrual collects less than the discount compounds, leaving 6,056.87
+            // on a three-year monthly advance of a million
+            return false;
+        }
     }
 
     /**
@@ -141,6 +182,12 @@ public sealed interface InterestServicing {
         @Override
         public boolean leavesAsCashEachPeriod() {
             return false; // collected at inception, not period by period
+        }
+
+        @Override
+        public boolean pricesAtParAtItsCoupon() {
+            // a discount instrument is defined away from par at its quoted yield
+            return false;
         }
     }
 
@@ -172,6 +219,12 @@ public sealed interface InterestServicing {
 
         @Override
         public boolean leavesAsCashEachPeriod() {
+            return true;
+        }
+
+        @Override
+        public boolean pricesAtParAtItsCoupon() {
+            // both phases charge on the balance and settle in the period
             return true;
         }
     }

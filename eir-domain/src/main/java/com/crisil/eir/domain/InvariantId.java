@@ -106,7 +106,18 @@ public enum InvariantId {
     ST_11("blueprint coherence"),
 
     /** A conversion option, or any SPPI failure, yields no EIR at all. */
-    ST_12("SPPI failure yields no EIR");
+    ST_12("SPPI failure yields no EIR"),
+
+    /**
+     * A schedule whose structure implies par pricing does price to par at its own coupon,
+     * within the instalment-rounding residue.
+     *
+     * <p>The control INV-2 stopped providing when its baseline was corrected to subtract
+     * the par gap: the gap is now measured and netted, so a schedule that misses par by
+     * thousands passes INV-2 on the correct arithmetic. Where the structure says par is
+     * expected, that miss is a data error and this is what says so.
+     */
+    ST_13("a par-priced structure prices to par");
 
     private final String statement;
 

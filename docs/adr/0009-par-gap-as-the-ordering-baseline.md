@@ -92,10 +92,13 @@ exactly what the rate band it replaces could not do: 1e-6 p.a. was worth 0.018 I
 - The blueprint pipeline can now safely assert INV-2 on a `DeferredSimple` structure. Before this it
   could not: wiring a two-leg reconciliation to S6 would have produced a *blocking* breach on an
   instrument where every figure was correct.
-- **Follow-on, not decided here.** A large `G` on a schedule the entity believes prices at par is a
-  data error, and INV-2 no longer notices it — it subtracts it and passes. That deserves its own
-  control, in the ST series next to ST-10, scoped separately because it is a statement about the
-  input schedule rather than about the solved rate.
+- **A control is lost and has to be replaced.** A large `G` on a schedule the entity believes prices
+  at par is a data error, and INV-2 no longer notices it — it subtracts it and passes. INV-2 used to
+  catch that by accident, as the false-breach behaviour this ADR removes. The replacement is **ST-13**
+  ([09 § 7](../09-cashflow-structures.md#7-structure-specific-invariants)), which asks first whether
+  the structure implies par pricing and only then judges the gap. It is a statement about the input
+  schedule rather than about the solved rate, which is why it is a separate control and not a fourth
+  limb of this one.
 
 ## Cost
 

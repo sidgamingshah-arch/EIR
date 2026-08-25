@@ -453,7 +453,15 @@ errors.
 
 ## 7. Structure-specific invariants
 
-Extending [03 § 9](03-calculation-spec.md#9-invariants). All asserted, all blocking.
+Extending [03 § 9](03-calculation-spec.md#9-invariants). All asserted, all blocking — but not all
+*fatal*, and the difference is deliberate. **ST-10 and ST-11 throw**: a calendar irregularity taken as
+a period ordinal, or a blueprint whose dimensions contradict each other, is an engine or
+configuration defect, nothing downstream can compensate for it, and the number it would produce is a
+wrong rate rather than a flagged one. **The rest are returned as failed results**: they mark the
+contract for the exception queue with its evidence and let the close proceed, because a batch of ten
+million that aborts on one mis-keyed instalment is a worse control than one that reports it. ST-13 is
+the clearest case — it fails on an input the engine was given, and ADR-0008 makes fixing the input
+the only available response.
 
 | ID | Invariant | Scope |
 |---|---|---|
@@ -467,9 +475,47 @@ Extending [03 § 9](03-calculation-spec.md#9-invariants). All asserted, all bloc
 | ST-10 | Any due date that moves off its raw anchor — by business-day convention, holiday, unequal-period calendar, or a month-end rule on a month-end value date — makes `periodicIndexEligible` false | Calendar |
 | ST-11 | An incoherent blueprint is rejected at construction, naming the conflicting dimensions | Every blueprint |
 | ST-12 | A `CONVERSION` option, or any SPPI failure, yields no EIR — the instrument is excluded from EIR processing entirely | Classification gate |
+| ST-13 | A schedule whose structure implies par pricing prices to par at its own coupon, within the instalment-rounding residue | Post-projection |
 
 ST-9 is the one that will be argued about, and it is the one that keeps the close window
 survivable.
+
+**ST-13 is the newest and the least obvious.** It exists because INV-2 stopped providing it. That
+check used to compare the EIR against the annualised coupon, so it breached on any schedule away from
+par — wrongly, on structures where nothing was wrong. Correcting its baseline to subtract the measured
+par gap ([ADR-0009](adr/0009-par-gap-as-the-ordering-baseline.md)) removed the false breaches and, in
+the same motion, removed the signal: `sign(F − G)` orders correctly whether `G` is 0.09 or 6,192.66,
+so a schedule missing par by thousands now passes INV-2 on arithmetic that is entirely correct. Where
+the structure says par is expected, that miss can only come from the terms the engine was given.
+
+Its scope was set by measurement rather than by reasoning — holding every other dimension fixed on a
+three-year monthly advance of a million and reading the gap off the projected contractual vector:
+
+| Prices to par, to the paisa | Legitimately away from par | `G` |
+|---|---|---:|
+| every principal profile — annuity, equal principal, bullet, balloon, step ladder | interest deferred **simple** | +6,056.87 |
+| every moratorium kind and term effect | **discounted upfront** | +301,075.05 |
+| **every day-count convention** | a **step coupon**, 1% → 1.5% | −37,079.62 |
+| every rate profile carrying one rate for life — floating, collared, ratchet, indexed, spread-reset | an **undrawn tranche** | +600,000.00 |
+| every behavioural overlay | **actual dating**, exact whole months | +261.03 |
+
+Three of those rows contradict what reasoning suggests, which is why they were measured. The **day
+count is irrelevant and the convention is decisive**: ACT/365F and ACT/360 both hold par exactly,
+because a uniform calendar licenses the periodic index and the day count never reaches the
+discounting — yet under actual dating even a schedule spaced in exact whole months misses par by
+261.03, since a monthly rate compounded over year fractions does not reproduce the annuity that sized
+the instalments. **The whole floating family holds par**, collars and ratchets included, because each
+projects at its current rate and the leg discounts at that same rate. And **behaviour cannot move the
+gap at all** — the gap is a property of the contractual leg, and an overlay only reshapes the expected
+one. The undrawn-tranche row is the cleanest: 400,000 advanced against a million of notional gives a
+gap of exactly 600,000.00, the undrawn amount to the paisa.
+
+The rate clause is stated as the *property* — one rate in force for every period — rather than as a
+list of admissible profiles, so a step coupon carrying a single rung is admitted and a profile nobody
+has written yet is judged on what it does. The band is the same measured
+instalment-rounding bound ST-9 uses, and measured for the same reason: it is 0.13 over 24 periods,
+0.22 over 36, 4.95 over 240 and 17.47 over 360, so a gap of one rupee is a defect on a three-year loan
+and noise on a twenty-year one. No constant serves both ends of the book.
 
 ---
 

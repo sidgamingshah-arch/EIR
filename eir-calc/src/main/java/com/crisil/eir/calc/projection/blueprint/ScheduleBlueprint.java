@@ -3,6 +3,8 @@ package com.crisil.eir.calc.projection.blueprint;
 import com.crisil.eir.calc.projection.ResiduePolicy;
 import com.crisil.eir.domain.DayCountConvention;
 import com.crisil.eir.domain.Money;
+import com.crisil.eir.domain.TimeConvention;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Currency;
@@ -260,6 +262,87 @@ public record ScheduleBlueprint(
     /** Whether any embedded option is present. */
     public boolean isOptioned() {
         return !options.isEmpty();
+    }
+
+    /**
+     * Whether this instrument's contractual flows are <em>expected</em> to price back to
+     * par at its own coupon — invariant ST-13's precondition.
+     *
+     * <p>Not a claim that they do. It is the question of whether par is a claim about this
+     * instrument at all, and it has to be asked before the gap is judged, because
+     * {@code InvariantChecks.feeSignOrdering} now subtracts the measured gap and passes
+     * regardless of its size (ADR-0009). A schedule the entity believes prices at par and
+     * that does not is a data error — a wrong instalment from the feed, a rate loaded to
+     * the wrong scale — and after the INV-2 correction nothing else in the pipeline notices
+     * it. Structures that are legitimately away from par are common, so the control has to
+     * separate the two rather than flag every non-zero gap.
+     *
+     * <p><b>Every clause is measured, not reasoned.</b> Holding all other dimensions fixed
+     * on a three-year monthly advance of a million and discounting the projected contractual
+     * vector at the coupon:
+     *
+     * <pre>
+     *   par to the paisa (G = 0.00)     every principal profile — annuity, equal principal,
+     *                                   bullet, balloon, step ladder
+     *                                   every moratorium kind and term effect
+     *                                   every day-count convention
+     *                                   every rate profile with one rate for life,
+     *                                   including floating, collared, ratchet, indexed
+     *                                   and market-spread-reset at their current rate
+     *                                   every behavioural overlay
+     *   away from par                   DEFERRED_SIMPLE        G = +6,056.87
+     *                                   DISCOUNTED_UPFRONT     G = +301,075.05
+     *                                   step coupon 1% → 1.5%  G = -37,079.62
+     *                                   three-draw tranche     G = +600,000.00
+     *                                   actual dating          G = +261.03
+     * </pre>
+     *
+     * <p>Three of those results are worth stating because reasoning gets them wrong. The
+     * <b>day count is irrelevant</b> and the <b>convention is decisive</b>: ACT/365F and
+     * ACT/360 both hold par exactly, because a uniform calendar licenses the periodic index
+     * and the day count never reaches the discounting — but under actual dating even a
+     * schedule spaced in exact whole months misses par by 261.03, since a monthly rate
+     * compounded on year fractions does not reproduce the annuity that sized the
+     * instalments. The <b>whole floating family holds par</b>, collars and ratchets
+     * included, because each projects at its current rate and the leg discounts at that same
+     * rate. And <b>behaviour is irrelevant</b> by construction: the gap is a property of the
+     * contractual leg, and an overlay only reshapes the expected one.
+     *
+     * <p>The rate clause is stated as the <em>property</em> — one rate in force for every
+     * period — rather than as a list of admissible profiles. A step coupon carrying a single
+     * rung does price at par and is admitted; a profile nobody has written yet is judged on
+     * what it does rather than on its name.
+     *
+     * @param convention the convention the vector will actually be discounted under
+     * @param periods    the contractual ladder's length, which a moratorium that extends
+     *     the term makes longer than the stated one
+     */
+    public boolean pricesAtParUnder(TimeConvention convention, int periods) {
+        Objects.requireNonNull(convention, "convention");
+        if (periods < 1) {
+            throw new IllegalArgumentException("a schedule spans at least one period, got " + periods);
+        }
+        if (!(convention instanceof TimeConvention.PeriodicIndex)) {
+            return false;
+        }
+        if (!servicing.pricesAtParAtItsCoupon()) {
+            return false;
+        }
+        if (!disbursement.advancesInFullAtInception(valueDate)) {
+            return false;
+        }
+        return carriesOneRateForLife(periods);
+    }
+
+    /** Whether one rate is in force for every period of the ladder. */
+    private boolean carriesOneRateForLife(int periods) {
+        BigDecimal first = rate.rateForPeriod(1).periodic();
+        for (int period = 2; period <= periods; period++) {
+            if (rate.rateForPeriod(period).periodic().compareTo(first) != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** A one-line summary of the composition, for the computation trace. */

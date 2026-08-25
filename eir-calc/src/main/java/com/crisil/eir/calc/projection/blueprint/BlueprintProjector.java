@@ -1,5 +1,7 @@
 package com.crisil.eir.calc.projection.blueprint;
 
+import com.crisil.eir.calc.Discounting;
+import com.crisil.eir.calc.amort.InvariantChecks;
 import com.crisil.eir.calc.projection.CashflowProjector;
 import com.crisil.eir.calc.projection.ContractTerms;
 import com.crisil.eir.calc.projection.ConventionSelector;
@@ -304,6 +306,7 @@ public final class BlueprintProjector implements CashflowProjector {
         }
         asserted.add(PenalChargeScreen.overFeePostings(fees));
         asserted.add(calendarCheck);
+        asserted.add(parPricing(blueprint, contractual, contractualLadder, choice.convention()));
 
         // One result per invariant, because a named control an auditor asks for by name
         // gets one answer. Gathering the stages' own results the way this method does
@@ -394,6 +397,45 @@ public final class BlueprintProjector implements CashflowProjector {
                     + " constraint and the vector's own flows decided " + convention.label()
                 : described + " can move or unequally space a due date, and the vector is"
                     + " discounted under " + convention.label());
+    }
+
+    /**
+     * Invariant ST-13: a structure that prices at par does price to par at its own coupon.
+     *
+     * <p>The gap comes from a direct {@code P - PV} over the contractual vector rather than
+     * from a rolled leg, because this pipeline builds no {@code TwoLegResult} and rolling one
+     * only to read its terminal balance would cost the same fractional powers to reach the
+     * same number by a longer route. {@code TwoLegResult.parGap} derives it the other way,
+     * from the leg it already holds, and the two agree — asserted on the broken-period
+     * fixture to eight decimal places.
+     *
+     * <p>Costs one residual evaluation per contract: n fractional powers, against a solve's
+     * iterations × n. That is the price of the control, and it is paid on every projection
+     * rather than only where the structure prices at par, because the PV is what decides
+     * whether there is anything to report.
+     *
+     * @see InvariantChecks#parPricing for why this is reported rather than thrown
+     */
+    static InvariantResult parPricing(
+        ScheduleBlueprint blueprint,
+        FlowVector contractual,
+        InstalmentLadder contractualLadder,
+        TimeConvention convention) {
+
+        int periods = contractualLadder.length();
+        Rate coupon = ConventionSelector.rateUnder(
+            convention, blueprint.rate().rateForPeriod(1));
+        // P - PV over the FUTURE flows: Discounting.presentValueMoney returns the billed
+        // inflows as a positive, so no sign flip enters here. Asserted against
+        // TwoLegResult.parGap on the same vectors, which reaches the number from the
+        // contractual leg's terminal balance instead.
+        Money presentValue =
+            Discounting.presentValueMoney(coupon.periodic(), contractual, convention);
+        Money parGap = blueprint.notional().minus(presentValue);
+        return InvariantChecks.parPricing(
+            blueprint.pricesAtParUnder(convention, periods),
+            parGap,
+            BehaviouralAdjuster.roundingResidueBound(coupon, periods, blueprint.currency()));
     }
 
     // ------------------------------------------------------------------ accessors
