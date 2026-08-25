@@ -464,7 +464,7 @@ Extending [03 § 9](03-calculation-spec.md#9-invariants). All asserted, all bloc
 | ST-7 | `ExpectedLifeDetermination` records ≥ 2 policies whenever any option is present, with the divergence quantified | Optionality |
 | ST-8 | Expected life ≤ ECL horizon, always | Every blueprint |
 | ST-9 | A behavioural or option re-estimation on an instrument with a **nil** unamortised premium/discount produces a catch-up of exactly zero (§ 3.4) | Re-estimation |
-| ST-10 | Any business-day adjustment or seasonal calendar makes `periodicIndexEligible` false | Calendar |
+| ST-10 | Any due date that moves off its raw anchor — by business-day convention, holiday, unequal-period calendar, or a month-end rule on a month-end value date — makes `periodicIndexEligible` false | Calendar |
 | ST-11 | An incoherent blueprint is rejected at construction, naming the conflicting dimensions | Every blueprint |
 | ST-12 | A `CONVERSION` option, or any SPPI failure, yields no EIR — the instrument is excluded from EIR processing entirely | Classification gate |
 

@@ -68,12 +68,22 @@ public record ScheduleCalendar(
     }
 
     /**
-     * Whether this calendar can license the cheaper periodic-index convention.
+     * Whether this calendar can license the cheaper periodic-index convention, judged on
+     * the calendar alone.
      *
      * <p>False wherever a due date could move or the periods are not uniform. The
      * check is conservative on purpose: it grants the optimisation only when nothing
      * about the calendar can disturb uniformity, and actual dating is both the
      * default and the fallback.
+     *
+     * <p><b>Not sufficient for ST-10.</b> {@code endOfMonthRule} is deliberately absent from
+     * the vetoes below, because whether it moves anything depends on the value date and not on
+     * this object: {@code LAST_BUSINESS_DAY_OF_MONTH} — which {@link #monthly()}, the retail
+     * default, carries — is dormant on a mid-month loan and moves every due date on a
+     * month-end one. A true answer therefore needs a schedule, and
+     * {@link ScheduleDates#admitsPeriodicIndexing(ScheduleCalendar, java.time.LocalDate,
+     * java.time.LocalDate)} is the form ST-10's gate asks. Use this one only as the
+     * date-independent screen it is.
      */
     public boolean admitsPeriodicIndexing() {
         return businessDayConvention == BusinessDayConvention.NONE

@@ -355,6 +355,15 @@ public final class BlueprintProjector implements CashflowProjector {
      * one, and it is wrong in the direction of the interest the harvest gap actually
      * carries.
      *
+     * <p>Asked of the schedule rather than of the calendar object, via
+     * {@link ScheduleDates#admitsPeriodicIndexing(ScheduleCalendar, java.time.LocalDate,
+     * java.time.LocalDate)}. {@code ScheduleCalendar.admitsPeriodicIndexing()} alone reported
+     * a month-end {@code LAST_BUSINESS_DAY_OF_MONTH} schedule as unadjusted, so ST-10 passed
+     * with "uniform and unadjusted" on dates it had itself moved — a 31 January 2026 loan bills
+     * period 1 on Friday 27 February, not on the Saturday anchor. That could publish no wrong
+     * rate, because the vector re-checks its own flow dates, but an invariant asserted in order
+     * to be believed cannot describe the schedule wrongly and still be worth asserting.
+     *
      * @param convention the convention {@link ConventionSelector} chose, on the
      *     vectors that will actually be discounted
      */
@@ -363,27 +372,28 @@ public final class BlueprintProjector implements CashflowProjector {
 
         Objects.requireNonNull(blueprint, "blueprint");
         Objects.requireNonNull(convention, "convention");
-        boolean admits = blueprint.calendar().admitsPeriodicIndexing();
+        ScheduleCalendar calendar = blueprint.calendar();
+        boolean admits = ScheduleDates.admitsPeriodicIndexing(
+            calendar, blueprint.valueDate(), blueprint.statedMaturity());
         boolean indexed = convention instanceof TimeConvention.PeriodicIndex;
+        String described = "calendar " + calendar.frequency() + " under "
+            + calendar.businessDayConvention() + " with " + calendar.holidays().size()
+            + " holidays and " + calendar.endOfMonthRule() + " from " + blueprint.valueDate();
         if (!admits && indexed) {
             return InvariantResult.fail(
                 InvariantId.ST_10,
-                "calendar " + blueprint.calendar().frequency() + " under "
-                    + blueprint.calendar().businessDayConvention() + " with "
-                    + blueprint.calendar().holidays().size() + " holidays can move or unequally"
-                    + " space a due date, so period ordinals are not a valid measure of time on"
-                    + " this schedule; the vector was nonetheless licensed for "
-                    + convention.label(),
+                described + " can move or unequally space a due date, so period ordinals are not"
+                    + " a valid measure of time on this schedule; the vector was nonetheless"
+                    + " licensed for " + convention.label(),
                 BigDecimal.ONE);
         }
         return InvariantResult.pass(
             InvariantId.ST_10,
             admits
-                ? "calendar " + blueprint.calendar().frequency() + " is uniform and unadjusted, so"
-                    + " ST-10 imposes no constraint and the vector's own flows decided "
-                    + convention.label()
-                : "calendar " + blueprint.calendar().frequency() + " can move or unequally space a"
-                    + " due date, and the vector is discounted under " + convention.label());
+                ? described + " leaves every due date on its raw anchor, so ST-10 imposes no"
+                    + " constraint and the vector's own flows decided " + convention.label()
+                : described + " can move or unequally space a due date, and the vector is"
+                    + " discounted under " + convention.label());
     }
 
     // ------------------------------------------------------------------ accessors

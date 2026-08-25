@@ -16,7 +16,6 @@ import java.util.Currency;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -1310,39 +1309,47 @@ class ScheduleBlueprintTest {
         }
 
         @Test
-        @Disabled("DEFECT: admitsPeriodicIndexing() ignores endOfMonthRule, so the ST-10 gate"
-            + " reports a month-end LAST_BUSINESS_DAY_OF_MONTH calendar as unadjusted. Enable"
-            + " once the rule is a veto clause. Not fixed here — see the comment.")
-        @DisplayName("a month-end last-business-day calendar does not admit periodic indexing")
+        @DisplayName("the month-end rule voids periodic indexing on a month-end loan, and not"
+            + " on a mid-month one")
         void lastBusinessDayRuleMustVoidPeriodicIndexing() {
-            // THE DEFECT. ScheduleCalendar.monthly() — the retail default — carries
+            // ScheduleCalendar.monthly() — the retail default — carries
             // LAST_BUSINESS_DAY_OF_MONTH, and on a month-end value date that rule moves due
-            // dates off weekends: the first assertion below passes today, showing period 1
-            // of a 31 January 2026 loan billed on Friday 27 February rather than on the
-            // Saturday anchor of the 28th. Those periods are not equal.
+            // dates off weekends: period 1 of a 31 January 2026 loan bills on Friday 27
+            // February rather than on the Saturday anchor of the 28th. Those periods are not
+            // equal, and ST-10 has to say so.
             //
-            // admitsPeriodicIndexing() nonetheless returns true, because it inspects
-            // businessDayConvention, holidays, frequency and customDueDates and never
-            // endOfMonthRule. ST-10 is "any business-day adjustment ... makes
-            // periodicIndexEligible false", and stepping back to the last business day of
-            // the month is a business-day adjustment however it is spelled.
+            // The defect this test was disabled for was that it did not. The obvious fix —
+            // endOfMonthRule != LAST_BUSINESS_DAY_OF_MONTH as a fifth veto on
+            // ScheduleCalendar.admitsPeriodicIndexing() — is wrong, and the second half of
+            // this test is why: the SAME calendar object moves nothing on a mid-month loan,
+            // because ScheduleDates applies the rule only where the value date is itself a
+            // month end. A flag-only veto would report every mid-month retail loan in the
+            // book as adjusted, and calendarForcesActualDating throws on !admits && indexed,
+            // so it would reject sound schedules rather than merely mislabel them.
             //
-            // No wrong rate is published today: FlowVector.periodicIndexEligible re-checks
-            // every flow date against the raw monthly anchor, so a moved date fails there
-            // and the vector falls back to actual dating. What is wrong is the gate and the
-            // record. BlueprintProjector.calendarForcesActualDating passes ST-10 with
-            // "calendar MONTHLY is uniform and unadjusted" on a schedule whose dates were
-            // adjusted, and the invariant would not catch a vector that was licensed for
-            // periodic indexing when it should not have been — which is the entire job of
-            // ST-10 being asserted rather than assumed.
-            //
-            // The fix is one clause: endOfMonthRule != LAST_BUSINESS_DAY_OF_MONTH, alongside
-            // the other three vetoes. It is deliberately not applied in a test-writing
-            // change because it flips a convention decision on every month-end retail loan
-            // and belongs in a change that says so.
-            assertThat(ScheduleDates.dueDates(ScheduleCalendar.monthly(), MONTH_END, 1))
+            // So the question is asked of the dates. Same calendar, two value dates, two
+            // answers — which is exactly the shape a calendar-only predicate cannot have,
+            // and the reason the complete test lives on ScheduleDates.
+            ScheduleCalendar retailDefault = ScheduleCalendar.monthly();
+            LocalDate maturity = MONTH_END.plusYears(2);
+
+            assertThat(ScheduleDates.dueDates(retailDefault, MONTH_END, 1))
                 .containsExactly(LocalDate.of(2026, 2, 27));
-            assertThat(ScheduleCalendar.monthly().admitsPeriodicIndexing()).isFalse();
+            assertThat(ScheduleDates.admitsPeriodicIndexing(retailDefault, MONTH_END, maturity))
+                .as("the rule moved period 1 off its anchor, so ordinals do not measure time")
+                .isFalse();
+
+            LocalDate midMonth = LocalDate.of(2026, 1, 15);
+            assertThat(ScheduleDates.dueDates(retailDefault, midMonth, 1))
+                .containsExactly(LocalDate.of(2026, 2, 15));
+            assertThat(ScheduleDates.admitsPeriodicIndexing(
+                retailDefault, midMonth, midMonth.plusYears(2)))
+                .as("dormant on a mid-month anchor: the same calendar, and nothing moved")
+                .isTrue();
+
+            // The date-independent screen still answers its own narrower question the same
+            // way for both, which is the whole reason it cannot be the gate.
+            assertThat(retailDefault.admitsPeriodicIndexing()).isTrue();
         }
 
         @Test
@@ -1359,15 +1366,9 @@ class ScheduleBlueprintTest {
             // Worth noting what the rule was not: a seasonal calendar is a perfectly coherent
             // dimension — crop-cycle loans exist — and rejecting one would be wrong. It read
             // as a guard against a calendar that misreports its own uniformity, and the live
-            // instance of exactly that is the LAST_BUSINESS_DAY_OF_MONTH hole asserted in the
-            // test above, which this rule did not reach either.
-            //
-            // Worth noting what the rule is not: a seasonal calendar is a perfectly coherent
-            // dimension — crop-cycle loans exist — and rejecting one would be wrong. The
-            // condition reads as a guard against a calendar that misreports its own
-            // uniformity, and the live instance of exactly that is the
-            // LAST_BUSINESS_DAY_OF_MONTH hole in the test above, which this rule does not
-            // reach either.
+            // instance of exactly that was the LAST_BUSINESS_DAY_OF_MONTH hole in the test
+            // above — which this rule did not reach either, and which is now closed by asking
+            // the question of the dates rather than of the flags.
             ScheduleCalendar harvest = ScheduleCalendar.seasonal(
                 List.of(LocalDate.of(2026, 10, 15), LocalDate.of(2027, 4, 15)));
             assertThat(harvest.frequency().requiresExplicitDates()).isTrue();

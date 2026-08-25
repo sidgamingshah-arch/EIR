@@ -137,6 +137,53 @@ public final class ScheduleDates {
     }
 
     /**
+     * Whether periodic indexing survives this calendar <em>on this value date</em> — the
+     * complete ST-10 test, and the one the gate should ask.
+     *
+     * <p>{@link ScheduleCalendar#admitsPeriodicIndexing()} cannot answer it, and not because
+     * it forgot a clause. Its four vetoes are all properties of the calendar alone, but
+     * {@code LAST_BUSINESS_DAY_OF_MONTH} is not: {@code endOfMonthResolved} fires it only
+     * where the value date is itself a month end, so the same {@link ScheduleCalendar#monthly()}
+     * instance moves every due date on a 31 January loan and none on a 15 January one. A veto
+     * clause on the rule would therefore be wrong in the common case — it would report the
+     * retail default as adjusted on every mid-month loan in the book, and
+     * {@code BlueprintProjector.calendarForcesActualDating} throws on {@code !admits &&
+     * indexed}, so "wrong" there means a rejected sound schedule rather than a mislabelled one.
+     *
+     * <p>So the question is asked of the dates rather than of the flags: derive the schedule
+     * and compare each due date against its raw anchor. Nothing moved means period ordinals
+     * measure time on this schedule; anything moved means they do not.
+     *
+     * <p>No live rate changes when the gate switches to this. {@code ConventionSelector} picks
+     * {@code PeriodicIndex} only where {@code FlowVector.periodicIndexEligible} already holds,
+     * and that re-checks every flow date against the raw anchor, so a moved date has always
+     * fallen back to actual dating. What changes is the <em>record</em>: ST-10 stops passing a
+     * month-end retail loan with "calendar MONTHLY is uniform and unadjusted" on a schedule
+     * whose dates were adjusted. An invariant that is asserted in order to be believed cannot
+     * be believed while it says that.
+     */
+    public static boolean admitsPeriodicIndexing(
+        ScheduleCalendar calendar, LocalDate valueDate, LocalDate statedMaturity) {
+
+        Objects.requireNonNull(calendar, "calendar");
+        Objects.requireNonNull(valueDate, "valueDate");
+        Objects.requireNonNull(statedMaturity, "statedMaturity");
+        if (!calendar.admitsPeriodicIndexing()) {
+            return false;
+        }
+        // Only reachable for a derivable frequency: the argless check vetoes every
+        // explicit-date calendar, which is also the only kind anchor() refuses to step.
+        int periods = statedPeriods(calendar, valueDate, statedMaturity);
+        List<LocalDate> due = dueDates(calendar, valueDate, periods);
+        for (int period = 1; period <= periods; period++) {
+            if (!due.get(period - 1).equals(anchor(calendar.frequency(), valueDate, period))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * The 1-based period whose due date first falls on or after {@code date}, or
      * {@code -1} where none does.
      *
