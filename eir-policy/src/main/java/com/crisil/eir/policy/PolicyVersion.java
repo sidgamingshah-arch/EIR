@@ -41,31 +41,31 @@ public record PolicyVersion(
     PolicyVersionStatus status) {
 
     public PolicyVersion {
-        Objects.requireNonNull(id, "id");
         Objects.requireNonNull(kind, "kind");
-        Objects.requireNonNull(description, "description");
         Objects.requireNonNull(effectiveFrom, "effectiveFrom");
-        Objects.requireNonNull(maker, "maker");
         Objects.requireNonNull(status, "status");
-        if (id.isBlank()) {
-            throw new IllegalArgumentException("a policy version needs an identifier to be cited by");
-        }
-        if (description.isBlank()) {
-            throw new IllegalArgumentException(
-                "policy version " + id + " has no description; an unexplained version is not an"
-                    + " audit trail");
-        }
-        if (maker.isBlank()) {
-            throw new IllegalArgumentException("policy version " + id + " names no maker");
-        }
-        // Checker may be absent while the version is unapproved, but never equal to the maker.
-        if (checker != null && !checker.isBlank() && maker.equals(checker)) {
+        // Normalised BEFORE the self-approval comparison, and that order is the whole point.
+        // Comparing raw strings lets any whitespace or case variant defeat the guard: a maker
+        // of "policy.author" against a checker of "policy.author " is one person, and a raw
+        // equals() says they are two. RoutingTableVersion — which this type generalises — gets
+        // this right by stripping inside its requireText before comparing; generalising it
+        // dropped the normalisation and voided the guarantee stated above for the one control
+        // ADR-0008 makes load-bearing. Case is folded as well as stripped, because an identity
+        // directory that treats "Policy.Author" and "policy.author" as two people is not one
+        // this control can rely on.
+        id = requireText(id, "id",
+            "a policy version needs an identifier to be cited by");
+        description = requireText(description, "description",
+            "an unexplained version is not an audit trail");
+        maker = requireText(maker, "maker", "a version with no maker has no author");
+        checker = checker == null || checker.isBlank() ? null : checker.strip();
+        if (checker != null && maker.equalsIgnoreCase(checker)) {
             throw new IllegalArgumentException(
                 "policy version " + id + " has maker and checker both '" + maker + "'."
                     + " Self-approval is not a defective approval, it is the absence of one");
         }
         if (status.isApproved()) {
-            if (checker == null || checker.isBlank()) {
+            if (checker == null) {
                 throw new IllegalArgumentException(
                     "policy version " + id + " is " + status + " with no checker named");
             }
@@ -76,7 +76,26 @@ public record PolicyVersion(
         }
     }
 
-    /** Whether this version governs {@code date}. */
+    /**
+     * Whether this version governs {@code date} — <em>necessary, not sufficient</em>.
+     *
+     * <p>Open-ended on purpose, and the consequence has to be understood before this is used to
+     * select a version. There is no {@code effectiveTo}, and {@link PolicyVersionStatus#SUPERSEDED}
+     * is operative so that a closed period stays replayable (invariant DT-1). So a superseded
+     * version answers {@code true} for every date from its own {@code effectiveFrom} onward,
+     * forever, and two versions of one kind will happily both answer {@code true} for the same
+     * date. This predicate therefore says "this version had taken effect by then", not "this is
+     * the version in force".
+     *
+     * <p><b>Resolution is latest-wins</b>, and it belongs to the registry rather than here: among
+     * the versions of a kind whose status is operative and whose {@code effectiveFrom} is not
+     * after the date, the one in force is the one with the <em>greatest</em>
+     * {@code effectiveFrom}. That is the standard temporal-table rule and it needs no end-date
+     * column — which is why none was added. It follows that the only genuinely ambiguous
+     * configuration is two versions of the same kind sharing an <em>identical</em>
+     * {@code effectiveFrom}, and that is what a registry must reject at construction:
+     * "whichever we found first" is not an accounting answer.
+     */
     public boolean isEffectiveOn(LocalDate date) {
         Objects.requireNonNull(date, "date");
         return status.isOperative() && !date.isBefore(effectiveFrom);
@@ -100,12 +119,31 @@ public record PolicyVersion(
             id, kind, description, effectiveFrom, maker, checker, approvedOn, newStatus);
     }
 
-    /** A one-line audit sentence naming this version and its approval. */
+    /**
+     * A one-line audit sentence naming this version and its approval.
+     *
+     * <p>The approval clause is gated on {@link PolicyVersionStatus#isApproved()} and not merely
+     * on a checker being named, because the constructor deliberately permits an unapproved
+     * version to carry a proposed checker — only self-approval is refused. Reading the clause off
+     * the field alone rendered a {@code DRAFT} as "DRAFT, made by X, approved by Y on D": a
+     * sentence that contradicts itself in its own second clause, where the half a reader trusts
+     * is the false half.
+     */
     public String describe() {
         return kind + " version " + id + " effective " + effectiveFrom + ", " + status
             + ", made by " + maker
-            + (checker == null || checker.isBlank() ? ", unapproved" : ", approved by " + checker
-                + (approvedOn == null ? "" : " on " + approvedOn))
+            + (status.isApproved()
+                ? ", approved by " + checker + (approvedOn == null ? "" : " on " + approvedOn)
+                : checker == null ? ", unapproved" : ", unapproved (proposed checker " + checker + ")")
             + (isRetrospective() ? " (RETROSPECTIVE)" : "");
+    }
+
+    private static String requireText(String value, String field, String why) {
+        Objects.requireNonNull(value, field);
+        String stripped = value.strip();
+        if (stripped.isEmpty()) {
+            throw new IllegalArgumentException(field + " must not be blank: " + why);
+        }
+        return stripped;
     }
 }

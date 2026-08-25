@@ -74,6 +74,50 @@ class PolicyVersionTest {
         }
 
         @Test
+        @DisplayName("whitespace and case cannot defeat the self-approval guard")
+        void identitiesAreNormalisedBeforeComparison() {
+            // A code review on the first cut of this class caught the guard comparing RAW
+            // strings, so "policy.author" against "policy.author " constructed successfully and
+            // describe() then emitted a two-person approval record for a version one person made
+            // and signed. RoutingTableVersion — the type this one generalises — already got it
+            // right by stripping inside its requireText before comparing; generalising it
+            // dropped the normalisation.
+            //
+            // Pinned in all three variants, because a guard that holds for the trailing space
+            // and not the leading one is not a guard.
+            for (String variant : new String[] {
+                "policy.author ", " policy.author", "Policy.Author", "  POLICY.AUTHOR  "}) {
+                assertThatIllegalArgumentException()
+                    .as("checker '%s' against maker 'policy.author'", variant)
+                    .isThrownBy(() -> new PolicyVersion(
+                        "FEE-2027.1", PolicyKind.FEE_RULE_SET, "d", APRIL,
+                        "policy.author", variant, MARCH, PolicyVersionStatus.EFFECTIVE))
+                    .withMessageContaining("Self-approval");
+            }
+
+            // And the identities really are stored normalised, not merely compared that way —
+            // otherwise the audit sentence carries the untrimmed form.
+            PolicyVersion padded = new PolicyVersion(
+                "  FEE-2027.9  ", PolicyKind.FEE_RULE_SET, "  spaced  ", APRIL,
+                "  policy.author  ", "  accounting.owner  ", MARCH,
+                PolicyVersionStatus.EFFECTIVE);
+            assertThat(padded.id()).isEqualTo("FEE-2027.9");
+            assertThat(padded.maker()).isEqualTo("policy.author");
+            assertThat(padded.checker()).isEqualTo("accounting.owner");
+        }
+
+        @Test
+        @DisplayName("a blank checker is stored as absent, not as blank")
+        void blankCheckerBecomesNull() {
+            // So that downstream gates can test for absence one way rather than each inventing
+            // its own null-or-blank check — which is how one of them ends up disagreeing.
+            PolicyVersion draft = new PolicyVersion(
+                "FEE-2027.3", PolicyKind.FEE_RULE_SET, "d", APRIL, "maker", "   ", null,
+                PolicyVersionStatus.DRAFT);
+            assertThat(draft.checker()).isNull();
+        }
+
+        @Test
         @DisplayName("an unexplained version is refused")
         void descriptionIsMandatory() {
             assertThatIllegalArgumentException()
@@ -105,6 +149,52 @@ class PolicyVersionTest {
             assertThat(approved().isEffectiveOn(APRIL.minusDays(1)))
                 .as("the day before it takes effect")
                 .isFalse();
+        }
+
+        @Test
+        @DisplayName("describe() does not claim approval on an unapproved version")
+        void describeDoesNotOverclaim() {
+            // The second review finding. The approval clause used to be read off the checker
+            // field alone, and the constructor deliberately permits an unapproved version to
+            // carry a PROPOSED checker — so a DRAFT rendered as "DRAFT, made by X, approved by
+            // Y on D". A sentence that contradicts itself in its own second clause is worse
+            // than a terse one, because the half a reader trusts is the false half.
+            PolicyVersion draftWithProposedChecker = new PolicyVersion(
+                "FEE-2027.4", PolicyKind.FEE_RULE_SET, "awaiting review", APRIL,
+                "policy.author", "accounting.policy.owner", MARCH, PolicyVersionStatus.DRAFT);
+
+            assertThat(draftWithProposedChecker.describe())
+                .as("names the proposed checker without asserting an approval that has not happened")
+                .contains("unapproved (proposed checker accounting.policy.owner)")
+                .doesNotContain("approved by accounting.policy.owner on");
+
+            assertThat(approved().describe())
+                .as("and a genuinely approved version still says so")
+                .contains("approved by accounting.policy.owner on 2027-03-15");
+        }
+
+        @Test
+        @DisplayName("two operative versions can both have taken effect; resolution is the registry's job")
+        void isEffectiveOnIsNecessaryNotSufficient() {
+            // The gap that makes "reject overlapping ranges" unimplementable as stated: there is
+            // no effectiveTo, and SUPERSEDED is operative so closed periods stay replayable
+            // (DT-1). So BOTH of these answer true for a June date, and this predicate cannot
+            // be the thing that picks between them.
+            PolicyVersion superseded = new PolicyVersion(
+                "FEE-2027.0", PolicyKind.FEE_RULE_SET, "the old one",
+                LocalDate.of(2027, 1, 1), "maker", "checker", MARCH,
+                PolicyVersionStatus.SUPERSEDED);
+            LocalDate june = LocalDate.of(2027, 6, 30);
+
+            assertThat(superseded.isEffectiveOn(june)).isTrue();
+            assertThat(approved().isEffectiveOn(june)).isTrue();
+
+            // The registry resolves it by latest-wins, and that rule is stated on isEffectiveOn's
+            // javadoc so two registries cannot invent two answers. Asserted here on the ordering
+            // the rule turns on, since the registry itself lives in another package.
+            assertThat(approved().effectiveFrom())
+                .as("latest effectiveFrom not after the date is the one in force")
+                .isAfter(superseded.effectiveFrom());
         }
 
         @Test
