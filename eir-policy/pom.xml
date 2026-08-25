@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.crisil.eir</groupId>
+    <artifactId>eir-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>eir-policy</artifactId>
+  <name>EIR :: policy</name>
+  <description>
+    Policy and rule-set resolution: which version is in force, who approved it, and what it
+    resolves a fee code, a rate driver or a contract tier to. Framework-free, like the two
+    modules below it — the root enforcer bans Spring, JPA, Hibernate and Jackson across every
+    module, so configuration is read with plain Java rather than a binding library.
+
+    Depends on eir-calc rather than absorbing its routing package: eir-calc owns the routing
+    DECISION (RoutingTable, EventRouter, RoutingDecision), this module owns which table version
+    is in force on a date and who signed it off. Dependencies point inward, per 05 § 2.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-domain</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-calc</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>net.jqwik</groupId>
+      <artifactId>jqwik</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+    </dependency>
+  </dependencies>
+</project>

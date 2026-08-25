@@ -13,11 +13,14 @@
   <description>
     Effective interest rate accounting engine anchored on RBI ACPIR 2026.
     Phase 1: policy-agnostic computation core (eir-domain, eir-calc).
+    Phase 2: policy resolution and schema (eir-policy, eir-persistence).
   </description>
 
   <modules>
     <module>eir-domain</module>
     <module>eir-calc</module>
+    <module>eir-policy</module>
+    <module>eir-persistence</module>
   </modules>
 
   <properties>

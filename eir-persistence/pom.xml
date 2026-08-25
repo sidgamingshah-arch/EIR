@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.crisil.eir</groupId>
+    <artifactId>eir-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>eir-persistence</artifactId>
+  <name>EIR :: persistence</name>
+  <description>
+    The schema of 04, as executable PostgreSQL 16 DDL under src/main/resources/db/migration,
+    plus a framework-free constants layer naming the tables and columns the engine reads.
+
+    Deliberately carries NO compile dependency — not JPA, not Flyway, not a driver. The root
+    enforcer bans jakarta.persistence, Hibernate, Spring and Jackson across every module, so
+    wiring an ORM here would require restructuring that ban: a shared root-pom edit, and one
+    that deserves its own change rather than riding along with the schema. The migrations are
+    numbered in Flyway's convention so that wiring is a later addition and not a rewrite.
+
+    The DDL is verified by execution against a real PostgreSQL 16 cluster, not by review —
+    see the module README.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+    </dependency>
+  </dependencies>
+</project>
