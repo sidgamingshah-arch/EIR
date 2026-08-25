@@ -703,7 +703,7 @@ CREATE INDEX cashflow_line_schedule_sequence_ix
 -- here so the grant script is written knowing it is load-bearing.
 -- =====================================================================================
 CREATE TABLE fee_rule_set (
-    rule_set_version_id             UUID            NOT NULL,
+    rule_set_version_id             TEXT              NOT NULL,
 
     fee_code                        TEXT            NOT NULL,
     -- NULL = applies to every product. Most-specific-wins.
@@ -802,7 +802,7 @@ CREATE TABLE fee_posting (
     classification                  TEXT            NOT NULL,
 
     -- The rule set version that produced the classification above. Enables replay.
-    rule_set_version_id             UUID            NOT NULL,
+    rule_set_version_id             TEXT              NOT NULL,
 
     -- Required on commitment fees (FR-204), compared against the owning product's
     -- drawdown_probability_threshold. A ratio on the rate scale, so the comparison is
@@ -928,8 +928,8 @@ CREATE TABLE eir_computation (
 
     -- The reading in force. Without these, replay is impossible. POLICY_VERSION is
     -- defined outside this migration, hence no foreign key on policy_version_id yet.
-    policy_version_id               UUID            NOT NULL,
-    rule_set_version_id             UUID            NOT NULL,
+    policy_version_id               TEXT              NOT NULL,
+    rule_set_version_id             TEXT              NOT NULL,
 
     -- Forward pointer to the solve that replaced this one. Never an update.
     superseded_by                   UUID,

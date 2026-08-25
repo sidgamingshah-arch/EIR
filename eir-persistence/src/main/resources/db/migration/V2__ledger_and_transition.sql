@@ -311,7 +311,7 @@ COMMENT ON TABLE accounting_period IS
 -- it replays has found a defect, and without the digests the only way to notice is a
 -- row-by-row comparison nobody performs.
 CREATE TABLE amortisation_run (
-    run_id                          BIGINT           GENERATED ALWAYS AS IDENTITY,
+    run_id                          UUID             ,
     period_id                       INTEGER          NOT NULL,
     book_id                         TEXT             NOT NULL,
     status                          TEXT             NOT NULL,
@@ -324,7 +324,7 @@ CREATE TABLE amortisation_run (
     -- specification and the results are read as a block, never joined against.
     invariant_results               JSONB,
     is_replay                       BOOLEAN          NOT NULL DEFAULT FALSE,
-    replay_of_run_id                BIGINT,
+    replay_of_run_id                UUID  ,
     -- The reading in force. Without these a replay cannot resolve the same policy and
     -- FR-903 is unverifiable.
     policy_version_id               TEXT,
@@ -396,8 +396,8 @@ CREATE INDEX ix_amortisation_run_period_status
 -- would make the engine appear to have decided, which is exactly the misrepresentation
 -- FR-511 exists to prevent.
 CREATE TABLE lifecycle_event (
-    event_id                        BIGINT           GENERATED ALWAYS AS IDENTITY,
-    contract_id                     BIGINT           NOT NULL,
+    event_id                        UUID             ,
+    contract_id                     UUID             NOT NULL,
     event_date                      DATE             NOT NULL,
     -- 04 does not enumerate event_type, and this file does not invent a vocabulary for
     -- it. Routing keys off driver and rate type (FR-507), both of which ARE enumerated;
@@ -537,13 +537,13 @@ CREATE INDEX ix_lifecycle_event_mechanism
 -- CONTRACT to find the product defeats the pruning the partitioning bought. The
 -- denormalisation is the price of that index, and it is stated rather than accidental.
 CREATE TABLE period_balance (
-    balance_id                      BIGINT           GENERATED ALWAYS AS IDENTITY,
-    contract_id                     BIGINT           NOT NULL,
+    balance_id                      UUID             ,
+    contract_id                     UUID             NOT NULL,
     period_id                       INTEGER          NOT NULL,
     book_id                         TEXT             NOT NULL,
-    run_id                          BIGINT           NOT NULL,
+    run_id                          UUID             NOT NULL,
     -- Denormalised from CONTRACT for the (period_id, product_id) rollup index.
-    product_id                      BIGINT,
+    product_id                      UUID  ,
     -- The EIR leg.
     opening_gca                     NUMERIC(24,6)    NOT NULL,
     closing_gca                     NUMERIC(24,6)    NOT NULL,
@@ -587,7 +587,7 @@ CREATE TABLE period_balance (
     -- because a trace query answers "which rate produced this interest" without
     -- reconstructing the event stream, and because EIR_COMPUTATION is never archived
     -- (04 § 4) so the reference stays resolvable for the life of the ledger.
-    eir_computation_id              BIGINT,
+    eir_computation_id              UUID  ,
     rate_periodic_used              NUMERIC(20,12),
     CONSTRAINT pk_period_balance
         PRIMARY KEY (balance_id, period_id),
@@ -694,11 +694,11 @@ CREATE INDEX ix_period_balance_stage3
 -- opposite directions, and make "total debits posted this run" a filtered aggregate
 -- instead of a sum.
 CREATE TABLE journal_entry (
-    entry_id                        BIGINT           GENERATED ALWAYS AS IDENTITY,
+    entry_id                        UUID             ,
     period_id                       INTEGER          NOT NULL,
-    run_id                          BIGINT           NOT NULL,
-    contract_id                     BIGINT           NOT NULL,
-    balance_id                      BIGINT,
+    run_id                          UUID             NOT NULL,
+    contract_id                     UUID             NOT NULL,
+    balance_id                      UUID  ,
     book_id                         TEXT             NOT NULL,
     posted_on                       DATE             NOT NULL,
     account_code                    TEXT             NOT NULL,
@@ -707,7 +707,7 @@ CREATE TABLE journal_entry (
     currency                        CHAR(3)          NOT NULL,
     narrative                       TEXT,
     journal_batch_ref               TEXT,
-    reversal_of_entry_id            BIGINT,
+    reversal_of_entry_id            UUID  ,
     CONSTRAINT pk_journal_entry
         PRIMARY KEY (entry_id, period_id),
     CONSTRAINT fk_journal_entry_period
@@ -758,8 +758,8 @@ CREATE INDEX ix_journal_entry_account
 -- engine learned it (system time, 04 § 5) and is supplied, not defaulted, for the same
 -- reason.
 CREATE TABLE stage_assignment (
-    stage_assignment_id             BIGINT           GENERATED ALWAYS AS IDENTITY,
-    contract_id                     BIGINT           NOT NULL,
+    stage_assignment_id             UUID             ,
+    contract_id                     UUID             NOT NULL,
     period_id                       INTEGER          NOT NULL,
     stage                           SMALLINT         NOT NULL,
     allowance                       NUMERIC(24,6)    NOT NULL,
@@ -786,8 +786,8 @@ CREATE TABLE stage_assignment (
 -- a ledger object with an opening balance, movements and a closing balance, and the
 -- continuity identity below is enforced rather than asserted afterwards.
 CREATE TABLE suspense_entry (
-    suspense_entry_id               BIGINT           GENERATED ALWAYS AS IDENTITY,
-    contract_id                     BIGINT           NOT NULL,
+    suspense_entry_id               UUID             ,
+    contract_id                     UUID             NOT NULL,
     period_id                       INTEGER          NOT NULL,
     book_id                         TEXT             NOT NULL,
     opening_balance                 NUMERIC(24,6)    NOT NULL,
@@ -831,7 +831,7 @@ CREATE INDEX ix_suspense_entry_contract_period
 -- variance above the threshold with forced_to_contract_level still false is a row this
 -- table will not hold.
 CREATE TABLE pool (
-    pool_id                         BIGINT           GENERATED ALWAYS AS IDENTITY,
+    pool_id                         UUID             ,
     definition_version_id           TEXT             NOT NULL,
     struck_on                       DATE             NOT NULL,
     -- Product × origination month × rate band × tenor band (04 § 2.10). The criteria are
@@ -839,7 +839,7 @@ CREATE TABLE pool (
     -- the approved definition, because the approved artefact is what an auditor reads and
     -- the bands are what the matcher runs.
     homogeneity_criteria            JSONB            NOT NULL,
-    product_id                      BIGINT,
+    product_id                      UUID  ,
     origination_month               INTEGER,
     rate_band_lower                 NUMERIC(20,12),
     rate_band_upper                 NUMERIC(20,12),
@@ -901,16 +901,16 @@ COMMENT ON TABLE pool IS
 -- when the code runs; a constraint runs when the row is written, including by the
 -- data-fix script nobody reviewed.
 CREATE TABLE hedge_relationship (
-    relationship_id                 BIGINT           GENERATED ALWAYS AS IDENTITY,
-    hedged_contract_id              BIGINT,
-    hedged_portfolio_id             BIGINT,
+    relationship_id                 UUID             ,
+    hedged_contract_id              UUID  ,
+    hedged_portfolio_id             UUID  ,
     hedging_instrument_ref          TEXT             NOT NULL,
     designated_risk                 TEXT             NOT NULL,
     level                           TEXT             NOT NULL,
     status                          TEXT             NOT NULL,
     designated_on                   DATE             NOT NULL,
     discontinued_on                 DATE,
-    amortisation_schedule_id        BIGINT,
+    amortisation_schedule_id        UUID  ,
     CONSTRAINT pk_hedge_relationship
         PRIMARY KEY (relationship_id),
     -- Exactly one hedged item: an instrument or a portfolio, never both and never
@@ -949,15 +949,15 @@ COMMENT ON CONSTRAINT ck_hedge_relationship_hb1_discontinued_has_schedule
 -- over the remaining life, and the continuity constraint is what makes a frozen
 -- adjustment visible in the data rather than only in a report nobody runs.
 CREATE TABLE basis_adjustment (
-    basis_adjustment_id             BIGINT           GENERATED ALWAYS AS IDENTITY,
-    relationship_id                 BIGINT           NOT NULL,
+    basis_adjustment_id             UUID             ,
+    relationship_id                 UUID             NOT NULL,
     period_id                       INTEGER          NOT NULL,
     opening_balance                 NUMERIC(24,6)    NOT NULL,
     fair_value_change_recognised    NUMERIC(24,6)    NOT NULL DEFAULT 0,
     amortised_in_period             NUMERIC(24,6)    NOT NULL DEFAULT 0,
     closing_balance                 NUMERIC(24,6)    NOT NULL,
     amortisation_method             TEXT,
-    amortisation_schedule_id        BIGINT,
+    amortisation_schedule_id        UUID  ,
     CONSTRAINT pk_basis_adjustment
         PRIMARY KEY (basis_adjustment_id),
     CONSTRAINT uq_basis_adjustment_relationship_period
@@ -999,12 +999,12 @@ CREATE TABLE basis_adjustment (
 -- a column holding TRUE on every row a place for a defect to hide rather than a fact.
 -- ExceptionCategory.blocksClose() returns a constant for the same reason.
 CREATE TABLE exception (
-    exception_id                    BIGINT           GENERATED ALWAYS AS IDENTITY,
-    raised_by_run_id                BIGINT           NOT NULL,
+    exception_id                    UUID             ,
+    raised_by_run_id                UUID             NOT NULL,
     -- A contract-level exception names a contract; a pool back-test breach names a pool.
     -- At least one, because an exception nothing can be traced to cannot be resolved.
-    contract_id                     BIGINT,
-    pool_id                         BIGINT,
+    contract_id                     UUID  ,
+    pool_id                         UUID  ,
     category                        TEXT             NOT NULL,
     detail                          TEXT             NOT NULL,
     payload_ref                     TEXT,
@@ -1393,8 +1393,8 @@ $seed_partitions$;
 -- that phase's exit gate expressed in the schema: a row cannot claim the presumption
 -- without naming the evidence reference that supports it.
 CREATE TABLE transition_fair_value (
-    transition_fair_value_id        BIGINT           GENERATED ALWAYS AS IDENTITY,
-    contract_id                     BIGINT           NOT NULL,
+    transition_fair_value_id        UUID             ,
+    contract_id                     UUID             NOT NULL,
     -- 1 April 2027 for the ACPIR transition. Not constrained to that literal date: a
     -- below-market origination measured at fair value on day 1 uses the same structure on
     -- its own date (FR-909), and hard-coding the transition date would force a second
@@ -1451,10 +1451,10 @@ CREATE INDEX ix_transition_fair_value_contract
 -- so that the prioritisation question is answerable by a WHERE clause and cannot be
 -- answered two different ways by two reports.
 CREATE TABLE legacy_cohort (
-    cohort_id                       BIGINT           GENERATED ALWAYS AS IDENTITY,
+    cohort_id                       UUID             ,
     cohort_name                     TEXT             NOT NULL,
     definition                      JSONB            NOT NULL,
-    product_id                      BIGINT,
+    product_id                      UUID  ,
     defined_on                      DATE             NOT NULL,
     expected_runoff_date            DATE             NOT NULL,
     -- ACPIR 21 and 50 share a deadline of 31 March 2030. A literal date is immutable and
@@ -1491,9 +1491,9 @@ CREATE INDEX ix_legacy_cohort_priority
 -- instead. An approval is required because a deemed rate recognises income on an
 -- assumption.
 CREATE TABLE deemed_eir_derivation (
-    derivation_id                   BIGINT           GENERATED ALWAYS AS IDENTITY,
-    cohort_id                       BIGINT,
-    contract_id                     BIGINT,
+    derivation_id                   UUID             ,
+    cohort_id                       UUID  ,
+    contract_id                     UUID  ,
     deemed_rate_periodic            NUMERIC(20,12)   NOT NULL,
     deemed_rate_effective_annual    NUMERIC(20,12),
     deemed_rate_nominal_annual      NUMERIC(20,12),
@@ -1543,13 +1543,13 @@ CREATE TABLE deemed_eir_derivation (
 -- contractual rate, and that gap is invisible to anything reading a single migration
 -- flag.
 CREATE TABLE ecl_discount_basis (
-    ecl_discount_basis_id           BIGINT           GENERATED ALWAYS AS IDENTITY,
-    contract_id                     BIGINT           NOT NULL,
+    ecl_discount_basis_id           UUID             ,
+    contract_id                     UUID             NOT NULL,
     period_id                       INTEGER          NOT NULL,
     basis                           TEXT             NOT NULL,
     -- Which solve supplied the rate. Required when the basis is EIR, because "migrated to
     -- the EIR" with no EIR to point at is a claim rather than a fact.
-    eir_computation_id              BIGINT,
+    eir_computation_id              UUID  ,
     rate_used                       NUMERIC(20,12),
     migrated_on                     DATE,
     migration_evidence_ref          TEXT,
