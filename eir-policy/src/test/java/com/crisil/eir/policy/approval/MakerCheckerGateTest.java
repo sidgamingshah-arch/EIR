@@ -2,6 +2,7 @@ package com.crisil.eir.policy.approval;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
@@ -264,18 +265,30 @@ class MakerCheckerGateTest {
         @Test
         @DisplayName("a whitespace or case variant of the maker is still the maker")
         void identityVariantsAreStillSelfApproval() {
-            // The defect this catches, and it is not hypothetical. PolicyVersion's constructor
-            // compares maker.equals(checker) on RAW strings and does not strip its maker, so the
-            // pair below satisfies it — asserted here so the hole is on the record:
-            assertThatCode(() -> new PolicyVersion(
+            // This test originally recorded a hole rather than a guarantee: PolicyVersion's
+            // constructor compared maker.equals(checker) on RAW strings, so the pair below
+            // constructed successfully and only the gate refused it. Three units reported that
+            // independently during the parallel build and the record was fixed at the spine —
+            // identities are now stripped and case-folded BEFORE the comparison, matching
+            // RoutingTableVersion, which had always done it that way.
+            //
+            // So the assertion inverts, and the defence is now in two independent layers. That
+            // is worth keeping as two assertions rather than collapsing to one: the record
+            // refusing it means no code path anywhere can construct a self-approved version,
+            // including a persistence rehydrate that never goes near the gate; the gate refusing
+            // it means a caller gets a value-shaped refusal it can report rather than an
+            // exception it has to catch.
+            assertThatThrownBy(() -> new PolicyVersion(
                 "FEE-2027.1", PolicyKind.FEE_RULE_SET, "d", EFFECTIVE_FROM,
                 MAKER, " Policy.Author ", SIGNED_ON, PolicyVersionStatus.APPROVED))
-                .as("the record type accepts a case variant of its own maker as checker")
-                .doesNotThrowAnyException();
+                .as("the record type refuses a case variant of its own maker as checker")
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Self-approval");
 
-            // The gate does not. In a bank the realistic route to a self-approval is exactly this
-            // — the same directory identity arriving through a channel that trims or cases it
-            // differently — and not somebody typing their own name into the checker box.
+            // And the gate refuses it too, as a value. In a bank the realistic route to a
+            // self-approval is exactly this — the same directory identity arriving through a
+            // channel that trims or cases it differently — and not somebody typing their own
+            // name into the checker box.
             TransitionResult result = MakerCheckerGate.approve(
                 versionIn(PolicyVersionStatus.PENDING_APPROVAL),
                 new ApprovalRecord(" Policy.Author ", SIGNED_ON, ""));
