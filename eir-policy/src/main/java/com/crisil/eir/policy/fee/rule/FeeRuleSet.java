@@ -1,5 +1,7 @@
 package com.crisil.eir.policy.fee.rule;
 
+import com.crisil.eir.domain.InvariantId;
+import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.policy.PolicyKind;
 import com.crisil.eir.policy.PolicyVersion;
 import java.time.LocalDate;
@@ -174,6 +176,33 @@ public final class FeeRuleSet {
      * <p>Sorted, not insertion-ordered: this one is read by a person comparing two runs, and a
      * diff of two alphabetical lists is legible where a diff of two insertion orders is not.
      */
+    /**
+     * Per-code completeness as the assertion it supports — invariant
+     * {@link com.crisil.eir.domain.InvariantId#RS_1}.
+     *
+     * <p>Reported rather than refused at construction, and that stays true: a partially-loaded
+     * taxonomy is a real state during the months-long sourcing exercise 08 § 0 calls the
+     * programme's critical path, and refusing it would make the gap invisible rather than absent.
+     * What changes is that the gap is now <em>asserted</em>, so the FR-210 approval gate can make
+     * it mandatory at the point where "mandatory" means something.
+     *
+     * <p>Deviation is the count of codes lacking a per-code default, which is directly the number
+     * of fee codes that will raise {@code UNMAPPED_FEE_CODE} on any product or entity nobody has
+     * written a carve-out for. That is the quantified form of "how much of this taxonomy still
+     * raises exceptions" — the figure an impact preview exists to carry.
+     */
+    public InvariantResult catchAllCoverage(LocalDate asOf) {
+        List<String> gaps = feeCodesWithoutCatchAll(asOf);
+        String detail = version.id() + " as at " + asOf + ": "
+            + (gaps.isEmpty()
+                ? "every fee code has a per-code default in force"
+                : gaps.size() + " fee code(s) with no per-code default: " + gaps);
+        return gaps.isEmpty()
+            ? InvariantResult.pass(InvariantId.RS_1, detail)
+            : InvariantResult.fail(
+                InvariantId.RS_1, detail, java.math.BigDecimal.valueOf(gaps.size()));
+    }
+
     public List<String> feeCodesWithoutCatchAll(LocalDate asOf) {
         Objects.requireNonNull(asOf, "asOf");
         List<String> incomplete = new ArrayList<>();

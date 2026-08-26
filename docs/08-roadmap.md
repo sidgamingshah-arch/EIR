@@ -142,12 +142,10 @@ the phase is not:
   Jackson across every module, so wiring an ORM needs that ban restructured — a shared root-pom
   change that deserves its own attention. Migrations use Flyway's naming so that wiring is an
   addition rather than a rewrite.
-- **Four invariants are specified but not published.** `PG_1` (no version effective without a current
-  preview), `RT_1` (every routed event resolves to a table in force), `PV_1` (a policy version
-  resolves for every date in a closed period) and `RS_1` (every fee code has a per-code default) were
-  each identified by the unit that needed them. They are absent from `InvariantId`, so those four
-  checks currently return plain data or borrow another id. Until they exist, four controls are
-  computed and not asserted.
+- **`eir-application`, `eir-batch`, `eir-gl`, `eir-api` and `eir-app` do not exist.** 05 § 2 names
+  nine modules and four now exist. Phase 2 never promised the rest, but "policy, routing and
+  persistence delivered" should not be read as an engine anything can call: there is no
+  orchestration layer, no run, no journal and no API.
 
 > **Start the fee and cost taxonomy in Phase 0, not Phase 2.** It appears here because that is where
 > it completes, but it is the longest-lead item in the programme and it depends on other teams. If

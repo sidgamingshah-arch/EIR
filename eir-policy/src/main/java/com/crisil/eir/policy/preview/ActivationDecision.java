@@ -1,5 +1,7 @@
 package com.crisil.eir.policy.preview;
 
+import com.crisil.eir.domain.InvariantId;
+import com.crisil.eir.domain.InvariantResult;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -86,6 +88,26 @@ public record ActivationDecision(
     }
 
     /** One audit sentence. */
+    /**
+     * This decision as the assertion it supports — invariant {@link com.crisil.eir.domain.InvariantId#PG_1}.
+     *
+     * <p>FR-210 calls the impact preview mandatory, and until this existed the gate returned a
+     * value nobody asserted. A mandatory artefact whose presence no control states is one
+     * somebody eventually skips: the roadmap's register puts 3.73x leverage on year-one fee
+     * recognition behind a behavioural-curve revision, so a version going effective unpreviewed
+     * is how that lands with nobody having seen the number.
+     *
+     * <p>Deviation is {@link java.math.BigDecimal#ONE} — a refused activation is a fact, not a
+     * magnitude, so a caller summing deviations gets a count of versions blocked from going
+     * effective. The reason lives in the detail, where it can name which of the seven refusals
+     * fired; a numeric encoding of the reason would invite arithmetic on an enum.
+     */
+    public InvariantResult asInvariantResult() {
+        return permitted
+            ? InvariantResult.pass(InvariantId.PG_1, describe())
+            : InvariantResult.fail(InvariantId.PG_1, describe(), java.math.BigDecimal.ONE);
+    }
+
     public String describe() {
         return (permitted ? "ACTIVATION PERMITTED" : "ACTIVATION REFUSED (" + refusal + ")")
             + " for policy version " + policyVersionId + ": " + detail;

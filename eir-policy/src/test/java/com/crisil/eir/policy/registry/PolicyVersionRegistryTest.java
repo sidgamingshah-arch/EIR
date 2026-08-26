@@ -516,7 +516,15 @@ class PolicyVersionRegistryTest {
 
             InvariantResult inside =
                 registry.policyResolvableOn(PolicyKind.FEE_RULE_SET, LocalDate.of(2027, 6, 30));
-            assertThat(inside.id()).isEqualTo(InvariantId.DT_1);
+            // PV_1, not DT_1. This originally asserted DT_1 because no identifier for policy
+            // resolvability existed while the units were built in parallel, and the production
+            // javadoc carried a warning never to conjoin the result with a replay result — an
+            // honest workaround that put the burden on every caller to remember. The dedicated
+            // id now exists, so the borrowing and the warning are both discharged.
+            assertThat(inside.id())
+                .as("its own identifier: a workpaper reads 'policy resolvable', not 'replay'")
+                .isEqualTo(InvariantId.PV_1);
+            assertThat(inside.id()).isNotEqualTo(InvariantId.DT_1);
             assertThat(inside.satisfied()).isTrue();
             assertThat(inside.deviation()).isEqualByComparingTo(BigDecimal.ZERO);
             assertThat(inside.detail())

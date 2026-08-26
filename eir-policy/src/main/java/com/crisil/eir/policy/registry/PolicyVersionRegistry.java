@@ -258,8 +258,9 @@ public final class PolicyVersionRegistry {
      *
      * <p>Deviation is the number of versions implicated rather than an amount — the breach has no
      * money size, and a count is what a caller can act on. See
-     * {@link #policyResolvableOn(PolicyKind, LocalDate)} for why {@link InvariantId#DT_1} carries
-     * this and why results under it must not be conjoined with replay results.
+     * {@link #policyResolvableOn(PolicyKind, LocalDate)} for why {@link InvariantId#PV_1} carries
+     * this rather than {@code DT_1}, and why results under it must not be conjoined with
+     * bit-identical-replay results.
      */
     public InvariantResult supersessionCoherentFor(PolicyKind kind) {
         Objects.requireNonNull(kind, "kind");
@@ -268,7 +269,7 @@ public final class PolicyVersionRegistry {
             // No timeline is not an incoherent timeline. Whether a kind ought to be on file is
             // policyResolvableOn's question, asked of a date; this one is about what the
             // statuses of the versions held say about each other.
-            return InvariantResult.pass(InvariantId.DT_1, "no operative " + kind + " version held");
+            return InvariantResult.pass(InvariantId.PV_1, "no operative " + kind + " version held");
         }
 
         List<String> defects = new ArrayList<>();
@@ -298,12 +299,12 @@ public final class PolicyVersionRegistry {
 
         if (defects.isEmpty()) {
             return InvariantResult.pass(
-                InvariantId.DT_1,
+                InvariantId.PV_1,
                 kind + " timeline coherent: " + describeHistory(kind) + ", newest "
                     + newest.status());
         }
         return InvariantResult.fail(
-            InvariantId.DT_1,
+            InvariantId.PV_1,
             kind + " timeline contradicts its own statuses — " + String.join("; ", defects),
             BigDecimal.valueOf(defects.size()));
     }
@@ -483,13 +484,14 @@ public final class PolicyVersionRegistry {
      * the absence of an answer, which has no money size. A caller summing deviations therefore
      * gets a count of unresolvable dates, which is the actionable figure.
      *
-     * <p>Uses {@link InvariantId#DT_1} because no identifier for policy resolvability exists
-     * yet. The condition is a <em>precondition</em> of deterministic replay rather than replay
-     * itself, so a dedicated id would read better in a control workpaper; that enum belongs to
-     * another work unit, and the id needed is noted rather than added here.
+     * <p>Published under {@link InvariantId#PV_1}, which exists for exactly this. The condition
+     * is a <em>precondition</em> of deterministic replay rather than replay itself: a period with
+     * a date no version governs cannot be replayed at all, which is a different failure from one
+     * that replays to different numbers. This originally borrowed {@code DT_1} because no id for
+     * policy resolvability existed, with a warning not to conjoin the two; the id now exists and
+     * the warning is discharged.
      *
-     * <p><b>Do not conjoin this result with a bit-identical-replay DT-1 result until that
-     * dedicated id exists.</b> {@code InvariantResult.conjunction} keeps the <em>first</em>
+     * <p><b>Still do not conjoin these with a bit-identical-replay DT-1 result.</b> {@code InvariantResult.conjunction} keeps the <em>first</em>
      * breach's deviation among results sharing an id — a defect its own javadoc records having
      * been found three times in this engine — so a list carrying both would publish a DT-1
      * deviation that is a count of unresolvable dates or a money amount depending on list order,
@@ -504,12 +506,12 @@ public final class PolicyVersionRegistry {
         if (resolved.isPresent()) {
             PolicyVersion governing = resolved.get();
             return InvariantResult.pass(
-                InvariantId.DT_1,
+                InvariantId.PV_1,
                 kind + " on " + date + " resolves to version " + governing.id() + " (effective "
                     + governing.effectiveFrom() + ", " + governing.status() + ")");
         }
         return InvariantResult.fail(
-            InvariantId.DT_1,
+            InvariantId.PV_1,
             "no operative " + kind + " version resolves for " + date + "; the registry holds "
                 + describeHistory(kind)
                 + ". A period cannot be replayed against a policy that is not on file",

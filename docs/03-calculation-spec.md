@@ -892,6 +892,10 @@ period close.
 | CU-1 | EIR unchanged across a catch-up restatement | Event |
 | CU-2 | Catch-up = PV(revised, original EIR) − GCA_before | Event |
 | ST-13 | A schedule whose structure implies par pricing prices to par at its own coupon, within the measured instalment-rounding residue | Post-projection |
+| PG-1 | No policy version is EFFECTIVE without a stored impact preview for that draft's content (FR-210) | Policy activation |
+| PV-1 | A policy version of each consulted kind resolves for every date in a closed period | Period close |
+| RT-1 | Every routed event resolves to a routing table version in force on its date ([ADR-0006](adr/0006-configurable-event-routing.md)) | Event routing |
+| RS-1 | Every fee code in the rule set has a per-code default in force (FR-201) | Rule-set approval |
 | **ST-2** | **Stage 3: net-basis interest + ECL unwind = gross-basis interest**, plus the decomposition's accrual length and interest against the ledger row it decomposes | Every period |
 | S3-1 | Stage 3: GCA roll-forward, shadow unwind, suspense ledger and recognised income all reconcile | Every period |
 | S3-2 | Recognised interest income on a Stage 3 contract = 0 | Every period |

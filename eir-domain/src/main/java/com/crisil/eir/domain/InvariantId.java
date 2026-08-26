@@ -117,7 +117,63 @@ public enum InvariantId {
      * thousands passes INV-2 on the correct arithmetic. Where the structure says par is
      * expected, that miss is a data error and this is what says so.
      */
-    ST_13("a par-priced structure prices to par");
+    ST_13("a par-priced structure prices to par"),
+
+    /**
+     * No policy version is in force without a current portfolio impact preview for the
+     * content it will apply.
+     *
+     * <p>FR-210 calls the preview <em>mandatory</em>, and a mandatory artefact nobody
+     * asserts the presence of is an artefact somebody will eventually skip. The risk this
+     * guards is quantified in the roadmap's register: a behavioural-curve revision carries
+     * 3.73x leverage on year-one fee recognition — the UK restatement pattern — so a version
+     * going effective unpreviewed is how that lands with nobody having seen the number.
+     *
+     * <p>Distinct from a bare existence check. A preview of an earlier draft of the same
+     * version id satisfies "a preview exists" and is worse than none, because it reads as
+     * diligence; the check is against the draft's content, not its identifier.
+     */
+    PG_1("no policy version effective without a current impact preview"),
+
+    /**
+     * Every date in a period a run reports on resolves to exactly one policy version of
+     * each kind the run consulted.
+     *
+     * <p>The companion to {@link #DT_1}, and separate from it on purpose. DT-1 asks whether
+     * a replay reproduces the published figures bit-identically; this asks whether the
+     * policy the replay would resolve against still exists and is unambiguous. A period with
+     * a date no version governs cannot be replayed at all, which is a different failure from
+     * one that replays to different numbers — and {@code InvariantResult.conjunction} keeps
+     * only the first breach's deviation among results sharing an id, so publishing both
+     * under DT-1 would have made whichever came second uninterpretable.
+     */
+    PV_1("a policy version resolves for every date in a closed period"),
+
+    /**
+     * Every routed event resolves to a routing table version in force on the event's date.
+     *
+     * <p>ADR-0006 makes the driver-to-mechanism mapping versioned configuration so that an
+     * IASB amendment to B5.4.5 is a table change rather than a re-engineering event. That
+     * only holds while every event finds a table: a gap in the version series is an event
+     * whose treatment is undefined, and the tempting fallback — the compiled-in baseline —
+     * would silently reintroduce exactly the hard-coded mapping the ADR exists to remove.
+     * Asserted over a whole period ahead of a close, because finding the gap one event at a
+     * time finds it after the run has started.
+     */
+    RT_1("every routed event resolves to a table version in force"),
+
+    /**
+     * Every fee code in the rule set has a per-code default in force, so no code depends on
+     * a product-and-entity carve-out existing to be classifiable at all.
+     *
+     * <p>Not a refusal at construction, deliberately: a partially-loaded taxonomy is a real
+     * state during the months-long sourcing exercise 08 § 0 calls the programme's critical
+     * path, and refusing it would make the gap invisible rather than absent. Reported
+     * instead, so the FR-210 approval gate can make it mandatory at the point where
+     * "mandatory" means something. The list is the quantified form of "how much of this
+     * taxonomy will still raise exceptions", which is what an impact preview is for.
+     */
+    RS_1("every fee code has a per-code default in force");
 
     private final String statement;
 
