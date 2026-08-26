@@ -352,9 +352,23 @@ public enum InvariantId {
      * single migration flag — which is why 04 § 6 gives the discount basis its own table rather
      * than a column on the contract.
      *
-     * <p>Deviation is the count of contracts on the EIR for interest whose ECL basis is still
-     * {@code CONTRACTUAL_INTERIM}. Reported before the deadline as the size of the remaining
-     * migration; after it, the same figure is a breach of ACPIR 50.
+     * <p><b>The invariant is that both are tracked, not that both are finished.</b> This
+     * distinction took a second pass to get right. The obvious formulation — fail while any
+     * contract is still on the interim basis — makes the control fail continuously from 2027 to
+     * 2030, and a breach blocks the close (03 § 9), so it would block every close for three years
+     * while describing a state ACPIR 50 explicitly permits. A control that is red by design is a
+     * control that gets suppressed, and then it is not there for the year it matters.
+     *
+     * <p>So the breach is one of two things, both of which are genuine failures on the day they
+     * occur: a contract whose ECL discount basis is <em>not recorded at all</em>, which is the
+     * gap being invisible rather than open; or a contract still on the interim basis <em>after
+     * 31 March 2030</em>, when the concession has expired. Deviation is the count of contracts in
+     * either state.
+     *
+     * <p>The size of the remaining migration is published as plain data rather than as a
+     * deviation, because a shrinking number is what a programme tracks and a control is not the
+     * place to put it. 08's warning applies to the reading, not the arithmetic: ACPIR 50's
+     * concession buys time on ECL discounting and must not be read as a general deferral.
      */
     TM_1("ACPIR 21 and ACPIR 50 migration tracked separately"),
 
