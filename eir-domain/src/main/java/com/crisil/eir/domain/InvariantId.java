@@ -356,7 +356,24 @@ public enum InvariantId {
      * {@code CONTRACTUAL_INTERIM}. Reported before the deadline as the size of the remaining
      * migration; after it, the same figure is a breach of ACPIR 50.
      */
-    TM_1("ACPIR 21 and ACPIR 50 migration tracked separately");
+    TM_1("ACPIR 21 and ACPIR 50 migration tracked separately"),
+
+    /**
+     * Every cohort measured on a deemed EIR has an approved derivation on file (FR-909, 04 § 6).
+     *
+     * <p>A deemed rate is what the engine uses where full reconstruction of the original flows was
+     * not feasible. That is a legitimate answer at legacy scale, and it is also the answer that
+     * hides an unwillingness to look — so the derivation has to say why reconstruction failed and
+     * how the rate was arrived at instead, and somebody other than its preparer has to have
+     * approved it. The reason the approval is not optional: a deemed rate <em>recognises income
+     * on an assumption</em>, every period, for the rest of the exposure's life.
+     *
+     * <p>Deviation is the count of cohorts on a deemed basis with no approved derivation. Reported
+     * rather than refused at construction, because a prepared-and-unapproved derivation is the
+     * normal state of one in flight; what the control catches is a cohort being <em>measured</em>
+     * on a rate nobody signed.
+     */
+    DE_1("every deemed EIR has an approved derivation");
 
     private final String statement;
 
