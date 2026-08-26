@@ -272,7 +272,42 @@ public enum InvariantId {
      * "mandatory" means something. The list is the quantified form of "how much of this
      * taxonomy will still raise exceptions", which is what an impact preview is for.
      */
-    RS_1("every fee code has a per-code default in force");
+    RS_1("every fee code has a per-code default in force"),
+
+    /**
+     * No exposure has income suspended except under a pool definition in force on the date
+     * (FR-608, 03 § 7.4).
+     *
+     * <p>Account-level suspension analysis is impractical for credit cards and KCC at volume, and
+     * ACPIR provides no portfolio carve-out — so one has to come from policy, and 03 § 7.4 makes
+     * the pool definition the approved artefact that carries it. This is the control on that
+     * sentence: suspending income is suppressing recognised revenue, and the only thing standing
+     * between a pooled suspension and an unapproved one is whether an approved definition covers
+     * the exposure on the date.
+     *
+     * <p>The deviation is the count of exposures suspended without cover. A count rather than the
+     * income suppressed, because the remedy is per exposure — each one either belongs in an
+     * approved pool or has to be analysed individually — and because the suppressed income is
+     * already reported, exposure by exposure, under S3-2.
+     */
+    PL_1("no exposure suspended except under a pool definition in force"),
+
+    /**
+     * Only portfolio-managed products are suspended at pool level (FR-608, 03 § 7.4).
+     *
+     * <p>The carve-out exists because account-level analysis is impractical for cards and KCC. It
+     * is not a general licence to suspend by pool, and the abuse it invites is precisely the one
+     * worth a control: pooling a book of term loans, where account-level analysis is entirely
+     * practical, to avoid doing it. Eligibility is read off
+     * {@code TierAssignmentFeature.CARD_OR_KCC_REVOLVER} rather than a second product list,
+     * because "is this a portfolio-managed revolver" is a question this codebase already answers
+     * and two answers to it would eventually disagree.
+     *
+     * <p>Deviation is the count of pools covering ineligible products, not of exposures: the
+     * remedy is to dissolve the pool, and a pool of a million card accounts and a pool of ten
+     * term loans are one finding each.
+     */
+    PL_2("only portfolio-managed products are suspended at pool level");
 
     private final String statement;
 
