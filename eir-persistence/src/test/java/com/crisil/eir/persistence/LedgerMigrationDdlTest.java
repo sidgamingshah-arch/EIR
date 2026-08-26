@@ -357,6 +357,71 @@ class LedgerMigrationDdlTest {
     }
 
     @Nested
+    @DisplayName("spec 03 s7 impairment interaction")
+    class ImpairmentInteraction {
+
+        @Test
+        @DisplayName("PF-1: the floor raises the reported figure, not only 'both or neither'")
+        void theFloorRaises() {
+            // Both halves of PF-1, and only one of them was here. "Both retained" is the storage
+            // requirement; the substantive rule is that a floor raises the reported provision or
+            // does nothing. The duality check on its own is satisfied by a post-floor number
+            // BELOW the pre-floor one, which is not a floor — verified against a live cluster,
+            // where a row carrying pre-floor 211,362.93 and post-floor 79,261.10 was accepted by
+            // the duality constraint and rejected by this one.
+            //
+            // Added after FloorApplication asserted the same rule in Java. One rule stated in two
+            // places with only one of them stating it is this schema's recurring defect, and the
+            // pair of columns is exactly where a caller that computed the provision elsewhere
+            // lands.
+            assertThat(executable)
+                    .as("the storage half")
+                    .contains("CHECK ((ecl_pre_floor IS NULL) = (ecl_post_floor IS NULL))");
+            assertThat(executable)
+                    .as("the substantive half")
+                    .contains("CHECK (ecl_pre_floor IS NULL OR ecl_post_floor >= ecl_pre_floor)");
+        }
+
+        @Test
+        @DisplayName("FR-604: suspense movements are magnitudes, and the continuity check needs that")
+        void suspenseMovementsAreMagnitudes() {
+            // The continuity check alone is satisfied by a recovery posted as a negative and a
+            // suspension posted as a negative recovery: same closing balance, different ledger,
+            // and only one of them reconciles to the cash book. The balances were already
+            // constrained non-negative and the movements were not.
+            assertThat(executable)
+                    .contains("CHECK (opening_balance >= 0 AND closing_balance >= 0)");
+            assertThat(executable)
+                    .as("the movements too, or the direction stops being the column's name")
+                    .containsPattern(
+                            "CHECK \\(contractual_interest_suspended >= 0\\s+"
+                            + "AND released_on_recovery >= 0\\s+"
+                            + "AND written_off >= 0\\)");
+        }
+
+        @Test
+        @DisplayName("the suspense ledger's columns are the movements SuspenseLedger carries")
+        void suspenseLedgerMatchesTheJavaType() {
+            // A seam check, in the spirit of the V1/V2 key-type defect this module's README makes
+            // the case for executing rather than reading. SuspenseLedger was written against
+            // 03 s7.3 and this table against 04, independently — an opening balance, three
+            // movements and a closing balance, on both sides. Named here so a change to either
+            // that drops or renames a movement fails rather than quietly leaving the ledger
+            // unable to round-trip.
+            for (String column : List.of(
+                    "opening_balance",
+                    "contractual_interest_suspended",
+                    "released_on_recovery",
+                    "written_off",
+                    "closing_balance")) {
+                assertThat(executable)
+                        .as("suspense_entry.%s", column)
+                        .contains(column);
+            }
+        }
+    }
+
+    @Nested
     @DisplayName("04 s3 exception queue")
     class ExceptionQueue {
 

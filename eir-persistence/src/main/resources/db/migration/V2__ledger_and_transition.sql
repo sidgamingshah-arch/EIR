@@ -630,7 +630,16 @@ CREATE TABLE period_balance (
     -- PF-1: both floors or neither. One of the two present means the pair was not
     -- retained and the comparison FR-609 asks for cannot be made.
     CONSTRAINT ck_period_balance_floor_duality
-        CHECK ((ecl_pre_floor IS NULL) = (ecl_post_floor IS NULL))
+        CHECK ((ecl_pre_floor IS NULL) = (ecl_post_floor IS NULL)),
+    -- PF-1, the other half. "Both retained" is only the storage requirement; the
+    -- substantive rule is that the floor RAISES the reported figure or does nothing, and
+    -- the duality check above is satisfied by a post-floor number BELOW the pre-floor
+    -- one — which is not a floor. Added after FloorApplication was written and asserted
+    -- the same rule in Java: one rule stated in two places with only one of them stating
+    -- it is this schema's recurring defect, and the pair of columns is exactly where a
+    -- caller that computed the provision elsewhere would land.
+    CONSTRAINT ck_period_balance_floor_raises
+        CHECK (ecl_pre_floor IS NULL OR ecl_post_floor >= ecl_pre_floor)
 ) PARTITION BY RANGE (period_id);
 
 COMMENT ON TABLE period_balance IS
@@ -811,7 +820,16 @@ CREATE TABLE suspense_entry (
                                  - released_on_recovery
                                  - written_off),
     CONSTRAINT ck_suspense_entry_balances_non_negative
-        CHECK (opening_balance >= 0 AND closing_balance >= 0)
+        CHECK (opening_balance >= 0 AND closing_balance >= 0),
+    -- The movements are magnitudes and the direction is the column's name. Without this
+    -- the continuity check above is satisfied by a recovery posted as a negative and a
+    -- suspension posted as a negative recovery: same closing balance, different ledger,
+    -- and only one of them reconciles to the cash book. SuspenseLedger refuses the same
+    -- thing in Java, and the constraint that mattered was the one the schema was missing.
+    CONSTRAINT ck_suspense_entry_movements_non_negative
+        CHECK (contractual_interest_suspended >= 0
+               AND released_on_recovery >= 0
+               AND written_off >= 0)
 );
 
 CREATE INDEX ix_suspense_entry_contract_period
