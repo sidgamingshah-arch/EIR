@@ -73,8 +73,38 @@ public enum InvariantId {
     /** No posting excluded by Direction entered any EIR stream or the carrying amount. */
     PC_1("penal charge exclusion asserted"),
 
-    /** Pre-floor ECL retained and reported alongside post-floor. */
+    /**
+     * The pre-floor, EIR-derived ECL survives the application of the prudential floor and is
+     * reported alongside the post-floor figure (FR-609, ACPIR 90, 03 § 7.5).
+     *
+     * <p>The ordering the requirement states is: compute the accounting number at the EIR, apply
+     * the floor, report <em>both</em>. The failure it forbids is the natural implementation —
+     * compute, floor, store one number — after which the accounting figure the EIR produced no
+     * longer exists anywhere and the divergence between measurement and reporting cannot be
+     * quantified, disclosed, or reconciled in a later period.
+     *
+     * <p>Asserted as an equality on the way through rather than as a claim about a field: the
+     * figure handed in comes back unchanged, and the reported figure is the greater of it and the
+     * floor. A floor that lowered the reported provision would not be a floor, and the deviation
+     * is the money amount by which the reported figure sits away from where it belongs.
+     */
     PF_1("pre-floor ECL retained"),
+
+    /**
+     * A Stage 3 exposure is floored at account level, never on a portfolio basis (ACPIR 90,
+     * 03 § 7.5).
+     *
+     * <p>ACPIR 90 applies the prudential floor per product category on a portfolio basis for
+     * Stages 1 and 2 and <b>mandatorily at account level for Stage 3</b>. A Stage 3 exposure
+     * floored in a portfolio pool has its shortfall averaged against exposures that have no
+     * shortfall, which understates the floor on exactly the accounts where it binds hardest.
+     *
+     * <p>Separate from {@link #PF_1} because it is a different failure with a different remedy:
+     * PF-1 breaks when the pre-floor number is lost, and is fixed by retaining it; this breaks
+     * when the number was computed the wrong way, and is fixed by recomputing it. The deviation
+     * is the provision floored on the wrong basis, which is the exposure a close has to restate.
+     */
+    PF_2("Stage 3 floored at account level, not portfolio"),
 
     /** The credit-adjusted EIR is unchanged across a cure. */
     POCI_1("credit-adjusted EIR retained on cure"),
