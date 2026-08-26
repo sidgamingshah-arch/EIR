@@ -3,11 +3,7 @@ package com.crisil.eir.policy.approval;
 import com.crisil.eir.policy.PolicyVersion;
 import com.crisil.eir.policy.PolicyVersionStatus;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.EnumMap;
-import java.util.EnumSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -17,42 +13,18 @@ import java.util.Set;
  * <p><b>What this gate is for.</b> Every {@link com.crisil.eir.policy.PolicyKind} moves recognised
  * income ({@code PolicyKind.movesRecognisedIncome}), so a rule set going into force restates
  * figures the bank publishes. FR-210 answers that with four eyes and an effective date; this class
- * is the part that makes the four eyes unavoidable rather than procedural. The transition table
- * below is the whole content of the control: {@code EFFECTIVE} has exactly one predecessor, and
- * reaching it requires a checker who is not the maker.
+ * is the part that makes the four eyes unavoidable rather than procedural. The whole content of
+ * the control is that {@code EFFECTIVE} has exactly one predecessor, and reaching it requires a
+ * checker who is not the maker.
  *
- * <p><b>Why the transitions are stated and not derived.</b> {@link PolicyVersionStatus} lists its
- * constants in progression order and its own documentation warns that nothing may read that
- * order. An ordinal test — "the target must be the successor of the origin" — looks like the
- * obvious implementation and licenses the one move this gate exists to refuse: {@code DRAFT}
- * ordinal 0 to {@code EFFECTIVE} ordinal 3 is a forward move by that test. Worse, it is a forward
- * move that <em>reads</em> as progress in a log. The table is written out so that adding a sixth
- * status fails the class initialiser instead of quietly acquiring edges nobody decided on.
- *
- * <pre>
- *   DRAFT            → PENDING_APPROVAL
- *   PENDING_APPROVAL → APPROVED | DRAFT
- *   APPROVED         → EFFECTIVE | SUPERSEDED
- *   EFFECTIVE        → SUPERSEDED
- *   SUPERSEDED       → (terminal)
- * </pre>
- *
- * <p><b>Two edges in that table need their absence explained.</b>
- *
- * <p>{@code DRAFT → SUPERSEDED} and {@code PENDING_APPROVAL → SUPERSEDED} are not edges, even
- * though supersession is otherwise reachable from every live state. {@code SUPERSEDED} counts as
- * approved in {@link PolicyVersionStatus#isApproved()} — a closed period must still resolve
- * against the version that governed it — so {@code PolicyVersion}'s constructor requires a checker
- * and an approval date on a superseded version, and a draft that never had either cannot be
- * represented as one. That is the right answer and not a limitation: a version nobody approved was
- * never in force, so nothing replaced it. There is no {@code ABANDONED} status because an
- * abandoned draft needs none — it stays a draft, and no date resolves against it.
- *
- * <p>{@code PENDING_APPROVAL → DRAFT} <em>is</em> an edge, and it is the one addition to FR-210's
- * bare forward chain. Without it a checker who declines has nowhere to put the version:
- * supersession is unavailable to it by the paragraph above, and the only remaining move would be
- * the approval they just declined to give. A control whose refusal path dead-ends is a control
- * that gets worked around.
+ * <p><b>Where the transition table lives, and why it moved.</b> The edges are stated on
+ * {@link PolicyVersionStatus#legalSuccessors()}, with the reasoning for each absent edge, and
+ * this class reads them. They were originally written out here, which put the <em>rule</em> in
+ * the class holding the decision and left the class holding the status with no idea which moves
+ * existed — so {@code PolicyVersion.advancedTo} would move a version along any edge at all, and
+ * the sentence at the top of this file claiming to be the only legal way a status changes was
+ * false. The edges belong to the vocabulary; the refusals below, which need an approval record
+ * and an identity comparison the enum cannot see, belong here.
  *
  * <p><b>Refusals are values.</b> Nothing here throws for a policy condition. A quarter-end
  * activation presents a batch (see {@link #applyAll}), and a gate that threw on the first
@@ -70,46 +42,7 @@ import java.util.Set;
  */
 public final class MakerCheckerGate {
 
-    /**
-     * The life cycle, as data.
-     *
-     * <p>Total over {@link PolicyVersionStatus}: every status has an entry, including the terminal
-     * one with an empty set. Checked at class initialisation rather than trusted, because a
-     * missing entry would read as "no legal moves" and quietly strand a new status — a failure
-     * that would show up as an unexplained refusal months later rather than as a build failure
-     * on the day the status was added.
-     */
-    private static final Map<PolicyVersionStatus, Set<PolicyVersionStatus>> LEGAL_SUCCESSORS =
-        legalSuccessorTable();
-
     private MakerCheckerGate() {
-    }
-
-    private static Map<PolicyVersionStatus, Set<PolicyVersionStatus>> legalSuccessorTable() {
-        EnumMap<PolicyVersionStatus, Set<PolicyVersionStatus>> table =
-            new EnumMap<>(PolicyVersionStatus.class);
-        table.put(PolicyVersionStatus.DRAFT,
-            EnumSet.of(PolicyVersionStatus.PENDING_APPROVAL));
-        table.put(PolicyVersionStatus.PENDING_APPROVAL,
-            EnumSet.of(PolicyVersionStatus.APPROVED, PolicyVersionStatus.DRAFT));
-        table.put(PolicyVersionStatus.APPROVED,
-            EnumSet.of(PolicyVersionStatus.EFFECTIVE, PolicyVersionStatus.SUPERSEDED));
-        table.put(PolicyVersionStatus.EFFECTIVE,
-            EnumSet.of(PolicyVersionStatus.SUPERSEDED));
-        table.put(PolicyVersionStatus.SUPERSEDED,
-            EnumSet.noneOf(PolicyVersionStatus.class));
-
-        for (PolicyVersionStatus status : PolicyVersionStatus.values()) {
-            if (!table.containsKey(status)) {
-                // A gate defect, not a data condition: the class cannot decide anything about a
-                // status whose edges nobody stated, and guessing would be worse than failing.
-                throw new IllegalStateException(
-                    "the maker-checker transition table has no entry for " + status
-                        + "; a new status needs its edges decided, not defaulted");
-            }
-            table.put(status, Collections.unmodifiableSet(table.get(status)));
-        }
-        return Collections.unmodifiableMap(table);
     }
 
     /**
@@ -121,7 +54,7 @@ public final class MakerCheckerGate {
      */
     public static Set<PolicyVersionStatus> legalSuccessors(PolicyVersionStatus from) {
         Objects.requireNonNull(from, "from");
-        return LEGAL_SUCCESSORS.get(from);
+        return from.legalSuccessors();
     }
 
     /**
@@ -132,8 +65,8 @@ public final class MakerCheckerGate {
      * answer that accounts for the version in hand.
      */
     public static boolean isLegalTransition(PolicyVersionStatus from, PolicyVersionStatus to) {
-        Objects.requireNonNull(to, "to");
-        return legalSuccessors(from).contains(to);
+        Objects.requireNonNull(from, "from");
+        return from.canMoveTo(to);
     }
 
     /**
@@ -164,7 +97,7 @@ public final class MakerCheckerGate {
      * A checker signs off. {@code PENDING_APPROVAL → APPROVED}.
      *
      * <p>Approval <em>adds</em> facts to the version — who checked it and when — so this cannot be
-     * expressed as {@code withStatus(APPROVED)}: that record's constructor refuses a status
+     * expressed as {@code advancedTo(APPROVED)}: that record's constructor refuses a status
      * claiming approval with no checker named, which is exactly the protection being relied on.
      * The approved version returned here carries the record's checker and date.
      */
@@ -310,7 +243,7 @@ public final class MakerCheckerGate {
         }
 
         return switch (target) {
-            case PENDING_APPROVAL -> allow(request, version.withStatus(target));
+            case PENDING_APPROVAL -> allow(request, version.advancedTo(target));
             case DRAFT -> returnedToMaker(request);
             case APPROVED -> approved(request);
             case EFFECTIVE -> madeEffective(request);
@@ -384,7 +317,7 @@ public final class MakerCheckerGate {
                 "the version is APPROVED but names no checker or no approval date, so there is no"
                     + " approval to put into force");
         }
-        return allow(request, request.version().withStatus(PolicyVersionStatus.EFFECTIVE));
+        return allow(request, request.version().advancedTo(PolicyVersionStatus.EFFECTIVE));
     }
 
     /** {@code APPROVED | EFFECTIVE → SUPERSEDED}, naming the version that takes over. */
@@ -406,7 +339,7 @@ public final class MakerCheckerGate {
                 "version " + version.id() + " cannot be its own successor");
         }
         return allow(request,
-            version.withStatus(PolicyVersionStatus.SUPERSEDED));
+            version.advancedTo(PolicyVersionStatus.SUPERSEDED));
     }
 
     /**

@@ -113,8 +113,49 @@ public record PolicyVersion(
         return approvedOn != null && effectiveFrom.isBefore(approvedOn);
     }
 
-    /** The same version at a new status, for the maker–checker gate to advance. */
-    public PolicyVersion withStatus(PolicyVersionStatus newStatus) {
+    /**
+     * The same version one step along its life cycle — the status change, and nothing else.
+     *
+     * <p><b>Bound by {@link PolicyVersionStatus#canMoveTo}, and this is the point of the
+     * method.</b> It was previously called {@code withStatus} and applied no rule at all, so a
+     * {@code DRAFT} carrying a proposed checker and an approval date — a state the constructor
+     * deliberately permits, because a draft may name the checker it is routed to — reached
+     * {@code EFFECTIVE} in one call, past {@code approval.MakerCheckerGate}, whose own
+     * documentation calls itself the only legal way a version changes status. That was true of
+     * every refusal the gate makes except the ones the constructor happens to duplicate. A neutral
+     * name invited the neutral behaviour: {@code withStatus} reads as a field copy on a record,
+     * and copying a field is what it did. This one names a life-cycle move and enforces one.
+     *
+     * <p><b>{@code APPROVED} is refused outright</b>, on any origin. Approval <em>adds</em> facts
+     * — who signed and when — and a method whose only argument is a status has nothing to add
+     * them from. Without this clause the call would still fail, but through the constructor and
+     * with a message about a missing checker, which reads as a defective version rather than as
+     * the wrong tool: use {@code MakerCheckerGate.approve} with the record.
+     *
+     * <p><b>What this does not close.</b> The canonical constructor stays public, so a version in
+     * any status can be built directly, and no guard here prevents that. That is deliberate and
+     * not a residual hole: rehydrating the version that was in force when a period closed is
+     * exactly what replay requires (invariant DT-1), and a private constructor would make a
+     * closed period unreplayable to protect a transition it is not making. The distinction the
+     * type draws is between <em>stating</em> a version — which a store must be able to do, from
+     * rows a gate already approved — and <em>moving</em> one, which is this method and is gated.
+     *
+     * @throws IllegalArgumentException if the life cycle has no edge to {@code newStatus}, or if
+     *                                  {@code newStatus} is {@code APPROVED}
+     */
+    public PolicyVersion advancedTo(PolicyVersionStatus newStatus) {
+        Objects.requireNonNull(newStatus, "newStatus");
+        if (newStatus == PolicyVersionStatus.APPROVED) {
+            throw new IllegalArgumentException(
+                "policy version " + id + ": APPROVED records who signed it and when, which a"
+                    + " status change alone cannot supply; approve it through the maker-checker"
+                    + " gate with the approval record (FR-210)");
+        }
+        if (!status.canMoveTo(newStatus)) {
+            throw new IllegalArgumentException(
+                "policy version " + id + " cannot move " + status + " -> " + newStatus
+                    + "; from " + status + " the only legal moves are " + status.legalSuccessors());
+        }
         return new PolicyVersion(
             id, kind, description, effectiveFrom, maker, checker, approvedOn, newStatus);
     }

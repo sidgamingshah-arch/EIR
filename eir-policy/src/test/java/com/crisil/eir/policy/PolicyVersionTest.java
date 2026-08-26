@@ -138,7 +138,13 @@ class PolicyVersionTest {
             // The reason there are five states and not an approved flag. A version approved in
             // March to take effect on 1 April is approved and not operative, and a run dated
             // in March must not resolve against it.
-            PolicyVersion pending = approved().withStatus(PolicyVersionStatus.APPROVED);
+            // Built directly rather than moved: EFFECTIVE -> APPROVED is not an edge, and
+            // advancedTo refuses APPROVED on any origin because approval adds facts a status
+            // change cannot supply. Stating the version is the store's job and is permitted.
+            PolicyVersion pending = new PolicyVersion(
+                "FEE-2027.1", PolicyKind.FEE_RULE_SET, "ACPIR 53 selling-agent split",
+                APRIL, "policy.author", "accounting.policy.owner", MARCH,
+                PolicyVersionStatus.APPROVED);
             assertThat(pending.status().isApproved()).isTrue();
             assertThat(pending.status().isOperative()).isFalse();
             assertThat(pending.isEffectiveOn(APRIL))
@@ -203,7 +209,7 @@ class PolicyVersionTest {
             // Retained rather than deleted: a replay of a closed period must resolve against
             // the version that was in force when it closed, or it cannot reproduce the
             // figures (invariant DT-1).
-            PolicyVersion old = approved().withStatus(PolicyVersionStatus.SUPERSEDED);
+            PolicyVersion old = approved().advancedTo(PolicyVersionStatus.SUPERSEDED);
             assertThat(old.isEffectiveOn(APRIL))
                 .as("a superseded version is history, not a deletion")
                 .isTrue();
@@ -258,6 +264,89 @@ class PolicyVersionTest {
                 "maker", "checker", MARCH, PolicyVersionStatus.EFFECTIVE);
             assertThat(fee.kind()).isNotEqualTo(routing.kind());
             assertThat(fee.id()).isNotEqualTo(routing.id());
+        }
+    }
+
+    @Nested
+    @DisplayName("advancing the status is a life-cycle move, not a field copy")
+    class Advancing {
+
+        @Test
+        @DisplayName("a draft cannot walk into force in one call")
+        void draftCannotJumpToEffective() {
+            // The hole this method's rename and guard exist to close. The old withStatus applied
+            // no rule, so this exact call succeeded — and it succeeded on a version the
+            // constructor is right to permit: a DRAFT may name the checker it has been routed to,
+            // which means it can carry both a checker and a date and satisfy every constructor
+            // check for EFFECTIVE. MakerCheckerGate documents itself as the only legal way a
+            // status changes; until now that sentence was false and nothing failed when it was.
+            PolicyVersion routedDraft = new PolicyVersion(
+                "FEE-2027.5", PolicyKind.FEE_RULE_SET, "routed to a checker", APRIL,
+                "policy.author", "accounting.policy.owner", MARCH, PolicyVersionStatus.DRAFT);
+
+            assertThatIllegalArgumentException()
+                .isThrownBy(() -> routedDraft.advancedTo(PolicyVersionStatus.EFFECTIVE))
+                .withMessageContaining("cannot move DRAFT -> EFFECTIVE")
+                .withMessageContaining("[PENDING_APPROVAL]");
+        }
+
+        @Test
+        @DisplayName("APPROVED is refused here even from its own legal predecessor")
+        void approvedIsRefusedBecauseItAddsFacts() {
+            // PENDING_APPROVAL -> APPROVED IS an edge, so the edge test alone would let this
+            // through and the constructor would then throw about a missing checker — a message
+            // that reads as a defective version rather than as the wrong tool. Refused here, with
+            // the tool named.
+            PolicyVersion pending = new PolicyVersion(
+                "FEE-2027.6", PolicyKind.FEE_RULE_SET, "awaiting sign-off", APRIL,
+                "policy.author", null, null, PolicyVersionStatus.PENDING_APPROVAL);
+
+            assertThatIllegalArgumentException()
+                .isThrownBy(() -> pending.advancedTo(PolicyVersionStatus.APPROVED))
+                .withMessageContaining("maker-checker gate with the approval record");
+        }
+
+        @Test
+        @DisplayName("the legal moves the gate makes are the moves this permits")
+        void legalMovesAgree() {
+            // The whole reason the table moved onto PolicyVersionStatus. Two copies of one rule is
+            // this codebase's recurring defect, and here only one of the two copies had it at all:
+            // the gate held the edges and the record holding the status knew nothing about them.
+            // Asserted over every ordered pair, so a sixth status or a new edge cannot be added to
+            // one side alone.
+            for (PolicyVersionStatus from : PolicyVersionStatus.values()) {
+                for (PolicyVersionStatus to : PolicyVersionStatus.values()) {
+                    assertThat(from.canMoveTo(to))
+                        .as("%s -> %s", from, to)
+                        .isEqualTo(from.legalSuccessors().contains(to));
+                }
+            }
+
+            assertThat(PolicyVersionStatus.SUPERSEDED.legalSuccessors())
+                .as("history is terminal; moving it would rewrite what governed a closed period")
+                .isEmpty();
+            assertThat(PolicyVersionStatus.DRAFT.legalSuccessors())
+                .as("EFFECTIVE has exactly one predecessor, and DRAFT is not it")
+                .containsExactly(PolicyVersionStatus.PENDING_APPROVAL);
+        }
+
+        @Test
+        @DisplayName("a store may still state any status directly, and that is not the hole")
+        void rehydrationStaysOpen() {
+            // Deliberate, and worth pinning so it is not "fixed" later. A replay of a closed
+            // period must reconstruct the version that governed it (DT-1), which means reading
+            // rows a gate already approved and building the record they describe. A private
+            // constructor would make a closed period unreplayable in order to guard a transition
+            // nobody is making. The line the type draws is between STATING a version and MOVING
+            // one; only the second is a transition, and only the second is gated.
+            PolicyVersion rehydrated = new PolicyVersion(
+                "FEE-2026.9", PolicyKind.FEE_RULE_SET, "read back from the store",
+                LocalDate.of(2026, 4, 1), "maker", "checker", LocalDate.of(2026, 3, 1),
+                PolicyVersionStatus.SUPERSEDED);
+            assertThat(rehydrated.status()).isEqualTo(PolicyVersionStatus.SUPERSEDED);
+            assertThat(rehydrated.isEffectiveOn(LocalDate.of(2026, 6, 30)))
+                .as("and it resolves, which is the point of retaining it")
+                .isTrue();
         }
     }
 }
