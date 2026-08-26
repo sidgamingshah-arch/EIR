@@ -914,6 +914,11 @@ period close.
 | TG-1 | Every Tier 3 population has a current, in-date equivalence test on file | Annual |
 | PL-1 | No exposure has income suspended except under a pool definition in force on the date (FR-608) | Every period |
 | PL-2 | Only portfolio-managed products — cards and KCC — are suspended at pool level (FR-608) | Pool approval |
+| TF-1 | No transition fair value relies on the ACPIR 19 paragraph 19 presumption without a rebuttal evidence reference (FR-908) | Transition valuation |
+| BM-1 | No day-1 below-market difference is taken to a destination without an approved Board position (FR-909, reference § 4 Silence 6) | Origination |
+| LC-1 | No legacy cohort surviving 31 March 2030 is queued behind one that runs off before it (FR-908) | Migration planning |
+| DE-1 | Every cohort measured on a deemed EIR has an **approved** derivation on file (FR-909) | Migration planning |
+| TM-1 | ACPIR 21 and ACPIR 50 are **tracked separately**: every contract carries a recorded ECL discount basis, and none remains on the interim basis after 31 March 2030 | Period close |
 
 **On ST-2 being an identity, and what to do about it.** The first limb is a *tautology by
 construction* and cannot fail. The engine computes one figure — the gross-basis interest the Stage
@@ -963,6 +968,33 @@ every case has been the same: one id per claim, and where a claim genuinely has 
 now, PC-1 below — **one result** covering all of them, with the deviation aggregated deliberately.
 S3-1 sums the legs' residuals in *absolute* terms, because signed residuals let two breaks in
 opposite directions net to a reconciled period.
+
+**On TM-1, and an invariant that would have been red by design.** Worth recording because the
+first formulation was wrong in a way that looked right. ACPIR 21 puts the loan under the EIR regime
+and ACPIR 50 moves its ECL discounting to the EIR; they share a deadline of 31 March 2030 and they
+are two obligations, which is why [04 § 6](04-data-model.md#6-transition-specific-structures) gives
+the discount basis its own table rather than a column on the contract. A contract can be on the EIR
+for interest while its ECL is still discounted at the contractual rate, and a single migration flag
+cannot express that.
+
+The obvious control is "fail while any contract is still on the interim basis". It fails
+continuously from 2027 to 2030 — and a breach blocks the close, per the sentence at the top of this
+section — so it would block every close for three years while describing a state ACPIR 50
+explicitly permits. **A control that is red by design is a control that gets suppressed, and then
+it is absent for the year it matters.**
+
+So TM-1 asserts that both obligations are *tracked*, not that both are *finished*, and fires on the
+two things that are genuine failures on the day they occur: a contract with no recorded basis, and
+a contract still on the interim basis after the deadline. The size of the remaining migration is
+published as plain data, because a shrinking number is what a programme tracks and a control is not
+the place to put it.
+
+The same reasoning drew two other Phase 4 lines. Wasted reconstruction effort — a cohort queued for
+full reconstruction that runs off before 2030 — is reported as data and not under an id, because
+spending effort badly is not an accounting breach and putting a programme-management question in
+this table is how the table stops being read. And valuation coverage against the contract master is
+reported as data too: a contract missing from a valuation population was never presented, so an id
+raised from the run would attribute a data-feed problem to the valuation.
 
 **On PC-1's arity.** A projection can be screened along more than one route at once: the
 classified-fee route always applies, and `LMS_AUTHORITATIVE` adds the billed-schedule attestation on

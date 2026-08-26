@@ -97,6 +97,31 @@ exposure internally differ materially, one of them is wrong. It is the cheapest 
 check on engine correctness, because it compares against a number computed by a different team for a
 different purpose.
 
+### 4.1.1 The transition controls are not in that table, and that is deliberate
+
+Every one of the fifteen has a recurring frequency — every period, monthly, quarterly, nightly,
+annual. The transition controls do not: they are programme controls with an end date, and five of
+them stop mattering once the migration is complete.
+
+| Invariant | What it asserts | Ends |
+|---|---|---|
+| TF-1 | No ACPIR 19 paragraph 19 presumption without rebuttal evidence | When the day-1 valuation is signed off |
+| BM-1 | No day-1 below-market difference without an approved Board position | Never — new concessional lending continues |
+| LC-1 | No cohort surviving 31 March 2030 queued behind one that does not | When the migration plan is complete |
+| DE-1 | Every deemed-EIR cohort has an approved derivation | When the last deemed cohort is reconstructed or runs off |
+| TM-1 | ACPIR 21 and ACPIR 50 tracked separately | 31 March 2030, after which any gap is simply a breach |
+
+Numbering them C-16 to C-20 would put five controls with expiry dates in a table whose whole
+premise is that each row gates every close indefinitely — and would leave five rows to be
+explained, or quietly retired, in 2030. They are asserted in exactly the same way; they are listed
+in [03 § 9](03-calculation-spec.md#9-invariants) with the rest, and tracked against
+[08 Phase 4](08-roadmap.md) rather than here.
+
+BM-1 is the exception that proves the distinction: concessional lending does not stop at the
+transition, so it is the one transition-shaped control that becomes permanent. It belongs in the
+ongoing set once the programme closes, and moving it there is a deliberate act rather than an
+oversight avoided.
+
 ### 4.2 Maker–checker
 
 Every one of these requires a maker, a checker, an effective date, and a **stored impact preview

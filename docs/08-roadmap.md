@@ -223,25 +223,59 @@ worse — it reads as coverage.**
 
 ---
 
-## Phase 4 — Transition readiness (Jan–Mar 2027, parallel)
+## Phase 4 — Transition readiness (Jan–Mar 2027, parallel) — **CODE DELIVERED**
 
 Must be ready **before** 1 April 2027; runs alongside Phase 3.
 
-| Workstream | Deliverable | Requirements |
-|---|---|---|
-| Day-1 fair valuation | ACPIR 19 run over the whole loan book; difference to opening retained earnings | FR-908 |
-| **Paragraph 19 rebuttal evidence** | The file supporting carrying cost as best evidence of fair value — built during FY27, **not** at the transition date | [04 §6](04-data-model.md#6-transition-specific-structures) |
-| Below-market origination | Staff and concessional loans at fair value; day-1 difference to employee benefit cost | FR-909, [reference §5 item 10](reference/acpir-2026-eir-application-reference.md) |
-| Legacy cohort segmentation | Expected run-off vs 31 March 2030; migration priority | FR-908 |
-| Deemed EIR | Methodology and derivation recording for cohorts where full reconstruction is infeasible | FR-909 |
-| ECL discount basis tracking | `CONTRACTUAL_INTERIM` vs `EIR` per contract, tracked against ACPIR 50 | [04 §6](04-data-model.md#6-transition-specific-structures) |
+| Workstream | Deliverable | Requirements | State |
+|---|---|---|---|
+| Day-1 fair valuation | ACPIR 19 run over the whole loan book; difference to opening retained earnings | FR-908 | `policy/transition/TransitionFairValue`, `TransitionValuationRun` |
+| **Paragraph 19 rebuttal evidence** | The file supporting carrying cost as best evidence of fair value — built during FY27, **not** at the transition date | [04 §6](04-data-model.md#6-transition-specific-structures) | Invariant **TF-1**, per contract and per run |
+| Below-market origination | Staff and concessional loans at fair value; day-1 difference to employee benefit cost | FR-909, [reference §5 item 11](reference/acpir-2026-eir-application-reference.md) | `BelowMarketOrigination`, invariant **BM-1**; `PolicyKind.POLICY_POSITION` added to carry the Board position |
+| Legacy cohort segmentation | Expected run-off vs 31 March 2030; migration priority | FR-908 | `LegacyCohort`, `LegacyMigrationPlan`, invariant **LC-1** |
+| Deemed EIR | Methodology and derivation recording for cohorts where full reconstruction is infeasible | FR-909 | `DeemedEirDerivation`, invariant **DE-1** |
+| ECL discount basis tracking | `CONTRACTUAL_INTERIM` vs `EIR` per contract, tracked against ACPIR 50 | [04 §6](04-data-model.md#6-transition-specific-structures) | `ContractMigrationState`, `MigrationTracker`, invariant **TM-1** |
 
 **Exit gate:** the fair-valuation run completes over the full book with a rebuttal evidence
 reference on every contract where the presumption was applied.
 
+**Exit gate: met on the second half, and the first half is not this phase's to meet.** TF-1 asserts
+the rebuttal evidence over a population and per contract. "Completes over the full book" is a
+reconciliation between the valuation population and the contract master, and
+`TransitionValuationRun.coverageAgainst` performs it when a caller supplies the book size — but the
+run cannot know that a contract exists and was never presented to it, so the completeness half needs
+a caller that can see both. Saying so is more useful than a control that implies otherwise.
+
 > **Prioritise legacy reconstruction by survival, not by size.** Reconstructing an EIR for a loan
 > maturing in 2029 is wasted effort. Sequence the cohorts expected to remain on the books beyond
 > 31 March 2030 first.
+
+**That warning is now a control, and the reason is that the wrong answer looks right.** LC-1 refuses
+a plan where a cohort surviving 31 March 2030 is queued behind one that runs off before it. The test
+fixture makes the trap concrete: a 1,200,000-contract auto book running off in 2029 against an
+800-contract project finance cohort running to 2038. Ordered by size the 1.2 million-contract cohort
+goes first, and it is the one that never needs a reconstructed rate at all.
+
+**What "delivered" does not mean here.** Four qualifications:
+
+- **The fair value is an input, not a computation.** [The scope table below](#what-is-deliberately-not-in-scope)
+  excludes fair value measurement beyond the ACPIR 19 transition, and what is in scope is the
+  *application*: recording the measurement, computing the difference to opening retained earnings,
+  and controlling the evidence. Nothing here values a loan.
+- **Silence 6 is still a silence.** ACPIR 19 and 20 require fair value at initial recognition and
+  give no guidance on the day-1 difference — [reference § 4](reference/acpir-2026-eir-application-reference.md)
+  marks it `[MED-HIGH]`. BM-1 asserts that a Board position was taken, not that any particular
+  destination is right. The reference's reading for staff loans — the shortfall is employee
+  compensation, not a lending loss — is a reading, and the position is one of the thirty-three
+  Phase 0 puts in front of the ACPIR 57 sub-committee.
+- **No transition job runs any of this.** 05 § 2 puts transition jobs in `eir-batch`, which does not
+  exist, along with `eir-application`, `eir-gl`, `eir-api` and `eir-app`. These are types a run
+  would call, and there is no run.
+- **The legacy cohort definitions are strings.** `LegacyCohort.definition` carries what the cohort
+  selects as free text, matching the schema's `JSONB`. Nothing evaluates it, so a cohort's
+  membership is asserted rather than derived — which is the right place to stop, since the
+  segmentation criteria are a programme decision, but it means `contractCount` is supplied and not
+  counted.
 
 ---
 
