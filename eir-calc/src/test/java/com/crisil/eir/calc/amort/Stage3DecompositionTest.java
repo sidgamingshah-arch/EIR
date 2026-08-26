@@ -253,7 +253,13 @@ class Stage3DecompositionTest {
             // what the borrower owes.
             assertThat(decomposition.toSuspense().atPresentationScale().amount())
                 .isEqualByComparingTo(bd("5298.16"));
-            assertThat(invariant(decomposition, InvariantId.S3_1).satisfied()).isTrue();
+            // No S3-1 here. It used to be published from this method, asserting that billed
+            // interest splits into recognised income and suspense — which the two lines above
+            // assert directly, and which the production code constructed three lines before
+            // claiming it, so it could not fail. S3-1 reconciles four quantities and this type
+            // can see two; it now publishes once, from Stage3Reconciliation.
+            assertThat(decomposition.invariants().stream().map(InvariantResult::id))
+                .doesNotContain(InvariantId.S3_1);
         } else {
             assertThat(decomposition.incomeSuppressed()).isFalse();
             assertThat(decomposition.recognisedIncome().isZero()).isFalse();
@@ -295,11 +301,15 @@ class Stage3DecompositionTest {
         List<InvariantResult> results = Stage3Decomposition.stagingIsNotAnEirEvent(
             CASE1_EIR, CASE1_EIR, GCA_AT_MONTH_12, GCA_AT_MONTH_12);
 
+        // Two claims, two ids. Both used to be S3_1 — the rate one carrying a PERIODIC RATE
+        // deviation and the balance one carrying money, under an id whose statement is a
+        // four-way reconciliation of neither. A close aggregating S3-1 deviations was adding a
+        // rate difference to rupees, and conjunction keeps only the first breach's deviation
+        // among same-id results, so at most one of them ever surfaced.
         assertThat(results).hasSize(2);
-        assertThat(results).allSatisfy(result -> {
-            assertThat(result.satisfied()).isTrue();
-            assertThat(result.id()).isEqualTo(InvariantId.S3_1);
-        });
+        assertThat(results.stream().map(InvariantResult::id))
+            .containsExactly(InvariantId.SG_1, InvariantId.SG_2);
+        assertThat(results).allMatch(InvariantResult::satisfied);
 
         // The decomposition has no channel through which either could move: it returns no
         // rate and no carrying amount, only the recognition answer.
@@ -382,7 +392,10 @@ class Stage3DecompositionTest {
 
         // The cure records that assertion rather than leaving it implicit, and nothing goes
         // to suspense in a cured period.
-        assertThat(cured.invariants().stream().map(InvariantResult::id)).contains(InvariantId.S3_1);
+        assertThat(cured.invariants().stream().map(InvariantResult::id))
+            .as("CR-1, its own id: the no-catch-up rule is FR-607 and not a reconciliation")
+            .contains(InvariantId.CR_1)
+            .doesNotContain(InvariantId.S3_1);
         assertThat(cured.breaches()).isEmpty();
         assertThat(cured.toSuspense().isZero()).isTrue();
         assertThat(cured.incomeSuppressed()).isFalse();

@@ -7,6 +7,8 @@ import static com.crisil.eir.calc.refcases.ReferenceCaseFixtures.periodicPercent
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.crisil.eir.calc.amort.Stage3Decomposition;
+import com.crisil.eir.calc.amort.Stage3Reconciliation;
+import com.crisil.eir.calc.amort.SuspenseLedger;
 import com.crisil.eir.domain.InvariantId;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Money;
@@ -173,7 +175,46 @@ class Case05Stage3SuppressionTest {
             case1.eir(), case1.eir(), grossCarryingAmount(), grossCarryingAmount());
 
         assertThat(results).allMatch(InvariantResult::satisfied);
-        assertThat(results).allMatch(result -> result.id() == InvariantId.S3_1);
+        assertThat(results.stream().map(InvariantResult::id))
+            .as("SG-1 for the rate and SG-2 for the balance; both used to be S3_1, one of them"
+                + " with a rate deviation under an id whose other results carried money")
+            .containsExactly(InvariantId.SG_1, InvariantId.SG_2);
+    }
+
+    @Test
+    @DisplayName("control S3-1 reconciles all four quantities the case says the engine maintains")
+    void fourWayReconciliation() {
+        // The case's own words: "Control S3-1 reconciles all four every period." Until now S3-1
+        // was published from four places and none of them was that, because the four quantities
+        // do not live in one type — Stage3Decomposition can see the accrual and the recognised
+        // amount and cannot see the carrying-amount ledger or the suspense balance.
+        //
+        // The scenario is the one the case describes: the borrower is not paying, which is why
+        // the contractual interest goes to suspense at all. So no cash arrives, and the closing
+        // gross carrying amount is the opening balance plus the EIR accrual — derived here from
+        // the case's own figures rather than read off case 1's row 13, whose closing balance
+        // reflects an instalment this borrower did not pay.
+        Money opening = grossCarryingAmount();
+        Stage3Decomposition period = stage3();
+        Money closing = opening.plus(period.grossBasisInterest());
+        Money nil = Money.zero(Money.INR);
+
+        SuspenseLedger suspense = SuspenseLedger.forPeriod(
+            nil, contractualInterestBilled(), nil, nil);
+        assertThat(paise(suspense.closingBalance()))
+            .as("quantity 3: interest-in-suspense, a balance and not a memorandum figure")
+            .isEqualByComparingTo(bd("5298.16"));
+
+        Stage3Reconciliation reconciliation = Stage3Reconciliation.over(
+            opening, closing, nil, nil, contractualInterestBilled(), period, suspense);
+
+        assertThat(reconciliation.reconciles())
+            .as("S3-1: %s", reconciliation.fourWay().detail())
+            .isTrue();
+        assertThat(reconciliation.fourWay().id()).isEqualTo(InvariantId.S3_1);
+        assertThat(reconciliation.residualsByLeg())
+            .as("every leg exactly nil, not inside a tolerance")
+            .allSatisfy(residual -> assertThat(residual.signum()).isZero());
     }
 
     @Test

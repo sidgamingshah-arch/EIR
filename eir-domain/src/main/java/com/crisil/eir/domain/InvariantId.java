@@ -37,7 +37,34 @@ public enum InvariantId {
     /** Stage 3: net-basis interest + ECL discount unwind = gross-basis interest. */
     ST_2("net interest + ECL unwind = gross interest"),
 
-    /** Stage 3: gross roll-forward, shadow unwind, suspense and recognised income reconcile. */
+    /**
+     * Stage 3: gross roll-forward, shadow unwind, suspense ledger and recognised income
+     * reconcile, every period (FR-605, 03 § 7.3).
+     *
+     * <p><b>Four legs, one result.</b> The quantities come from independent sources — the
+     * carrying-amount ledger, the EIR accrual, and the suspense ledger — and the control is that
+     * they agree:
+     *
+     * <ol>
+     *   <li>closing GCA = opening GCA + the EIR accrual − cash applied;</li>
+     *   <li>closing suspense = opening suspense + charged − recovered − written off;</li>
+     *   <li>what was charged to suspense is what was billed and not recognised;</li>
+     *   <li>cash applied to interest is exactly what came out of suspense.</li>
+     * </ol>
+     *
+     * <p>Published as <em>one</em> result covering all four, whose deviation is the total
+     * absolute residual and whose detail names each failing leg. Not four results under one id:
+     * {@link InvariantResult#conjunction} keeps only the first breach's deviation among results
+     * sharing an id, so four would report one residual and silently drop three — and a
+     * reconciliation that reports one of its four breaks is worse than one that reports none,
+     * because it looks like it has been read.
+     *
+     * <p>This id previously carried four unrelated claims, none of them the reconciliation above:
+     * a two-way split of billed interest that the lines constructing it made tautological, the
+     * cure no-catch-up assertion (now {@link #CR_1}), and the two halves of staging-is-not-an-EIR
+     * -event (now {@link #SG_1} and {@link #SG_2}). One of those four carried a <em>rate</em>
+     * deviation and the rest carried money, under a single id.
+     */
     S3_1("Stage 3 four-way reconciliation"),
 
     /** Stage 3: recognised interest income is nil. */
@@ -51,6 +78,48 @@ public enum InvariantId {
 
     /** The credit-adjusted EIR is unchanged across a cure. */
     POCI_1("credit-adjusted EIR retained on cure"),
+
+    /**
+     * A stage migration left the EIR alone (FR-610, 03 § 7.4).
+     *
+     * <p>Staging is not an EIR event. The deviation is a <b>rate</b> — the periodic difference —
+     * which is why this cannot share an id with {@link #SG_2} below, whose deviation is a money
+     * amount, and why neither could stay under {@link #S3_1}, whose deviation is a residual in
+     * currency. A rate breach of 0.0001 and a balance breach of 0.0001 are not comparable
+     * quantities, and a close that sums or sorts deviations across them is reading noise.
+     *
+     * <p>Kept as an explicit assertion rather than trusted, because a pipeline routing staging
+     * through a general event handler can reach the same code path as a reset and pick up a
+     * re-solve on the way past. That is the failure this exists to catch: the rate moving because
+     * of how the event was dispatched, not because anything decided it should.
+     */
+    SG_1("staging left the EIR unchanged"),
+
+    /**
+     * A stage migration left the gross carrying amount alone (FR-610, 03 § 7.4).
+     *
+     * <p>The balance half of the same requirement, separated for the reason given on
+     * {@link #SG_1}: this deviation is money. The failure it catches is a staged-down balance —
+     * net of allowance — leaking into the carrying-amount ledger, which would then roll forward
+     * on the wrong base for the rest of the contract's life and never re-converge.
+     */
+    SG_2("staging left the gross carrying amount unchanged"),
+
+    /**
+     * Recognition resumes prospectively on cure, with no catch-up (FR-607, 03 § 7.4).
+     *
+     * <p>The cure period recognises exactly its own gross-basis interest and nothing more.
+     * Booking a catch-up would recognise income that was correctly never recognised — the
+     * suppression was the right answer at the time, so reversing it later restates a period that
+     * was not wrong.
+     *
+     * <p>Asserted rather than assumed because the catch-up is the tempting implementation. The
+     * suspense balance is sitting there, the borrower has cured, and crediting it to income
+     * reads as the account being made whole. It is not: the balance stays on the suspense ledger
+     * until it is recovered in cash or written off, and neither of those is a period-of-cure
+     * event.
+     */
+    CR_1("cure recognises prospectively, with no catch-up"),
 
     /** No discontinued hedge without an active basis-adjustment amortisation schedule. */
     HB_1("discontinued hedge has amortisation schedule"),

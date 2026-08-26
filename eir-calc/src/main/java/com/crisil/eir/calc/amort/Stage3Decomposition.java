@@ -61,7 +61,8 @@ import java.util.Objects;
  * @param recognisedIncome   nil in Stage 3; the gross-basis figure otherwise
  * @param toSuspense         contractual interest billed but not recognised
  * @param stage              the stage the period was in
- * @param invariants         ST-2 always; S3-2 and S3-1 where recognition is suppressed
+ * @param invariants         ST-2 always; S3-2 where recognition is suppressed. S3-1 is not
+ *                           here: it reconciles four quantities and this type can see two
  */
 public record Stage3Decomposition(
     Money grossBasisInterest,
@@ -196,12 +197,15 @@ public record Stage3Decomposition(
         invariants.add(stageTwoIdentity(grossInterest, netInterest, unwindAmount));
         if (suppressed) {
             invariants.add(nilRecognition(recognised));
-            invariants.add(InvariantResult.ofMoney(
-                InvariantId.S3_1,
-                "Stage 3 billed interest splits into recognised income and suspense",
-                contractualInterestBilled,
-                recognised.plus(suspense)));
         }
+        // No S3-1 here, and its absence is deliberate. This method used to publish one, asserting
+        // that billed interest splits into recognised income and suspense — three lines below the
+        // two lines that construct exactly that split, with recognised at zero and suspense set to
+        // the billed amount. It could not fail. S3-1 is a reconciliation of four quantities and
+        // this type can see two of them: the carrying-amount ledger and the suspense balance are
+        // not in scope here, which is why what got published under the id was whatever could be
+        // computed from what was. It now has one publication site, Stage3Reconciliation, at the
+        // level where all four are in view.
         return new Stage3Decomposition(grossInterest, netInterest, unwindAmount, recognised,
             suspense, stage, accrualExponent, invariants);
     }
@@ -217,8 +221,14 @@ public record Stage3Decomposition(
      * The EIR is unchanged throughout, because staging never was an EIR event
      * (section 7.4).
      *
-     * <p>The recorded S3-1 result is the assertion that no catch-up crept in: the
+     * <p>The recorded CR-1 result is the assertion that no catch-up crept in: the
      * cure period recognises exactly its own gross-basis interest and nothing more.
+     *
+     * <p>Note what a cure does <em>not</em> do to the suspense ledger: nothing. The balance
+     * carries forward intact — see {@link SuspenseLedger#onCure} — and leaves only on recovery in
+     * cash or write-off. Releasing it to income on cure is the tempting implementation precisely
+     * because the balance is sitting there when the borrower recovers, and it is the thing FR-607
+     * forbids.
      *
      * @throws IllegalArgumentException if the cured stage is still Stage 3
      */
@@ -237,8 +247,9 @@ public record Stage3Decomposition(
             forPeriod(grossCarryingAmount, allowance, eir, contractualInterestBilled, curedStage);
         List<InvariantResult> invariants = new ArrayList<>(cured.invariants());
         invariants.add(InvariantResult.ofMoney(
-            InvariantId.S3_1,
-            "cure recognises the period's gross-basis interest only, with no catch-up for suppressed periods",
+            InvariantId.CR_1,
+            "cure recognises the period's gross-basis interest only, with no catch-up for"
+                + " suppressed periods",
             cured.grossBasisInterest(),
             cured.recognisedIncome()));
         return new Stage3Decomposition(
@@ -290,21 +301,30 @@ public record Stage3Decomposition(
      * <p>Kept as an explicit check for pipelines that route staging through a
      * general event handler, where a stage change can reach the same code path as
      * a reset and pick up a re-solve on the way past.
+     *
+     * <p>Two results, under two ids, and that is the point. The rate claim carries
+     * {@link InvariantId#SG_1} and a <em>rate</em> deviation; the balance claim carries
+     * {@link InvariantId#SG_2} and a money one. Both previously carried {@code S3_1}, together
+     * with two other claims, so a close aggregating S3-1 deviations was adding a periodic rate
+     * difference to rupees — and {@link InvariantResult#conjunction} keeps only the first
+     * breach's deviation among results sharing an id, so of the four claims at most one figure
+     * ever surfaced.
      */
     public static List<InvariantResult> stagingIsNotAnEirEvent(
         Rate eirBefore, Rate eirAfter, Money gcaBefore, Money gcaAfter) {
         List<InvariantResult> results = new ArrayList<>();
         String rateDetail = "EIR across a stage migration: " + eirBefore.periodic().toPlainString();
         if (InvariantChecks.bitIdentical(eirBefore, eirAfter)) {
-            results.add(InvariantResult.pass(InvariantId.S3_1, rateDetail));
+            results.add(InvariantResult.pass(InvariantId.SG_1, rateDetail));
         } else {
             results.add(InvariantResult.fail(
-                InvariantId.S3_1,
+                InvariantId.SG_1,
                 rateDetail + " became " + eirAfter.periodic().toPlainString(),
                 eirAfter.periodic().subtract(eirBefore.periodic())));
         }
         results.add(InvariantResult.ofMoney(
-            InvariantId.S3_1, "gross carrying amount across a stage migration", gcaBefore, gcaAfter));
+            InvariantId.SG_2, "gross carrying amount across a stage migration",
+            gcaBefore, gcaAfter));
         return List.copyOf(results);
     }
 
