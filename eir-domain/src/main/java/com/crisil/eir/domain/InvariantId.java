@@ -387,7 +387,30 @@ public enum InvariantId {
      * normal state of one in flight; what the control catches is a cohort being <em>measured</em>
      * on a rate nobody signed.
      */
-    DE_1("every deemed EIR has an approved derivation");
+    DE_1("every deemed EIR has an approved derivation"),
+
+    /**
+     * No day-1 below-market difference is taken to a destination without an approved policy
+     * position behind it (FR-909, reference § 5 item 11, reference § 4 Silence 6).
+     *
+     * <p>ACPIR 19 and 20 require fair value at initial recognition and say <em>nothing</em> about
+     * what to do with the resulting day-1 difference. The reference register carries that as
+     * Silence 6 at {@code [MED-HIGH]}, and it is not theoretical: for a public sector bank the
+     * staff housing book is large enough that the adjustment is material. The reference's own
+     * position on staff loans is that the shortfall is employee compensation and not a lending
+     * loss — but that is a reading, and where the standard is silent the entity closes it by
+     * Board-approved policy.
+     *
+     * <p>So the destination is data, not a default, and this is the assertion that it was chosen
+     * rather than assumed. A difference booked to an operating expense because that is where the
+     * code happened to send it is the failure: it is a policy decision taken by an implementation
+     * detail, on a figure large enough to move a reported result.
+     *
+     * <p>Deviation is the count of originations whose destination is unnamed or rests on a policy
+     * version not in force on the origination date. Reported rather than refused, because an
+     * unresolved position is the real state of a silence still with the ACPIR 57 sub-committee.
+     */
+    BM_1("no day-1 below-market difference without an approved destination");
 
     private final String statement;
 

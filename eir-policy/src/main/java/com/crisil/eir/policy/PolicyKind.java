@@ -50,7 +50,27 @@ public enum PolicyKind {
     /**
      * Commitment-fee drawdown-probability thresholds, per product. FR-204.
      */
-    COMMITMENT_THRESHOLD;
+    COMMITMENT_THRESHOLD,
+
+    /**
+     * A Board position closing a place where ACPIR is silent — the thirty-three of
+     * <a href="../../../../../../../../docs/reference/acpir-2026-eir-application-reference.md">
+     * reference § 9</a> that 08 Phase 0 makes its exit gate.
+     *
+     * <p>Distinct from every other kind here, and the distinction is worth stating: the others
+     * configure a rule the standard supplies. This one <em>supplies the rule</em>, because the
+     * standard does not. Silence 6 — what happens to a day-1 below-market difference — is the
+     * first one to need a version behind it in code, and there was no kind that could carry it;
+     * a position was previously representable only by borrowing a kind whose makers were
+     * deciding something else.
+     *
+     * <p>Versioned for a reason the others do not share. A position taken in 2027 on a silence
+     * the ACPIR 57 sub-committee later fills is not wrong retrospectively — it was the
+     * defensible reading at the time — and a closed period has to replay against it (DT-1). So
+     * the position supersedes rather than being corrected, and the periods it governed keep
+     * resolving to it.
+     */
+    POLICY_POSITION;
 
     /**
      * Whether a change of this kind moves already-recognised income and therefore cannot go
