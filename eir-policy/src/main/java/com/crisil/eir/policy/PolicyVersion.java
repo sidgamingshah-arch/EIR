@@ -1,5 +1,6 @@
 package com.crisil.eir.policy;
 
+import com.crisil.eir.domain.FourEyes;
 import java.time.LocalDate;
 import java.util.Objects;
 
@@ -52,14 +53,16 @@ public record PolicyVersion(
         // dropped the normalisation and voided the guarantee stated above for the one control
         // ADR-0008 makes load-bearing. Case is folded as well as stripped, because an identity
         // directory that treats "Policy.Author" and "policy.author" as two people is not one
-        // this control can rely on.
+        // this control can rely on. The comparison itself now lives in FourEyes, because three
+        // other places stated the same rule and one of them — RoutingTableVersion, the type this
+        // record's javadoc says it generalises — answered it differently.
         id = requireText(id, "id",
             "a policy version needs an identifier to be cited by");
         description = requireText(description, "description",
             "an unexplained version is not an audit trail");
         maker = requireText(maker, "maker", "a version with no maker has no author");
         checker = checker == null || checker.isBlank() ? null : checker.strip();
-        if (checker != null && maker.equalsIgnoreCase(checker)) {
+        if (FourEyes.isSelfApproval(maker, checker)) {
             throw new IllegalArgumentException(
                 "policy version " + id + " has maker and checker both '" + maker + "'."
                     + " Self-approval is not a defective approval, it is the absence of one");
@@ -180,11 +183,6 @@ public record PolicyVersion(
     }
 
     private static String requireText(String value, String field, String why) {
-        Objects.requireNonNull(value, field);
-        String stripped = value.strip();
-        if (stripped.isEmpty()) {
-            throw new IllegalArgumentException(field + " must not be blank: " + why);
-        }
-        return stripped;
+        return FourEyes.requireIdentity(value, field, why);
     }
 }

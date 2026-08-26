@@ -1,6 +1,7 @@
 package com.crisil.eir.calc.routing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.crisil.eir.domain.Mechanism;
@@ -185,6 +186,35 @@ class RoutingTableTest {
             "same-person", "same-person", LocalDate.of(2027, 1, 1)))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("maker and checker must differ");
+    }
+
+    @Test
+    @DisplayName("a case or whitespace variant of the maker is still the maker")
+    void fourEyesIsCaseAndWhitespaceInsensitive() {
+        // The defect this pins. The guard was a raw equals(), so every one of these constructed
+        // successfully — a routing table approved by its own maker under a different
+        // capitalisation. That matters more here than almost anywhere: ADR-0006 makes the routing
+        // table the artefact that changes how every event is treated without a code deploy, and
+        // four eyes is the only thing standing in front of it.
+        //
+        // It was also inconsistent with the database that stores the row. The DDL's four-eyes
+        // constraint compares lower(btrim(...)), so PostgreSQL rejects exactly the rows this type
+        // used to accept — a version could be in force in the engine and unstorable.
+        for (String variant : new String[] {
+            "Same-Person", "SAME-PERSON", "same-person ", " same-person"}) {
+            assertThatThrownBy(() -> new RoutingTableVersion(
+                "RT-CASE-VARIANT", "no", LocalDate.of(2027, 1, 1),
+                "same-person", variant, LocalDate.of(2027, 1, 1)))
+                .as("checker '%s' against maker 'same-person'", variant)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("maker and checker must differ");
+        }
+
+        // And two genuinely different people still construct.
+        assertThatCode(() -> new RoutingTableVersion(
+            "RT-OK", "yes", LocalDate.of(2027, 1, 1),
+            "product.control", "accounting.policy.owner", LocalDate.of(2027, 1, 1)))
+            .doesNotThrowAnyException();
     }
 
     @Test

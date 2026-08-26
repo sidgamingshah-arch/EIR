@@ -1,5 +1,7 @@
 package com.crisil.eir.policy.approval;
 
+import com.crisil.eir.domain.FourEyes;
+
 import com.crisil.eir.policy.PolicyVersion;
 import java.time.LocalDate;
 import java.util.Locale;
@@ -82,14 +84,18 @@ public record ApprovalRecord(String checker, LocalDate checkedOn, String note) {
     /**
      * The comparison form of an identity: stripped and case-folded to {@link Locale#ROOT}.
      *
+     * <p>Delegates to {@link FourEyes#identityKey}, where this reasoning was moved so that
+     * {@code eir-calc} could share it — {@code RoutingTableVersion} stated the same rule and
+     * answered it differently. Retained as a public method here because callers and tests name it,
+     * and because this is where a reader of the approval logic looks for it.
+     *
      * <p>{@code Locale.ROOT} rather than the default locale on purpose. Turkish lower-cases
      * {@code "I"} to dotless {@code "ı"}, so a run whose JVM locale differed from the one a
      * version was approved under would compare the same two identities differently — and a
      * control whose answer depends on the host's locale is not a control.
      */
     public static String identityKey(String identity) {
-        Objects.requireNonNull(identity, "identity");
-        return identity.strip().toLowerCase(Locale.ROOT);
+        return FourEyes.identityKey(identity);
     }
 
     /** A one-line audit sentence naming the approval. */

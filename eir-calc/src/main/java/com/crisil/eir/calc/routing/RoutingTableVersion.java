@@ -1,5 +1,6 @@
 package com.crisil.eir.calc.routing;
 
+import com.crisil.eir.domain.FourEyes;
 import java.time.LocalDate;
 import java.util.Objects;
 
@@ -53,7 +54,13 @@ public record RoutingTableVersion(
         checker = requireText(checker, "checker");
         Objects.requireNonNull(effectiveFrom, "effectiveFrom");
         Objects.requireNonNull(approvedOn, "approvedOn");
-        if (maker.equals(checker)) {
+        // Case-folded as well as stripped, through the one comparison every four-eyes control in
+        // the codebase now shares. This guard used to be a raw equals(), which made it the ONLY
+        // one of four statements of the rule that accepted "Policy.Author" approving
+        // "policy.author" — while the DDL column it is stored in rejects exactly that row. A
+        // routing table is the artefact ADR-0006 rests on: it changes how every event is treated,
+        // and it could be self-approved by capitalising a letter.
+        if (FourEyes.isSelfApproval(maker, checker)) {
             throw new IllegalArgumentException(
                 "maker and checker must differ; a routing table approved by its own maker is not approved: " + maker);
         }
@@ -87,11 +94,6 @@ public record RoutingTableVersion(
     }
 
     private static String requireText(String value, String field) {
-        Objects.requireNonNull(value, field);
-        String trimmed = value.strip();
-        if (trimmed.isEmpty()) {
-            throw new IllegalArgumentException(field + " must not be blank");
-        }
-        return trimmed;
+        return FourEyes.requireIdentity(value, field, "a routing table version cites it");
     }
 }
