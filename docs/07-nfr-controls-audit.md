@@ -75,8 +75,8 @@ from the [functional spec](02-functional-spec.md) and audit workpapers.
 | C-01 | **The identity check.** EIR interest = contractual interest ± net fee amortisation ± catch-ups, at every level of aggregation | Every period, every level |
 | C-02 | **Unamortised balance roll-forward.** Opening + additions − amortisation − derecognitions = closing, per product, tied to the GL | Every period |
 | C-03 | **Penal charge exclusion assertion.** Positive confirmation that no `EXCLUDED_BY_DIRECTION` amount entered any EIR stream or the GCA (invariant PC-1) | Every period |
-| C-04 | **Stage 3 suppression reconciliation.** Shadow unwind computed, income suppressed, suspense movement explained (invariants S3-1, S3-2, ST-2) | Every period |
-| C-05 | **Pre-floor / post-floor duality.** Pre-floor ECL retained and reported, not overwritten (invariant PF-1) | Every period |
+| C-04 | **Stage 3 suppression reconciliation.** Shadow unwind computed, income suppressed, suspense movement explained — the four-way reconciliation of GCA roll-forward, unwind, suspense ledger and recognised income (invariants S3-1, S3-2, ST-2), with cure and pool-level suspension under the same control (CR-1, PL-1, PL-2) | Every period |
+| C-05 | **Pre-floor / post-floor duality.** Pre-floor ECL retained and reported, not overwritten, and the reported figure is the greater of the two (invariant PF-1); Stage 3 floored at account level, never pooled (invariant PF-2, ACPIR 90) | Every period |
 | C-06 | **Hedge basis adjustment.** No discontinued hedge without an active amortisation schedule; designated-risk-only (invariant HB-1) | Every period |
 | C-07 | **Hedging cost exclusion assertion.** No swap or hedge cost in any EIR stream (invariant HB-2) | Every period |
 | C-08 | **Model inventory registration.** EIR computation registered, tiered, documented, independently validated before implementation | On change; annual review |

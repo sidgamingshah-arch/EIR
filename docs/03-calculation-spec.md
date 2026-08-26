@@ -897,10 +897,14 @@ period close.
 | RT-1 | Every routed event resolves to a routing table version in force on its date ([ADR-0006](adr/0006-configurable-event-routing.md)) | Event routing |
 | RS-1 | Every fee code in the rule set has a per-code default in force (FR-201) | Rule-set approval |
 | **ST-2** | **Stage 3: net-basis interest + ECL unwind = gross-basis interest**, plus the decomposition's accrual length and interest against the ledger row it decomposes | Every period |
-| S3-1 | Stage 3: GCA roll-forward, shadow unwind, suspense ledger and recognised income all reconcile | Every period |
+| **S3-1** | **Stage 3 four-way reconciliation**, as one result over four legs: closing GCA = opening + EIR accrual − cash applied; closing suspense = opening + charged − recovered − written off; what was charged to suspense is what was billed and not recognised; cash applied to interest = suspense recovered. Deviation is the total **absolute** residual | Every period |
 | S3-2 | Recognised interest income on a Stage 3 contract = 0 | Every period |
+| SG-1 | A stage migration left the EIR unchanged — staging is not an EIR event (FR-610). Deviation is a **rate** | Event |
+| SG-2 | A stage migration left the gross carrying amount unchanged (FR-610) | Event |
+| CR-1 | The cure period recognises its own gross-basis interest and nothing more — no catch-up for suppressed periods (FR-607) | Event |
 | **PC-1** | **No `EXCLUDED_BY_DIRECTION` posting entered any EIR stream or the GCA** — one result per period, the conjunction over every screening route that applies | Every period |
-| PF-1 | Pre-floor ECL retained and reported alongside post-floor | Period close |
+| PF-1 | Pre-floor ECL retained: the reported provision is the greater of the EIR-derived figure and the ACPIR 90 floor, and both survive | Period close |
+| PF-2 | A Stage 3 exposure is floored at **account level**, never on a portfolio basis (ACPIR 90) | Period close |
 | POCI-1 | Credit-adjusted EIR unchanged across a cure | Event |
 | HB-1 | No discontinued hedge relationship without an active basis-adjustment amortisation schedule | Every period |
 | HB-2 | No hedging or swap cost present in any EIR cash flow stream | Every period |
@@ -908,6 +912,8 @@ period close.
 | SL-2 | Σ journal debits = Σ journal credits, per run and per contract | Every posting |
 | DT-1 | Re-run of a closed period reproduces published figures bit-identically | Nightly replay |
 | TG-1 | Every Tier 3 population has a current, in-date equivalence test on file | Annual |
+| PL-1 | No exposure has income suspended except under a pool definition in force on the date (FR-608) | Every period |
+| PL-2 | Only portfolio-managed products — cards and KCC — are suspended at pool level (FR-608) | Pool approval |
 
 **On ST-2 being an identity, and what to do about it.** The first limb is a *tautology by
 construction* and cannot fail. The engine computes one figure — the gross-basis interest the Stage
@@ -929,6 +935,34 @@ two independent derivations of the accrual length: the ledger's comes from the f
 and the time convention, the decomposition's from its caller. A disagreement is a broken first period
 or a mis-selected day count — precisely the defect the identities cannot see. The accrual length is
 compared before the interest, because it is the cause and the other is the effect.
+
+**On S3-1 having been four claims and none of them itself.** Worth recording next to the ST-2 and
+PC-1 notes below, because it is the same defect for the third time and the mechanism is identical.
+S3-1's statement is a four-way reconciliation. It was published from four places and not one of
+them was one:
+
+| What was published under `S3_1` | What it actually was |
+|---|---|
+| Billed interest splits into recognised income and suspense | A tautology — asserted three lines below the two that construct the split |
+| The cure period recognises no catch-up | FR-607, now **CR-1** |
+| The EIR is unchanged across a stage migration | FR-610, now **SG-1** — with a *rate* deviation |
+| The GCA is unchanged across the same migration | FR-610, now **SG-2** |
+
+Each of the last three is a real control and each was correctly computed. What was missing was the
+one the id names, and it was missing for a structural reason: the four quantities do not live in one
+place. `Stage3Decomposition` can see the EIR accrual and the recognised amount and cannot see the
+carrying-amount ledger or the suspense balance — so a reconciliation of all four was not something
+it could assert, and what it asserted instead were the claims it could. Interest-in-suspense being a
+single `Money` field rather than a ledger (FR-604) is the same gap seen from the other side.
+
+Two consequences followed from the sharing, both of which `conjunction` makes unavoidable. It keeps
+only the **first** breach's deviation among results sharing an id, so of four claims at most one
+figure ever surfaced. And one of the four carried a **periodic rate** while the rest carried rupees,
+so a close aggregating S3-1 deviations was adding quantities that are not comparable. The remedy in
+every case has been the same: one id per claim, and where a claim genuinely has several legs — S3-1
+now, PC-1 below — **one result** covering all of them, with the deviation aggregated deliberately.
+S3-1 sums the legs' residuals in *absolute* terms, because signed residuals let two breaks in
+opposite directions net to a reconciled period.
 
 **On PC-1's arity.** A projection can be screened along more than one route at once: the
 classified-fee route always applies, and `LMS_AUTHORITATIVE` adds the billed-schedule attestation on

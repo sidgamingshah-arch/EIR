@@ -163,22 +163,63 @@ execution the verification and says plainly that a zero exit from `psql` is not 
 
 ---
 
-## Phase 3 — Impairment interaction and India divergence (Jan–Mar 2027)
+## Phase 3 — Impairment interaction and India divergence (Jan–Mar 2027) — **CODE DELIVERED**
 
 The part no off-the-shelf IFRS 9 sub-ledger provides.
 
-| Workstream | Deliverable | Requirements |
-|---|---|---|
-| Stage 3 suppression | Income suppressed; shadow unwind computed; four-way reconciliation | FR-602…606 |
-| Suspense ledger | First-class ledger object, not a memorandum | FR-604 |
-| Cure | Prospective resumption, no catch-up | FR-607 |
-| Pool-level suspension | For cards and KCC, with approved pool definitions | FR-608 |
-| Floor duality | Pre-floor ECL retained alongside post-floor | FR-609 |
-| POCI | Credit-adjusted EIR; no day-1 allowance; retained on cure | FR-407…408, FR-110 |
+| Workstream | Deliverable | Requirements | State |
+|---|---|---|---|
+| Stage 3 suppression | Income suppressed; shadow unwind computed; four-way reconciliation | FR-602…606 | `Stage3Decomposition` shipped in Phase 1; the **four-way reconciliation was the gap** — see below |
+| Suspense ledger | First-class ledger object, not a memorandum | FR-604 | `amort/SuspenseLedger` — an opening balance and three movements, with no release-to-income on cure |
+| Cure | Prospective resumption, no catch-up | FR-607 | `Stage3Decomposition.onCure` + `SuspenseLedger.onCure`, asserted by **CR-1** |
+| Pool-level suspension | For cards and KCC, with approved pool definitions | FR-608 | `policy/pool` — the definition carries a `POOL_DEFINITION` version, asserted by **PL-1** and **PL-2** |
+| Floor duality | Pre-floor ECL retained alongside post-floor | FR-609 | `amort/FloorApplication` — **PF-1** finally has an evaluator, plus **PF-2** for the ACPIR 90 basis rule |
+| POCI | Credit-adjusted EIR; no day-1 allowance; retained on cure | FR-407…408, FR-110 | `amort/PociAmortisation`, shipped in Phase 1; Case 6 green |
 
 **Exit gate:** [Case 5](reference-cases/case-05-stage-3-acpir-suppression.md) and
 [Case 6](reference-cases/case-06-poci-credit-adjusted-eir.md) pass; invariants ST-2, S3-1, S3-2,
 PF-1, POCI-1 assert green on a full synthetic portfolio.
+
+**Exit gate: met in code, with one honest reading of the last clause.** Both reference cases pass —
+Case 5 now includes the four-way reconciliation its own text calls for ("Control S3-1 reconciles all
+four every period"), which it had never asserted. ST-2, S3-2, S3-1 and PF-1/PF-2 are swept over
+generated balances, allowances, rates and part payments. **POCI-1 is not swept, and should not be.**
+`PociAmortisation.afterCure` takes no rate parameter, so the rate cannot move across a cure by
+construction; a generated property over it would assert what the signature already guarantees. That
+is the third tautology this programme has found wearing an invariant id, and the pattern is now
+documented in [03 § 9](03-calculation-spec.md#9-invariants). POCI-1 is asserted where it can
+actually fail — `assertRateRetained` at a boundary where the rate has round-tripped through
+persistence or a generic event handler that re-solves by default.
+
+**The finding worth carrying forward: S3-1 was four claims and none of them was S3-1.** Its
+statement is "Stage 3 four-way reconciliation" and it was published from four places — a tautology,
+FR-607's no-catch-up rule, and both halves of FR-610's staging-is-not-an-EIR-event, one of them
+carrying a *rate* deviation under an id whose others carried rupees. Each was a real control,
+correctly computed. What was absent was the one the id names, and it was absent structurally: the
+four quantities do not live in one place. `Stage3Decomposition` can see the EIR accrual and the
+recognised amount and cannot see the carrying-amount ledger or the suspense balance, so what it
+published under the id was whatever it could compute from what was in scope. Interest-in-suspense
+being a single field rather than a ledger (FR-604) is the same gap from the other side — which is
+why FR-604 and FR-605 turned out to be one change and not two.
+
+This is the same defect as Phase 2's `DT_1` borrowing and the `PC-1` arity problem, and the
+mechanism is identical every time: `InvariantResult.conjunction` keeps only the **first** breach's
+deviation among results sharing an id. **A computed control nobody asserts is indistinguishable
+from one that does not exist, and a control asserting something other than its own statement is
+worse — it reads as coverage.**
+
+**What "delivered" does not mean here.** Three qualifications:
+
+- **FR-608's approved artefact has no table.** [04](04-data-model.md) has a `POOL`, and it is a
+  *different* pool: 04 § 2.10's Tier 2 measurement cohort, with homogeneity criteria, a pool EIR
+  and back-testing (FR-409). A suspension pool is a product book approved for income suppression.
+  They share a word and nothing else, and only one of them is in the schema.
+- **The stage and allowance inputs are still consumed, not produced** (FR-601), which is correct per
+  [00 § 4](00-product-vision.md#4-scope) — but it means nothing here has been exercised against a
+  real ECL feed, only against generated and reference-case values.
+- **Still no orchestration layer.** `eir-application`, `eir-batch`, `eir-gl`, `eir-api` and
+  `eir-app` do not exist. There is no run that walks a portfolio calling any of this, so
+  "reconciled every period" is a property of the types rather than of a close.
 
 ---
 
