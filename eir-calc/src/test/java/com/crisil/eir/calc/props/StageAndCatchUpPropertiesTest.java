@@ -8,6 +8,10 @@ import com.crisil.eir.calc.amort.CatchUpCalculator;
 import com.crisil.eir.calc.amort.CatchUpResult;
 import com.crisil.eir.calc.amort.InvariantChecks;
 import com.crisil.eir.calc.amort.Stage3Decomposition;
+import com.crisil.eir.calc.amort.SuspenseLedger;
+import com.crisil.eir.calc.amort.Stage3Reconciliation;
+import com.crisil.eir.calc.amort.FloorBasis;
+import com.crisil.eir.calc.amort.FloorApplication;
 import com.crisil.eir.domain.CashFlow;
 import com.crisil.eir.domain.FlowKind;
 import com.crisil.eir.domain.FlowVector;
@@ -278,5 +282,159 @@ class StageAndCatchUpPropertiesTest {
             }
         }
         return null;
+    }
+
+    /**
+     * Invariant S3-1 over generated balances: a period assembled consistently reconciles on all
+     * four legs, exactly.
+     *
+     * <p><b>Why this property is worth its tries</b>, given that reference case 5 already asserts
+     * the four-way on one balance at one allowance ratio. What that case cannot answer is whether
+     * the legs hold as arithmetic or as an artefact of its magnitudes — and legs 1 and 4 are the
+     * two that could plausibly be magnitude-sensitive, because they are the only ones that combine
+     * a balance with a cash amount. A balance near ten billion and a cash receipt of a rupee is
+     * the shape that would expose a leg computed at presentation scale.
+     *
+     * <p>The cash is generated as a fraction of the billed interest and applied to the interest
+     * leg, matched by an equal recovery out of suspense. That matching is the ordinary case rather
+     * than a contrivance: a Stage 3 borrower who pays something has paid interest that was
+     * suspended, and leg 4 is precisely the assertion that the two records of that payment agree.
+     */
+    @Property(tries = 10000, seed = "20270901")
+    void theFourWayReconciliationHoldsForAnyBalanceAndAnyPartPayment(
+            @ForAll @BigRange(min = "0.01", max = "10000000000") @Scale(2) BigDecimal grossAmount,
+            @ForAll @BigRange(min = "0", max = "1") @Scale(6) BigDecimal allowanceFraction,
+            @ForAll @BigRange(min = "0.000000000001", max = "0.05") @Scale(12) BigDecimal rate,
+            @ForAll @BigRange(min = "0", max = "1") @Scale(4) BigDecimal recoveredFraction) {
+        Money gross = Money.inr(grossAmount.toPlainString());
+        Money allowance = gross.times(allowanceFraction);
+        Rate eir = Rate.monthly(rate);
+        // Billed at the same rate on the same balance: the contractual and effective figures
+        // differ in a real contract by the fee amortisation slice, and the legs are indifferent to
+        // that difference, so generating one rate keeps the tries on what the legs turn on.
+        Money billed = gross.times(rate);
+        Money recovered = billed.times(recoveredFraction);
+
+        Stage3Decomposition period = Stage3Decomposition.forPeriod(
+            gross, allowance, eir, billed, Stage.STAGE_3);
+        SuspenseLedger suspense = SuspenseLedger.forPeriod(
+            Money.zero(Money.INR), billed, recovered, Money.zero(Money.INR));
+        Money closing = gross.plus(period.grossBasisInterest()).minus(recovered);
+
+        Stage3Reconciliation reconciliation = Stage3Reconciliation.over(
+            gross, closing, Money.zero(Money.INR), recovered, billed, period, suspense);
+
+        assertThat(reconciliation.reconciles())
+            .as("S3-1 on gross %s, allowance %s, rate %s, recovered %s: %s",
+                gross, allowance, rate, recovered, reconciliation.fourWay().detail())
+            .isTrue();
+        assertThat(reconciliation.fourWay().id()).isEqualTo(InvariantId.S3_1);
+        for (Money residual : reconciliation.residualsByLeg()) {
+            assertThat(residual.signum())
+                .as("exactly nil, not inside a tolerance")
+                .isZero();
+        }
+    }
+
+    /**
+     * A single-leg break is detected at its own size, whatever the balance it sits on.
+     *
+     * <p>The property a reconciliation control actually has to have. Holding on the reconciled
+     * case is the cheap half — a control that returned {@code pass} unconditionally would pass the
+     * property above. This one perturbs the closing balance by a generated amount and requires the
+     * deviation to come back as exactly that amount, which fails for any implementation that
+     * rounds the legs, computes at presentation scale, or reports a count instead of a size.
+     */
+    @Property(tries = 10000, seed = "20270902")
+    void aBrokenLegIsReportedAtItsOwnSize(
+            @ForAll @BigRange(min = "0.01", max = "10000000000") @Scale(2) BigDecimal grossAmount,
+            @ForAll @BigRange(min = "0.000000000001", max = "0.05") @Scale(12) BigDecimal rate,
+            @ForAll @BigRange(min = "0.01", max = "1000000") @Scale(2) BigDecimal breakSize) {
+        Money gross = Money.inr(grossAmount.toPlainString());
+        Money billed = gross.times(rate);
+        Money perturbation = Money.inr(breakSize.toPlainString());
+        Rate eir = Rate.monthly(rate);
+
+        Stage3Decomposition period = Stage3Decomposition.forPeriod(
+            gross, gross.times(new BigDecimal("0.40")), eir, billed, Stage.STAGE_3);
+        Money closing = gross.plus(period.grossBasisInterest()).minus(perturbation);
+
+        Stage3Reconciliation reconciliation = Stage3Reconciliation.over(
+            gross, closing, Money.zero(Money.INR), Money.zero(Money.INR), billed, period,
+            SuspenseLedger.forPeriod(Money.zero(Money.INR), billed,
+                Money.zero(Money.INR), Money.zero(Money.INR)));
+
+        assertThat(reconciliation.reconciles()).isFalse();
+        assertThat(reconciliation.fourWay().deviation())
+            .as("a break of %s on a balance of %s", perturbation, gross)
+            .isEqualByComparingTo(breakSize);
+        assertThat(reconciliation.residualOn(0)).isEqualTo(perturbation.negate());
+    }
+
+    /**
+     * Invariant PF-1 over generated pairs: the reported provision is the greater of the two
+     * figures, and the pre-floor figure comes back untouched.
+     *
+     * <p>Generated independently rather than as a floor derived from the accounting figure,
+     * because the pair a bank actually holds is two numbers from two engines and the interesting
+     * cases are at the crossover — a floor a paise above and a paise below. Independent
+     * generation puts tries on both sides of it and on the equality, which a derived floor would
+     * never reach.
+     */
+    @Property(tries = 10000, seed = "20270903")
+    void theFloorRaisesAndTheAccountingFigureSurvives(
+            @ForAll @BigRange(min = "0", max = "10000000000") @Scale(2) BigDecimal accountingEcl,
+            @ForAll @BigRange(min = "0", max = "10000000000") @Scale(2) BigDecimal floor) {
+        Money accounting = Money.inr(accountingEcl.toPlainString());
+        Money regulatory = Money.inr(floor.toPlainString());
+
+        FloorApplication applied = FloorApplication.apply(
+            accounting, regulatory, FloorBasis.ACCOUNT, Stage.STAGE_3);
+
+        assertThat(applied.accountingEcl())
+            .as("FR-609: the EIR-derived figure is never overwritten")
+            .isEqualTo(accounting);
+        assertThat(applied.reportedProvision().compareTo(accounting) >= 0)
+            .as("a floor raises or does nothing; %s against %s", regulatory, accounting)
+            .isTrue();
+        assertThat(applied.reportedProvision().compareTo(regulatory) >= 0).isTrue();
+        assertThat(applied.reportedProvision())
+            .as("and it is one of the two, not something between them")
+            .isIn(accounting, regulatory);
+        assertThat(applied.flooredBy().isNegative())
+            .as("the divergence is nil or positive, never a negative shortfall")
+            .isFalse();
+        assertThat(applied.invariants().getFirst().satisfied()).isTrue();
+        assertThat(applied.invariants().getFirst().id()).isEqualTo(InvariantId.PF_1);
+    }
+
+    /**
+     * Invariant PF-2 over every stage and basis: the pooled basis is refused in Stage 3 and
+     * permitted everywhere else, and the account basis is permitted everywhere.
+     *
+     * <p>Exhaustive over the cross product rather than generated, since it is six cases, and
+     * asserted as a cross product rather than on the two interesting ones so that adding a stage
+     * or a basis fails here instead of acquiring a permission nobody decided on.
+     */
+    @Property(tries = 100, seed = "20270904")
+    void theBasisRuleIsExhaustiveOverStagesAndBases(
+            @ForAll @BigRange(min = "0.01", max = "10000000000") @Scale(2) BigDecimal provision) {
+        Money reported = Money.inr(provision.toPlainString());
+        for (Stage stage : Stage.values()) {
+            for (FloorBasis basis : FloorBasis.values()) {
+                boolean permitted = basis == FloorBasis.ACCOUNT || stage != Stage.STAGE_3;
+                InvariantResult result =
+                    FloorApplication.basisPermitted(basis, stage, reported);
+                assertThat(result.id()).isEqualTo(InvariantId.PF_2);
+                assertThat(result.satisfied())
+                    .as("%s on a %s basis", stage, basis)
+                    .isEqualTo(permitted);
+                if (!permitted) {
+                    assertThat(result.deviation())
+                        .as("the provision on the wrong basis, which is what has to be restated")
+                        .isEqualByComparingTo(provision);
+                }
+            }
+        }
     }
 }
