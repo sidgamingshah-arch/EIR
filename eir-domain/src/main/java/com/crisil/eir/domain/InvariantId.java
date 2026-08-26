@@ -307,7 +307,56 @@ public enum InvariantId {
      * remedy is to dissolve the pool, and a pool of a million card accounts and a pool of ten
      * term loans are one finding each.
      */
-    PL_2("only portfolio-managed products are suspended at pool level");
+    PL_2("only portfolio-managed products are suspended at pool level"),
+
+    /**
+     * No transition fair value relies on the ACPIR 19 paragraph 19 presumption without a rebuttal
+     * evidence reference (FR-908, 04 § 6).
+     *
+     * <p>ACPIR 19 permits carrying cost to be taken as the best evidence of fair value. It is a
+     * <em>presumption</em>, and applying it requires evidence — a file built across FY27 rather
+     * than assembled at the transition date, which is why 08 Phase 4 makes this the phase's exit
+     * gate. Applied to a whole legacy book with no file behind it, the day-1 valuation becomes
+     * "we kept the numbers we had" wearing the language of a fair value measurement, and the
+     * difference to opening retained earnings comes out at nil because nothing was measured.
+     *
+     * <p>Deviation is the count of contracts claiming the presumption with no evidence named. A
+     * count because the remedy is per contract — each one needs a reference filed or a different
+     * technique — and because there is no money size: the exposures are exactly the ones whose
+     * fair value nobody has established.
+     */
+    TF_1("no paragraph 19 presumption without rebuttal evidence"),
+
+    /**
+     * Legacy migration is prioritised by survival past 31 March 2030, not by size (FR-908,
+     * 08 Phase 4).
+     *
+     * <p>Reconstructing an EIR for a loan maturing in 2029 is wasted effort: ACPIR 21 and 50
+     * require the legacy book on the EIR by 31 March 2030, and an exposure that has run off by
+     * then never needs a reconstructed rate. The failure this catches is the natural
+     * prioritisation — largest cohorts first — which spends the scarce reconstruction capacity on
+     * balances that will have gone.
+     *
+     * <p>Deviation is the count of cohorts surviving the deadline that are queued behind a cohort
+     * that does not. A count, because the remedy is a re-ordering.
+     */
+    LC_1("legacy cohorts prioritised by survival, not size"),
+
+    /**
+     * ACPIR 21 and ACPIR 50 are tracked as two obligations, not one (04 § 6).
+     *
+     * <p>They share a deadline and they are not the same requirement: the loan must come under
+     * the EIR regime (21), and its ECL discounting must migrate from the interim contractual rate
+     * to the EIR (50). A contract can be on the EIR for interest recognition while its ECL is
+     * still discounted at the contractual rate, and that gap is invisible to anything reading a
+     * single migration flag — which is why 04 § 6 gives the discount basis its own table rather
+     * than a column on the contract.
+     *
+     * <p>Deviation is the count of contracts on the EIR for interest whose ECL basis is still
+     * {@code CONTRACTUAL_INTERIM}. Reported before the deadline as the size of the remaining
+     * migration; after it, the same figure is a breach of ACPIR 50.
+     */
+    TM_1("ACPIR 21 and ACPIR 50 migration tracked separately");
 
     private final String statement;
 
