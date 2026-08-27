@@ -370,6 +370,42 @@ class ClosedPeriodImmutabilityTest {
         }
 
         @Test
+        @DisplayName("both totals in this package treat another currency the same way, and disclose it")
+        void multiCurrencyIsAnsweredOnceForThePackage() {
+            // Two totals were written in one package for one kind of question and answered it in
+            // opposite ways: ClosedPeriodImmutability.mutatedAmount skipped a contribution in
+            // another currency, and RestatementRegister.netRestated let Money.plus THROW on the
+            // same condition. A caller could not tell which behaviour to expect from which, and
+            // one of the two made a multi-currency register unreportable in every currency rather
+            // than reportable in each.
+            //
+            // Both filter now. But a restatement dropped from a MATERIALITY figure understates
+            // materiality, so silence is not acceptable either — restatementsOutside names what
+            // was left out, which is what lets a caller state its own population.
+            java.util.Currency usd = java.util.Currency.getInstance("USD");
+            RestatementArtefact inr = restatement(Money.inr("2525.04"), Money.inr("2775.04"));
+            RestatementArtefact foreign = RestatementArtefact.correcting(
+                closedApril(), 202705, "RST-2027-002", INTEREST,
+                Money.of("1000.00", usd), Money.of("1400.00", usd),
+                MID_APRIL, RECORDED, "internal.audit", "financial.controller",
+                "a USD-book posting on the same misclassification");
+            RestatementRegister register = RestatementRegister.empty().with(inr).with(foreign);
+
+            assertThat(register.netRestated(202704, Money.INR))
+                .as("250.00, and it does not throw on the USD artefact — which it used to")
+                .isEqualTo(Money.inr("250.00"));
+            assertThat(register.absoluteRestated(202704, Money.INR))
+                .isEqualTo(Money.inr("250.00"));
+            assertThat(register.restatementsOutside(202704, Money.INR))
+                .as("and the figure it could not include is named, not silently dropped")
+                .containsExactly(foreign);
+            assertThat(register.inCurrency(202704, Money.INR)).containsExactly(inr);
+            assertThat(register.netRestated(202704, usd))
+                .as("reportable in each currency, which is the point of filtering over throwing")
+                .isEqualTo(Money.of("400.00", usd));
+        }
+
+        @Test
         @DisplayName("the correct flow: April keeps its figures, May carries the movement")
         void historyIsNeverRewritten() {
             // 04 § 5 in one test. Business time stays inside April (valid_from 2027-04-15), system

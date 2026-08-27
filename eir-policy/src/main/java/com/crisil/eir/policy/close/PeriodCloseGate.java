@@ -1,9 +1,9 @@
 package com.crisil.eir.policy.close;
 
+import com.crisil.eir.domain.AnywhereOnEarth;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.policy.exception.ExceptionRecord;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -59,13 +59,6 @@ public final class PeriodCloseGate {
      * IST is 20:30 UTC on 31 March, and a false refusal on a timezone boundary is how a hard gate
      * gets argued down to a soft one.
      *
-     * <p>The identical widening, with the same reasoning written out at length, lives in
-     * {@code preview.AnywhereOnEarth}, which is package-private to that package. Duplicated here
-     * as one expression rather than reached for across a package boundary; it belongs in
-     * {@code eir-domain} and is reported as such.
-     */
-    private static final ZoneOffset FIRST_CLOCK_INTO_A_DATE = ZoneOffset.ofHours(14);
-
     private PeriodCloseGate() {
     }
 
@@ -155,9 +148,13 @@ public final class PeriodCloseGate {
         }
         if (request.closedAt() != null) {
             // Conservative: only where no real-world clock could place the instant inside the
-            // period. See FIRST_CLOCK_INTO_A_DATE.
-            Instant endedSomewhere = period.periodEndDate()
-                .plusDays(1).atStartOfDay(FIRST_CLOCK_INTO_A_DATE).toInstant();
+            // The widening lives in eir-domain.AnywhereOnEarth, shared with the activation gate.
+            // It was duplicated here as a local UTC+14 constant with a comment saying it belonged
+            // there; two statements of one rule is this codebase's recurring defect, and the
+            // conservative range must not drift between the gate that admits a policy version and
+            // the gate that closes a period.
+            Instant endedSomewhere =
+                AnywhereOnEarth.earliestInstantOf(period.periodEndDate().plusDays(1));
             if (request.closedAt().isBefore(endedSomewhere)) {
                 refusals.add(new CloseRefusal(CloseGateRefusal.CLOSE_PREDATES_PERIOD_END,
                     "close instant " + request.closedAt() + " is before period "

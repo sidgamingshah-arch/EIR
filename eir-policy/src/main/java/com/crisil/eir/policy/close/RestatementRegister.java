@@ -95,10 +95,49 @@ public final class RestatementRegister {
     public Money netRestated(int periodId, Currency currency) {
         Objects.requireNonNull(currency, "currency");
         Money total = Money.zero(currency);
-        for (RestatementArtefact artefact : correcting(periodId)) {
+        for (RestatementArtefact artefact : inCurrency(periodId, currency)) {
             total = total.plus(artefact.delta());
         }
         return total.atPresentationScale();
+    }
+
+    /**
+     * The restatements of one period denominated in {@code currency}.
+     *
+     * <p><b>Filtered, not thrown on — and the reason is consistency with the other total in this
+     * package.</b> {@code ClosedPeriodImmutability.mutatedAmount} skips a contribution in another
+     * currency, with the argument that a multi-currency book would otherwise make the method
+     * unusable and the count has already recorded the mutation. This method used to let
+     * {@code Money.plus} throw on the same condition, so two totals written in one package for one
+     * kind of question answered it in opposite ways — and a caller could not tell which behaviour
+     * to expect from which.
+     *
+     * <p>Filtering is the answer for both, because throwing from a reporting accessor makes a
+     * multi-currency register unreportable in every currency rather than reportable in each. But
+     * silence is not: a restatement dropped from a materiality figure understates materiality, and
+     * that is the direction that matters here. {@link #restatementsOutside} names what was left
+     * out, so a caller reporting a total can state its own population.
+     */
+    public List<RestatementArtefact> inCurrency(int periodId, Currency currency) {
+        Objects.requireNonNull(currency, "currency");
+        return correcting(periodId).stream()
+            .filter(artefact -> artefact.delta().currency().equals(currency))
+            .toList();
+    }
+
+    /**
+     * The restatements of one period NOT denominated in {@code currency}.
+     *
+     * <p>Published so that neither total in this package drops a figure silently. A caller
+     * presenting {@code netRestated} alongside a non-empty result from this method is presenting a
+     * partial population and can say so; a caller that ignores it has at least been offered the
+     * fact.
+     */
+    public List<RestatementArtefact> restatementsOutside(int periodId, Currency currency) {
+        Objects.requireNonNull(currency, "currency");
+        return correcting(periodId).stream()
+            .filter(artefact -> !artefact.delta().currency().equals(currency))
+            .toList();
     }
 
     /**
@@ -114,7 +153,7 @@ public final class RestatementRegister {
     public Money absoluteRestated(int periodId, Currency currency) {
         Objects.requireNonNull(currency, "currency");
         Money total = Money.zero(currency);
-        for (RestatementArtefact artefact : correcting(periodId)) {
+        for (RestatementArtefact artefact : inCurrency(periodId, currency)) {
             total = total.plus(artefact.delta().abs());
         }
         return total.atPresentationScale();
