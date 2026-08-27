@@ -100,7 +100,16 @@ public final class GlReconciliation {
      * supplied a balance for still surfaces.
      *
      * @param periodId       the accounting period, {@code YYYYMM} per 04 § 2.13
-     * @param bookId         the book being reconciled; every input must be stamped with it
+     * @param bookId         the book being reconciled. Stamped on and checked against the two
+     *                       BALANCE sides. NOT on {@link ExplainedDifference}, which carries no
+     *                       book at all — so an explanation raised against another book's control
+     *                       account is accepted here and applied to this book's difference,
+     *                       silencing a real break. That hole is narrower than it looks now that
+     *                       {@link AccountReconciliation#carriesUnmatchedExplanation()} catches any
+     *                       claim exceeding the difference in gross whatever book it came from;
+     *                       what survives is a same-magnitude explanation belonging elsewhere.
+     *                       Recorded rather than overclaimed: this line previously read "every
+     *                       input must be stamped with it" and two of the three were
      * @param subLedger      contract-level closing balances, from the engine
      * @param glBalances     control account balances, from the general ledger
      * @param explanations   differences with a stated cause; may be empty

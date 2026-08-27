@@ -75,6 +75,73 @@ class GlReconciliationTest {
     }
 
     @Nested
+    @DisplayName("a cancelling set of explanations is caught wherever it is filed")
+    class CancellingExplanations {
+
+        @Test
+        @DisplayName("a cancelling pair on an account that does NOT tie was invisible everywhere")
+        void cancellingPairOnANonTyingAccount() {
+            // The hole review found, reproduced. The FEE account's sub-ledger sums to 53,125.00
+            // (12,500 + 31,250 + 9,375, by hand) against a GL of 53,000.00 — a genuine difference
+            // of 125.00. Filed against it: a real 125.00 timing explanation, plus a +500,000.00
+            // and a −500,000.00 that cancel.
+            //
+            // The signed arithmetic ties: 125 + 500,000 − 500,000 = 125 explained against 125 of
+            // difference, so SL-1 passes and SHOULD pass — nothing about the account's balance is
+            // unaccounted for. But half a million rupees of spurious register entries sat there
+            // with the only trace being explanationCount() == 3, because the register check gated
+            // on the account already agreeing before explanation.
+            List<GlControlAccountBalance> gl = List.of(
+                gl(GCA, "4250000.00"), gl(FEE, "53000.00"), gl(SUSPENSE, "4820.55"));
+            List<ExplainedDifference> explanations = List.of(
+                ExplainedDifference.timing(FEE, Money.inr("125.00"), "late fee batch"),
+                ExplainedDifference.timing(FEE, Money.inr("500000.00"), "spurious"),
+                ExplainedDifference.timing(FEE, Money.inr("-500000.00"), "spurious reversal"));
+
+            GlReconciliation recon =
+                GlReconciliation.of(PERIOD, BOOK, subLedger(), gl, explanations);
+
+            assertThat(recon.tiesToGl().satisfied())
+                .as("the money is accounted for, so SL-1 passes — and must, or its deviation stops"
+                    + " meaning 'money the two books disagree by'")
+                .isTrue();
+            assertThat(recon.unmatchedExplanations())
+                .as("500,125.00 claimed in gross against 125.00 of difference: the register is"
+                    + " where this shows, and it showed nothing before the predicate was widened"
+                    + " from 'the account already agrees' to 'the claims exceed the difference'")
+                .as("all three explanations on the FEE account surface, because the account is"
+                    + " where the register is unmatched and the reader needs the whole set")
+                .hasSize(3)
+                .allSatisfy(explanation ->
+                    assertThat(explanation.accountCode()).isEqualTo(FEE));
+        }
+
+        @Test
+        @DisplayName("legitimate shapes are not flagged: exact, and partial")
+        void legitimateExplanationsAreNotFlagged() {
+            // The complement, without which the test above would pass against an implementation
+            // that flagged every explained account. One explanation equal to the difference, and
+            // one covering part of it, are both ordinary.
+            List<GlControlAccountBalance> gl = List.of(
+                gl(GCA, "4250000.00"), gl(FEE, "53000.00"), gl(SUSPENSE, "4820.55"));
+
+            GlReconciliation exact = GlReconciliation.of(PERIOD, BOOK, subLedger(), gl,
+                List.of(ExplainedDifference.timing(FEE, Money.inr("125.00"), "late fee batch")));
+            assertThat(exact.unmatchedExplanations()).isEmpty();
+            assertThat(exact.tiesToGl().satisfied()).isTrue();
+
+            GlReconciliation partial = GlReconciliation.of(PERIOD, BOOK, subLedger(), gl,
+                List.of(ExplainedDifference.timing(FEE, Money.inr("100.00"), "part of the batch")));
+            assertThat(partial.unmatchedExplanations())
+                .as("100.00 claimed against 125.00 of difference is partial, not unmatched")
+                .isEmpty();
+            assertThat(partial.tiesToGl().satisfied())
+                .as("and the remaining 25.00 is still an SL-1 breach")
+                .isFalse();
+        }
+    }
+
+    @Nested
     @DisplayName("SL-1 passes where the two independently sourced sides agree")
     class Ties {
 

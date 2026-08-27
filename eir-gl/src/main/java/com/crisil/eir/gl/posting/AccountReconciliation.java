@@ -34,11 +34,17 @@ import java.util.Objects;
  * to know the pair disagrees. The direction of the residual tells them which way.
  *
  * <p>The same subtraction catches an explanation filed against an account that already ties: a
- * +250.00 explanation on a nil difference leaves −250.00 unexplained. The one case it cannot see is
- * two spurious explanations on a tying account that exactly cancel; that is reported as plain data
- * by {@link GlReconciliation#unmatchedExplanations()} rather than folded into SL-1's deviation,
- * because nothing about the account's balance is unaccounted for and SL-1's deviation has to keep
- * meaning "money the two books disagree by".
+ * +250.00 explanation on a nil difference leaves −250.00 unexplained. What it cannot see is a set
+ * of explanations that <em>cancel</em>, on any account — tying or not. This paragraph used to say
+ * the blind spot was confined to a tying account and that {@code unmatchedExplanations()} caught
+ * it; both halves were wrong, because that method gated on the account already agreeing. A
+ * cancelling pair on an account out by 125.00 was invisible to SL-1 and to the register check.
+ *
+ * <p>{@link #carriesUnmatchedExplanation()} now compares the sum of <em>absolute</em> claims
+ * against the absolute difference, so a cancelling set is caught wherever it is filed. It stays
+ * plain data rather than being folded into SL-1's deviation, because nothing about the account's
+ * balance is unaccounted for and SL-1's deviation has to keep meaning "money the two books
+ * disagree by".
  *
  * @param accountCode        the control account
  * @param contractCount      how many sub-ledger balances were summed into {@link #subLedgerTotal}
@@ -94,13 +100,32 @@ public record AccountReconciliation(
     }
 
     /**
-     * Whether explanations were filed against an account whose books already agree.
+     * Whether the explanations filed against this account claim more, in gross, than the
+     * difference they are supposed to account for.
      *
-     * <p>A data-quality signal on the explanation register. Where the explanations do not cancel it
-     * is already an SL-1 breach; where they do, this is the only place it shows.
+     * <p><b>The gate used to be {@code agreesBeforeExplanation()}</b> — explanations on an account
+     * whose books already agree — and that made it blind to the very case the class javadoc named
+     * as the one subtraction cannot see. On an account that does <em>not</em> already tie, a
+     * cancelling pair of any magnitude was invisible everywhere: sub-ledger 53,125.00 against a GL
+     * of 53,000.00 with explanations of {@code +125.00}, {@code +500,000.00} and
+     * {@code −500,000.00} satisfied SL-1, reported no unmatched explanation, and left half a
+     * million rupees of spurious register entries traceable only through
+     * {@code explanationCount() == 3}.
+     *
+     * <p>Comparing the <b>sum of absolute</b> claims against the absolute difference catches it
+     * whether the account ties or not, and still passes the legitimate shapes: one explanation
+     * equal to the difference, or several summing to part of it. A signed comparison is what let
+     * the pair cancel, which is the same reason SL-1's own deviation sums absolutes.
      */
     public boolean carriesUnmatchedExplanation() {
-        return agreesBeforeExplanation() && !explanations.isEmpty();
+        if (explanations.isEmpty()) {
+            return false;
+        }
+        Money gross = Money.zero(subLedgerTotal.currency());
+        for (ExplainedDifference explanation : explanations) {
+            gross = gross.plus(explanation.amount().abs());
+        }
+        return gross.compareTo(difference().abs()) > 0;
     }
 
     /** A reconciliation-report line, at presentation scale. */
