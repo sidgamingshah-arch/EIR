@@ -410,7 +410,43 @@ public enum InvariantId {
      * version not in force on the origination date. Reported rather than refused, because an
      * unresolved position is the real state of a silence still with the ACPIR 57 sub-committee.
      */
-    BM_1("no day-1 below-market difference without an approved destination");
+    BM_1("no day-1 below-market difference without an approved destination"),
+
+    /**
+     * A closed period is never mutated; a correction is a restatement artefact (FR-902).
+     *
+     * <p>The requirement is unusual in this set because it is about <em>absence of change</em>
+     * rather than about a figure. 04 § 5's bitemporality is what makes it satisfiable: a
+     * correction records a new version in system time and leaves business time alone, so the
+     * period still replays to what it published (DT-1) and the restatement is a separate,
+     * dated fact.
+     *
+     * <p>The failure it catches is the one that looks like diligence. Somebody finds an error in
+     * a closed period and fixes it — in place, because that is what fixing means everywhere
+     * else — and the period now reproduces figures nobody ever reported. DT-1 would not
+     * necessarily notice, because a replay of the corrected data is internally consistent; what
+     * is lost is the correspondence between what was published and what the ledger says was
+     * published.
+     *
+     * <p>Deviation is the count of mutated rows or figures found in a closed period.
+     */
+    CL_1("a closed period is never mutated"),
+
+    /**
+     * The contractual interest leg ties to the core banking system, with zero unexplained
+     * difference (FR-804, control C-14).
+     *
+     * <p>The cheapest external check on the engine that exists, and worth more than it looks for
+     * the same reason C-15 is: it compares against a number computed by a different system for a
+     * different purpose. The engine's contractual leg is what the borrower was billed, and the
+     * CBS is the book of record for exactly that (ADR-0004) — so a difference is not a matter of
+     * interpretation. Either the engine mis-projected the schedule or the feed is wrong, and both
+     * need finding before the EIR leg built on top of it is believed.
+     *
+     * <p>"Zero unexplained" rather than zero: a timing difference with a stated cause is
+     * explained and does not breach. The deviation is the money amount that is not.
+     */
+    RC_1("contractual leg ties to core banking");
 
     private final String statement;
 
