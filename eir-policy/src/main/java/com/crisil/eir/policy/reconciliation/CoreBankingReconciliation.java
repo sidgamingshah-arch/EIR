@@ -150,9 +150,22 @@ public final class CoreBankingReconciliation {
         }
 
         Map<String, List<DifferenceExplanation>> byContract = new LinkedHashMap<>();
+        java.util.Set<String> filed = new java.util.LinkedHashSet<>();
         for (DifferenceExplanation explanation : explanations) {
             requireSameCurrency(
                 "explanation", explanation.contractId(), explanation.amount(), currency);
+            // Symmetry with the two figure sides, which was missing on the only side that can
+            // make the deviation smaller. Both omissions were found by review, not by test.
+            requireSamePeriod(
+                "explanation", explanation.contractId(), explanation.periodId(), periodId);
+            if (!filed.add(explanation.identityKey())) {
+                throw new IllegalArgumentException(
+                    "explanation for contract " + explanation.contractId() + " ("
+                        + explanation.reason() + " " + explanation.amount().atPresentationScale()
+                        + ") is filed twice in one reconciliation; several explanations per"
+                        + " contract are normal and two identical ones are not — they are one row"
+                        + " uploaded twice, and each copy would close the same difference again");
+            }
             byContract.computeIfAbsent(explanation.contractId(), key -> new ArrayList<>())
                 .add(explanation);
         }
@@ -270,9 +283,13 @@ public final class CoreBankingReconciliation {
             .filter(line -> !line.ineffectiveExplanations().isEmpty())
             .toList();
         if (!ineffective.isEmpty()) {
+            // Every distinct reason, with the contracts under each. Reporting only
+            // getFirst().getFirst() reproduced inside a detail string exactly the defect
+            // InvariantResult.conjunction's javadoc warns about — of several findings under one
+            // id, only the first survived — and it hid the more serious one: a self-approval was
+            // silently replaced by whichever reason happened to sort first.
             reasons.add(ineffective.size() + " carry an explanation that is not effective — "
-                + ineffective.getFirst().ineffectiveExplanations().getFirst()
-                    .ineffectiveBecause());
+                + describeIneffective(ineffective));
         }
 
         if (!danglingExplanations.isEmpty()) {
@@ -305,6 +322,31 @@ public final class CoreBankingReconciliation {
             // provenance of a self-approved explanation nobody re-reads.
             detail.append("; ").append(danglingExplanations.size())
                 .append(" explanations name a contract neither source presented");
+        }
+        // Both of these were reported on a FAIL and silent on a PASS, which is the wrong way
+        // round: the pass is the state somebody signs. An ineffective explanation is the more
+        // serious of the two — a self-approved or unapproved row sitting beside a difference that
+        // happens to tie means a control was overridden and the money coincidentally agreed — and
+        // it was the one omitted while the strictly less serious dangling explanation was
+        // published.
+        List<ContractReconciliation> ineffective = lines.stream()
+            .filter(line -> !line.ineffectiveExplanations().isEmpty())
+            .toList();
+        if (!ineffective.isEmpty()) {
+            detail.append("; ").append(ineffective.size())
+                .append(" tie while carrying an explanation that is not effective — ")
+                .append(describeIneffective(ineffective));
+        }
+        List<ContractReconciliation> oneSided = lines.stream()
+            .filter(line -> line.presence().isOneSided())
+            .toList();
+        if (!oneSided.isEmpty()) {
+            // presenceBreaks()'s own javadoc says "a run whose one-sided count is climbing is
+            // worth looking at even while every one of them is explained", and the detail did not
+            // say so. Fifty engine-only contracts fully explained as ROUNDING_CONVENTION passed
+            // with no trace.
+            detail.append("; ").append(oneSided.size())
+                .append(" are present in one source only and explained rather than reconciled");
         }
         return detail.toString();
     }
@@ -478,5 +520,26 @@ public final class CoreBankingReconciliation {
             + totalExplainedDifference().atPresentationScale() + ", unexplained "
             + totalAbsoluteUnexplainedDifference() + " absolute over " + breaks().size()
             + " contracts";
+    }
+
+    /**
+     * Every distinct reason an explanation was ineffective, with the contracts under each.
+     *
+     * <p>Grouped rather than listed per contract because the remedy is per reason — an unapproved
+     * batch needs signing and a self-approved one needs a different checker — and
+     * {@code DifferenceExplanation.ineffectiveBecause} exists precisely because those "send
+     * whoever is clearing the break to two different places".
+     */
+    private static String describeIneffective(List<ContractReconciliation> ineffective) {
+        Map<String, List<String>> byReason = new java.util.TreeMap<>();
+        for (ContractReconciliation line : ineffective) {
+            for (DifferenceExplanation explanation : line.ineffectiveExplanations()) {
+                byReason.computeIfAbsent(explanation.ineffectiveBecause(),
+                    key -> new ArrayList<>()).add(line.contractId());
+            }
+        }
+        List<String> parts = new ArrayList<>();
+        byReason.forEach((why, contracts) -> parts.add(why + " " + contracts));
+        return String.join("; ", parts);
     }
 }

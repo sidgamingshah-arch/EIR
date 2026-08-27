@@ -71,6 +71,18 @@ public record ContractReconciliation(
                     + " on the CBS side; C-14 reconciles one control account, in one currency");
         }
         explanations = List.copyOf(explanations);
+        for (DifferenceExplanation explanation : explanations) {
+            if (!explanation.contractId().equals(contractId)) {
+                // Only the aggregator guaranteed this pairing, by construction. The record is
+                // public, so a direct construction could attach contract B's explanation to
+                // contract A and it would reduce A's difference — and every test passed matching
+                // ids, so nothing caught it.
+                throw new IllegalArgumentException(
+                    "contract " + contractId + " carries an explanation naming "
+                        + explanation.contractId() + "; an explanation reduces the difference on"
+                        + " the line it names and no other");
+            }
+        }
     }
 
     /**
@@ -162,7 +174,20 @@ public record ContractReconciliation(
      * allowed to look like a match.
      */
     public Money unexplainedDifference() {
-        return difference().minus(explainedAmount()).atPresentationScale();
+        // NOT reduced to presentation scale, and that is the fix rather than the omission.
+        // Reducing each line and then summing N of them erases up to N x 0.005 — 200 control
+        // accounts each out by 0.004 summed to 0.80 of genuine unexplained difference and
+        // reported nil. 03 section 5.7 is explicit: "Residue is never resolved by tolerance. A
+        // tolerance hides exactly the class of defect this system exists to prevent." A per-line
+        // rounding IS a tolerance of half a paise per contract, scaling with the chart of
+        // accounts.
+        //
+        // The systematic sub-paise difference between the two systems is accounted for by a
+        // rule, as section 5.7's second sentence requires, and that rule is applied where the
+        // engine's figure BECOMES a billed figure — ContractualLegInterest.fromContractualLeg.
+        // Read its javadoc; it records the two wrong answers this one replaced. Nothing rounds
+        // after the subtraction here, so a genuine residue is reported in full.
+        return difference().minus(explainedAmount());
     }
 
     /** Whether this contract needs nothing further: the difference is nil or fully attributed. */
@@ -183,7 +208,38 @@ public record ContractReconciliation(
      * method to every other contract in the book.
      */
     public boolean hasMisstatedExplanation() {
-        return !effectiveExplanations().isEmpty() && !isTied();
+        if (effectiveExplanations().isEmpty()) {
+            return false;
+        }
+        // Partial attribution is NOT a misstatement, and treating it as one put the most
+        // escalatory heading in the aggregator ("a signed-off explanation whose amount is not the
+        // difference it explains, which is a finding in its own right") on the most ordinary
+        // in-flight state: a 1,000.00 difference with 600.00 correctly attributed to timing and
+        // 400.00 still under investigation. over()'s own javadoc says "several per contract is
+        // normal", which makes partial coverage mid-close normal too.
+        //
+        // What is a misstatement is a claim that CANNOT be a partial account of the difference:
+        // one that overshoots it, or one pointing the other way. Both mean the preparer's method
+        // is wrong rather than incomplete — and that is the reading the escalation was written
+        // for, since the same method is presumably being applied to every other contract.
+        Money claimed = explainedAmount();
+        Money difference = difference();
+        if (claimed.signum() != 0 && difference.signum() != 0
+            && claimed.signum() != difference.signum()) {
+            return true;
+        }
+        return claimed.abs().compareTo(difference.abs()) > 0;
+    }
+
+    /**
+     * Whether the difference is only partly attributed — work in progress, not a finding.
+     *
+     * <p>Published so a close can distinguish the two states it previously conflated: a line with
+     * some of its difference accounted for and the rest outstanding is the normal mid-close
+     * shape, and a line whose claim overshoots or contradicts the difference is a method error.
+     */
+    public boolean isPartlyAttributed() {
+        return !effectiveExplanations().isEmpty() && !isTied() && !hasMisstatedExplanation();
     }
 
     /** A one-line report row. */

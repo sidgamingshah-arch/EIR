@@ -108,8 +108,13 @@ class CoreBankingReconciliationPropertiesTest {
         for (int index = 0; index < contracts; index++) {
             BigDecimal explained = shapes.get(index) == 0 ? claims.get(index) : BigDecimal.ZERO;
             BigDecimal cbs = ENGINE.subtract(differences.get(index), Precision.WORKING);
-            BigDecimal residual = presented(
-                ENGINE.subtract(cbs.add(explained, Precision.WORKING), Precision.WORKING));
+            // NOT reduced to presentation scale. This recomputation used to wrap the residual in
+            // presented(), which encoded the per-line rounding the implementation then did — so
+            // the property agreed with the code by sharing its defect. 03 section 5.7 forbids
+            // resolving a residue by tolerance, and the rule that accounts for the billing-scale
+            // difference lives on the input, in ContractualLegInterest.fromContractualLeg.
+            BigDecimal residual =
+                ENGINE.subtract(cbs.add(explained, Precision.WORKING), Precision.WORKING);
             expectedAbsolute = expectedAbsolute.add(residual.abs());
             expectedNet = expectedNet.add(residual);
         }
@@ -145,15 +150,15 @@ class CoreBankingReconciliationPropertiesTest {
         Money amount = Money.of(claim, Money.INR);
         String narrative = "CBS bills on the 5th; the accrual runs to month-end.";
         return switch (shape) {
-            case 0 -> DifferenceExplanation.approved(contractId,
+            case 0 -> DifferenceExplanation.approved(contractId, PERIOD,
                 DifferenceReason.BILLING_DAY_TIMING, amount, narrative, "recon.preparer",
                 ApprovalRecord.by("recon.checker", CHECKED_ON));
-            case 1 -> DifferenceExplanation.prepared(contractId,
+            case 1 -> DifferenceExplanation.prepared(contractId, PERIOD,
                 DifferenceReason.BILLING_DAY_TIMING, amount, narrative, "recon.preparer");
-            case 2 -> new DifferenceExplanation(contractId,
+            case 2 -> new DifferenceExplanation(contractId, PERIOD,
                 DifferenceReason.BILLING_DAY_TIMING, amount, narrative, "recon.preparer",
                 ApprovalRecord.by("RECON.PREPARER", CHECKED_ON));
-            default -> DifferenceExplanation.approved(contractId,
+            default -> DifferenceExplanation.approved(contractId, PERIOD,
                 DifferenceReason.ROUNDING_CONVENTION, amount, "", "recon.preparer",
                 ApprovalRecord.by("recon.checker", CHECKED_ON));
         };
@@ -216,7 +221,8 @@ class CoreBankingReconciliationPropertiesTest {
         // non-blank narrative: the property is about the amount, and an accidentally blank
         // narrative would make the explanation ineffective for an unrelated reason.
         DifferenceExplanation explanation = DifferenceExplanation.approved(
-            contractId(1), DifferenceReason.BILLING_DAY_TIMING, Money.of(claim, Money.INR),
+            contractId(1), PERIOD, DifferenceReason.BILLING_DAY_TIMING,
+            Money.of(claim, Money.INR),
             "CBS timing: " + narrative, "recon.preparer",
             ApprovalRecord.by("recon.checker", CHECKED_ON));
 
@@ -236,9 +242,22 @@ class CoreBankingReconciliationPropertiesTest {
         assertThat(result.deviation())
             .as("the residual is the difference less the claim")
             .isEqualByComparingTo(difference.subtract(claim).abs());
-        assertThat(recon.misstatedExplanations())
-            .as("and it is reported as its own finding, not merely as an unexplained difference")
-            .hasSize(1);
+        // Misstatement is now over-claiming or claiming in the wrong direction — not merely
+        // claiming less than the difference. A short claim is PARTIAL ATTRIBUTION: several
+        // explanations per contract are normal, so a claim covering part of a difference with the
+        // rest under investigation is the ordinary mid-close shape, and the heading it used to
+        // trigger says the preparer's method is wrong on every other contract in the book.
+        boolean overshoots = claim.abs().compareTo(difference.abs()) > 0;
+        boolean wrongDirection = claim.signum() != 0 && difference.signum() != 0
+            && claim.signum() != difference.signum();
+        assertThat(recon.misstatedExplanations().size())
+            .as("difference %s, claim %s: overshoots=%s wrongDirection=%s",
+                difference, claim, overshoots, wrongDirection)
+            .isEqualTo(overshoots || wrongDirection ? 1 : 0);
+        assertThat(recon.lines().getFirst().isPartlyAttributed())
+            .as("the complement: a claim that is neither an overshoot nor the wrong way round is"
+                + " work in progress, and every generated pair is one or the other")
+            .isEqualTo(!(overshoots || wrongDirection));
     }
 
     // ------------------------------------------------------------------ presence is not a zero
@@ -324,7 +343,7 @@ class CoreBankingReconciliationPropertiesTest {
         variant = " ".repeat(leftPad) + variant + " ".repeat(rightPad);
 
         DifferenceExplanation selfApproved = new DifferenceExplanation(
-            contractId(1), DifferenceReason.BILLING_DAY_TIMING,
+            contractId(1), PERIOD, DifferenceReason.BILLING_DAY_TIMING,
             Money.of(difference, Money.INR),
             "CBS bills on the 5th; the accrual runs to month-end.",
             identity, ApprovalRecord.by(variant, CHECKED_ON));

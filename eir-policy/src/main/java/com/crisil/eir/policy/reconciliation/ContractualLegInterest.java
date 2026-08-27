@@ -79,11 +79,49 @@ public record ContractualLegInterest(String contractId, int periodId, Money cont
      * interest. The neutral accessor exists precisely so that a reader of this line is not told the
      * wrong thing about which rate produced it.
      */
+    /**
+     * The period's contractual interest, at the scale it was billed.
+     *
+     * <p><b>The reduction to presentation scale happens here, and placing it took two wrong
+     * answers first.</b> The two systems being reconciled differ structurally: the engine accrues
+     * at working precision — 28 significant digits, per ADR-0002 — and the CBS bills in paise,
+     * because paise is what a borrower can pay. On reference case 1 period 2 the engine's
+     * contractual leg carries {@code 9,629.2653} and the CBS bills {@code 9,629.27}. Neither
+     * system is wrong.
+     *
+     * <p>The first answer was to round the <em>residual</em>: subtract at working precision, then
+     * reduce the difference before testing it for nil. 03 § 5.7 forbids precisely that — "residue
+     * is never resolved by tolerance; a tolerance hides exactly the class of defect this system
+     * exists to prevent" — and it scales with the book: two hundred accounts each genuinely out
+     * by {@code 0.004} summed to {@code 0.80} of real unexplained difference and reported nil.
+     *
+     * <p>The second was to remove the rounding and leave the residue unexplained. That obeys the
+     * letter of § 5.7 and misses its second sentence — "where a difference exists, <em>a rule
+     * accounts for it</em>" — and it makes RC-1 permanently red on every contract in the book for
+     * a difference nobody can act on. A control red by design is a control that gets suppressed.
+     *
+     * <p>The rule that accounts for it is that the borrower was billed in paise, and ADR-0004
+     * makes the CBS the book of record for what was billed. So the reduction belongs where the
+     * engine's accrual <em>becomes</em> a billed figure — on this input, once, named — and not
+     * inside the comparison, where it would silently absorb anything smaller than a paise
+     * whatever its cause. After it, {@code difference()} is exact arithmetic on two figures at the
+     * same scale, and a genuine discrepancy of {@code 0.0047} is reported in full rather than
+     * rounded away.
+     *
+     * <p>Note what this does <em>not</em> do: it does not reduce a figure a caller supplies
+     * directly through the canonical constructor. A caller handing in a working-precision amount
+     * is stating that the amount it holds is what was billed, and this class does not second-guess
+     * that.
+     */
     public static ContractualLegInterest fromContractualLeg(
         String contractId, int periodId, AmortisationResult contractualLeg, int periodOrdinal) {
         Objects.requireNonNull(contractualLeg, "contractualLeg");
         AmortisationRow row = contractualLeg.row(periodOrdinal);
-        return new ContractualLegInterest(contractId, periodId, row.interestAccrued());
+        // Reduced to the scale the borrower was billed at, ONCE, here — at the boundary where an
+        // engine accrual becomes a billed amount. See the note below on why this is the only
+        // place it can go.
+        return new ContractualLegInterest(
+            contractId, periodId, row.interestAccrued().atPresentationScale());
     }
 
     /** The figure as it is published, at the currency's minor units. */

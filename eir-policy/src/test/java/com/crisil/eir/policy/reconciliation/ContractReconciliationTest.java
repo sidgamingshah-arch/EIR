@@ -34,8 +34,22 @@ import org.junit.jupiter.api.Test;
  */
 class ContractReconciliationTest {
 
-    /** Reference case 1 period 2 contractual interest, at working precision. */
-    private static final Money ENGINE_PERIOD_2 = Money.inr("9629.2653");
+    private static final int PERIOD = 202705;
+
+    /**
+     * Reference case 1 period 2 contractual interest, at the scale it was billed.
+     *
+     * <p>The engine's contractual leg carries {@code 9,629.2653} at working precision;
+     * {@code ContractualLegInterest.fromContractualLeg} reduces it to {@code 9,629.27} because
+     * that is what the borrower was billed and ADR-0004 makes the CBS the book of record for
+     * billing. This constant is the adapter's output, which is what a caller reconciling against a
+     * CBS feed actually holds — see {@link #workingPrecisionSuppliedDirectlyIsTakenAtItsWord} for
+     * the other path.
+     */
+    private static final Money ENGINE_PERIOD_2 = Money.inr("9629.27");
+
+    /** The same figure before the adapter reduces it. */
+    private static final Money ENGINE_PERIOD_2_WORKING = Money.inr("9629.2653");
 
     private static final LocalDate CHECKED_ON = LocalDate.of(2027, 5, 4);
 
@@ -45,7 +59,7 @@ class ContractReconciliationTest {
 
     private static DifferenceExplanation timing(String contractId, String amount) {
         return DifferenceExplanation.approved(
-            contractId, DifferenceReason.BILLING_DAY_TIMING, Money.inr(amount),
+            contractId, PERIOD, DifferenceReason.BILLING_DAY_TIMING, Money.inr(amount),
             "CBS bills on the 5th; the accrual runs to month-end. Reverses in 202706.",
             "recon.preparer", approvedBy("recon.checker"));
     }
@@ -57,25 +71,48 @@ class ContractReconciliationTest {
         @Test
         @DisplayName("a CBS figure equal to the engine's presented figure ties")
         void presentedFigureTies() {
-            // The everyday case under LMS_AUTHORITATIVE (ADR-0004): the CBS bills the presented
-            // figure 9,629.27 and the engine carries 9,629.2653 at working precision. The
-            // difference is -0.0047, which is nothing at paise resolution — and it must tie, or
-            // C-14 raises a break on every contract in the book every period, which is exactly the
-            // "control becomes noise" outcome ADR-0004 warns about.
+            // The everyday case under LMS_AUTHORITATIVE (ADR-0004). The engine's 9,629.2653 was
+            // reduced to the billed 9,629.27 by the adapter, and the CBS billed 9,629.27, so this
+            // is exact arithmetic on two figures at the same scale. It must tie, or C-14 raises a
+            // break on every contract in the book every period — the "control becomes noise"
+            // outcome ADR-0004 warns about — and it ties because a RULE accounted for the
+            // difference at the boundary, not because a tolerance absorbed it after the fact.
             ContractReconciliation line = new ContractReconciliation(
                 "ACC-1", ENGINE_PERIOD_2, Money.inr("9629.27"), List.of());
 
             assertThat(line.difference().amount())
-                .as("9,629.2653 - 9,629.27, by hand")
-                .isEqualByComparingTo("-0.0047");
+                .as("9,629.27 - 9,629.27, exactly")
+                .isEqualByComparingTo("0");
             assertThat(line.unexplainedDifference()).isEqualTo(Money.inr("0.00"));
             assertThat(line.isTied()).isTrue();
             assertThat(line.presence()).isEqualTo(SourcePresence.BOTH);
         }
 
         @Test
-        @DisplayName("the residual is reduced once, not two rounded operands compared")
-        void residualIsReducedOnce() {
+        @DisplayName("a working-precision figure supplied directly is taken at its word")
+        void workingPrecisionSuppliedDirectlyIsTakenAtItsWord() {
+            // The path the adapter does not sit on. A caller using the canonical constructor is
+            // stating that the amount it holds is what was billed, and this class does not
+            // second-guess it — so an unreduced 9,629.2653 against a billed 9,629.27 is a real
+            // difference of -0.0047 and is reported at that size.
+            //
+            // This is the case the old per-line rounding hid, and hiding it is what made the
+            // tolerance dangerous: the same 0.005 window that absorbed a harmless scale artefact
+            // would have absorbed a genuine 0.004 break on a figure already at billing scale.
+            ContractReconciliation line = new ContractReconciliation(
+                "ACC-1W", ENGINE_PERIOD_2_WORKING, Money.inr("9629.27"), List.of());
+
+            assertThat(line.difference().amount()).isEqualByComparingTo("-0.0047");
+            assertThat(line.unexplainedDifference().amount()).isEqualByComparingTo("-0.0047");
+            assertThat(line.isTied())
+                .as("reported, not absorbed; the rule belongs at the adapter, and this caller"
+                    + " bypassed it")
+                .isFalse();
+        }
+
+        @Test
+        @DisplayName("the residual is reported at its own size, never rounded away")
+        void residualIsReportedAtItsOwnSize() {
             // Section 1.3's rule, and InvariantResult.ofMoney's. Constructed so the two orders
             // disagree: the difference is 9,629.2653 - 9,629.2603 = 0.0050 and the explanation
             // claims 0.0040, so
@@ -85,15 +122,22 @@ class ContractReconciliationTest {
             // contract's explanation is right to a tenth of a paise and the second order reports a
             // control exception on it.
             ContractReconciliation line = new ContractReconciliation(
-                "ACC-2", ENGINE_PERIOD_2, Money.inr("9629.2603"),
+                "ACC-2", ENGINE_PERIOD_2_WORKING, Money.inr("9629.2603"),
                 List.of(timing("ACC-2", "0.0040")));
 
             assertThat(line.difference().amount()).isEqualByComparingTo("0.0050");
             assertThat(line.explainedAmount().amount()).isEqualByComparingTo("0.0040");
-            assertThat(line.unexplainedDifference())
-                .as("round(0.0010) = 0.00; rounding both first would report 0.01")
-                .isEqualTo(Money.inr("0.00"));
-            assertThat(line.isTied()).isTrue();
+            assertThat(line.unexplainedDifference().amount())
+                .as("0.0010 of genuine unexplained difference, reported at its own size. This"
+                    + " assertion previously expected 0.00, because the residual was reduced to"
+                    + " presentation scale before being tested — a tolerance of half a paise per"
+                    + " contract, which 03 section 5.7 forbids by name and which erased 0.80 of"
+                    + " real difference across 200 accounts each out by 0.004.")
+                .isEqualByComparingTo("0.0010");
+            assertThat(line.isTied())
+                .as("and it does not tie: a rule accounts for the billing-scale difference at the"
+                    + " adapter, so anything left here is real")
+                .isFalse();
         }
 
         @Test
@@ -101,7 +145,7 @@ class ContractReconciliationTest {
         void unexplainedInFull() {
             // 9,629.2653 - 9,616.3853 = 12.8800, chosen in advance.
             ContractReconciliation line = new ContractReconciliation(
-                "ACC-3", ENGINE_PERIOD_2, Money.inr("9616.3853"), List.of());
+                "ACC-3", ENGINE_PERIOD_2, Money.inr("9616.39"), List.of());
 
             assertThat(line.unexplainedDifference()).isEqualTo(Money.inr("12.88"));
             assertThat(line.isTied()).isFalse();
@@ -119,7 +163,7 @@ class ContractReconciliationTest {
         @DisplayName("an explanation equal to the difference ties it")
         void exactExplanationTies() {
             ContractReconciliation line = new ContractReconciliation(
-                "ACC-4", ENGINE_PERIOD_2, Money.inr("9616.3853"),
+                "ACC-4", ENGINE_PERIOD_2, Money.inr("9616.39"),
                 List.of(timing("ACC-4", "12.88")));
 
             assertThat(line.isTied()).isTrue();
@@ -134,12 +178,12 @@ class ContractReconciliationTest {
             // reasons genuinely applying to one contract is ordinary, which is why the aggregator
             // accepts several explanations per contract rather than one.
             DifferenceExplanation fee = DifferenceExplanation.approved(
-                "ACC-5", DifferenceReason.INTEGRAL_FEE_BILLED_AS_INTEREST, Money.inr("2.88"),
+                "ACC-5", PERIOD, DifferenceReason.INTEGRAL_FEE_BILLED_AS_INTEREST, Money.inr("2.88"),
                 "Processing fee tranche booked to interest in the CBS; held integral under"
                     + " ACPIR 52 and reconciled to fee_posting FP-88431.",
                 "recon.preparer", approvedBy("recon.checker"));
             ContractReconciliation line = new ContractReconciliation(
-                "ACC-5", ENGINE_PERIOD_2, Money.inr("9616.3853"),
+                "ACC-5", ENGINE_PERIOD_2, Money.inr("9616.39"),
                 List.of(timing("ACC-5", "10.00"), fee));
 
             assertThat(line.explainedAmount().amount()).isEqualByComparingTo("12.88");
@@ -150,17 +194,23 @@ class ContractReconciliationTest {
         @DisplayName("an explanation that claims too little leaves the shortfall, and is flagged")
         void shortExplanationLeavesTheShortfall() {
             // The abuse this arithmetic exists to prevent: attach a note and the difference is
-            // "explained". 12.88 of difference against 10.00 claimed leaves 2.88 by hand.
+            // "explained". 9,629.27 - 9,616.39 = 12.88 of difference against 10.00 claimed leaves
+            // 2.88, by hand. The shortfall stays in the deviation.
             ContractReconciliation line = new ContractReconciliation(
-                "ACC-6", ENGINE_PERIOD_2, Money.inr("9616.3853"),
+                "ACC-6", ENGINE_PERIOD_2, Money.inr("9616.39"),
                 List.of(timing("ACC-6", "10.00")));
 
             assertThat(line.unexplainedDifference()).isEqualTo(Money.inr("2.88"));
             assertThat(line.isTied()).isFalse();
             assertThat(line.hasMisstatedExplanation())
-                .as("a signed-off explanation that does not close its difference is its own finding")
-                .isTrue();
-            assertThat(line.describe()).contains("EXPLANATION DOES NOT ADD UP");
+                .as("short is PARTIAL ATTRIBUTION, not a misstatement. Several explanations per"
+                    + " contract are normal, so a claim accounting for part of a difference with"
+                    + " the rest under investigation is the ordinary mid-close shape — and the"
+                    + " heading it used to trigger says the preparer's method is wrong on every"
+                    + " other contract in the book too.")
+                .isFalse();
+            assertThat(line.isPartlyAttributed()).isTrue();
+            assertThat(line.describe()).doesNotContain("EXPLANATION DOES NOT ADD UP");
         }
 
         @Test
@@ -169,7 +219,7 @@ class ContractReconciliationTest {
             // 12.88 of difference against 20.00 claimed leaves -7.12. Over-claiming is not
             // conservative: it means the stated cause is not the cause.
             ContractReconciliation line = new ContractReconciliation(
-                "ACC-7", ENGINE_PERIOD_2, Money.inr("9616.3853"),
+                "ACC-7", ENGINE_PERIOD_2, Money.inr("9616.39"),
                 List.of(timing("ACC-7", "20.00")));
 
             assertThat(line.unexplainedDifference()).isEqualTo(Money.inr("-7.12"));
@@ -183,7 +233,7 @@ class ContractReconciliationTest {
             // amount rather than comparing magnitudes: an explanation offered in the wrong
             // direction is a misunderstanding of which system is high, and must not match.
             ContractReconciliation line = new ContractReconciliation(
-                "ACC-8", ENGINE_PERIOD_2, Money.inr("9616.3853"),
+                "ACC-8", ENGINE_PERIOD_2, Money.inr("9616.39"),
                 List.of(timing("ACC-8", "-12.88")));
 
             assertThat(line.unexplainedDifference()).isEqualTo(Money.inr("25.76"));
@@ -195,7 +245,7 @@ class ContractReconciliationTest {
     @DisplayName("an explanation nobody signed explains nothing")
     class Effectiveness {
 
-        private static final Money CBS = Money.inr("9616.3853");
+        private static final Money CBS = Money.inr("9616.39");
 
         @Test
         @DisplayName("prepared and unapproved: the difference stands")
@@ -204,7 +254,7 @@ class ContractReconciliationTest {
             // needing a maker, a checker and a date. RC-1 gates the close (07 section 4.3 gate 4),
             // so an explanation is one of those acceptances.
             DifferenceExplanation prepared = DifferenceExplanation.prepared(
-                "ACC-9", DifferenceReason.BILLING_DAY_TIMING, Money.inr("12.88"),
+                "ACC-9", PERIOD, DifferenceReason.BILLING_DAY_TIMING, Money.inr("12.88"),
                 "CBS bills on the 5th.", "recon.preparer");
             ContractReconciliation line = new ContractReconciliation(
                 "ACC-9", ENGINE_PERIOD_2, CBS, List.of(prepared));
@@ -227,7 +277,7 @@ class ContractReconciliationTest {
             // or case variant of the same directory identity arriving through a second channel —
             // and an explanation row uploaded from a close spreadsheet is that second channel.
             DifferenceExplanation selfApproved = new DifferenceExplanation(
-                "ACC-10", DifferenceReason.BILLING_DAY_TIMING, Money.inr("12.88"),
+                "ACC-10", PERIOD, DifferenceReason.BILLING_DAY_TIMING, Money.inr("12.88"),
                 "CBS bills on the 5th.", "Recon.Preparer", approvedBy(" recon.preparer "));
             ContractReconciliation line = new ContractReconciliation(
                 "ACC-10", ENGINE_PERIOD_2, CBS, List.of(selfApproved));
@@ -242,7 +292,7 @@ class ContractReconciliationTest {
         @DisplayName("a reason code with no narrative is a category, not an explanation")
         void blankNarrativeIsIneffective() {
             DifferenceExplanation noNarrative = new DifferenceExplanation(
-                "ACC-11", DifferenceReason.ROUNDING_CONVENTION, Money.inr("12.88"),
+                "ACC-11", PERIOD, DifferenceReason.ROUNDING_CONVENTION, Money.inr("12.88"),
                 "   ", "recon.preparer", approvedBy("recon.checker"));
 
             assertThat(noNarrative.isEffective()).isFalse();
@@ -256,7 +306,7 @@ class ContractReconciliationTest {
         @DisplayName("no preparer named is ineffective")
         void noPreparerIsIneffective() {
             DifferenceExplanation anonymous = new DifferenceExplanation(
-                "ACC-12", DifferenceReason.ROUNDING_CONVENTION, Money.inr("12.88"),
+                "ACC-12", PERIOD, DifferenceReason.ROUNDING_CONVENTION, Money.inr("12.88"),
                 "Paise rounding per instalment component.", null, approvedBy("recon.checker"));
 
             assertThat(anonymous.statedBy()).isEmpty();
@@ -270,10 +320,10 @@ class ContractReconciliationTest {
             // The corollary of the project's signature defect: a guard here would be the guard the
             // invariant asserts, and the control would become a tautology. JournalEntry allows an
             // unbalanced entry to be constructed so SL-2 has something to detect; the same choice.
-            assertThat(DifferenceExplanation.prepared("A",
+            assertThat(DifferenceExplanation.prepared("A", PERIOD,
                 DifferenceReason.BILLING_DAY_TIMING, Money.inr("1.00"), "", "").isEffective())
                 .isFalse();
-            assertThat(new DifferenceExplanation("A", DifferenceReason.BILLING_DAY_TIMING,
+            assertThat(new DifferenceExplanation("A", PERIOD, DifferenceReason.BILLING_DAY_TIMING,
                 Money.inr("1.00"), "n", "p", approvedBy("p")).isEffective())
                 .isFalse();
         }
@@ -334,7 +384,7 @@ class ContractReconciliationTest {
                 .contains("approved by recon.checker on 2027-05-04");
 
             DifferenceExplanation bad = DifferenceExplanation.prepared(
-                "ACC-18", DifferenceReason.ROUNDING_CONVENTION, Money.inr("0.03"),
+                "ACC-18", PERIOD, DifferenceReason.ROUNDING_CONVENTION, Money.inr("0.03"),
                 "Paise per instalment component.", "recon.preparer");
             assertThat(bad.describe()).contains("INEFFECTIVE").contains("not approved");
         }
@@ -357,7 +407,7 @@ class ContractReconciliationTest {
             assertThat(line.presence()).isEqualTo(SourcePresence.ENGINE_ONLY);
             assertThat(line.presence().isOneSided()).isTrue();
             assertThat(line.unexplainedDifference())
-                .as("9,629.2653 presented")
+                .as("the whole billed figure, because the CBS presented nothing to net against")
                 .isEqualTo(Money.inr("9629.27"));
             assertThat(line.describe()).contains("CBS (absent)");
         }
@@ -382,7 +432,7 @@ class ContractReconciliationTest {
             // suppressed. So it can tie on the money, and it still appears in presenceBreaks()
             // because the diagnosis is about the feed rather than the contract.
             ContractReconciliation line = new ContractReconciliation(
-                "ACC-15", ENGINE_PERIOD_2, null, List.of(timing("ACC-15", "9629.2653")));
+                "ACC-15", ENGINE_PERIOD_2, null, List.of(timing("ACC-15", "9629.27")));
 
             assertThat(line.isTied()).isTrue();
             assertThat(line.presence().isOneSided()).isTrue();

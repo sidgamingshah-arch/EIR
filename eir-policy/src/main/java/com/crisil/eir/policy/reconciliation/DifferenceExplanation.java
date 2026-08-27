@@ -51,6 +51,7 @@ import java.util.Objects;
  */
 public record DifferenceExplanation(
     String contractId,
+    int periodId,
     DifferenceReason reason,
     Money amount,
     String narrative,
@@ -65,6 +66,15 @@ public record DifferenceExplanation(
         // blankable on purpose. See the class javadoc.
         Objects.requireNonNull(contractId, "contractId");
         Objects.requireNonNull(reason, "reason");
+        // periodId is as much identity as contractId, and its absence was a defect. The
+        // aggregator validates BOTH figure sides against the period it is reconciling — "a
+        // comparison across two periods produces a difference that looks plausible and reconciles
+        // to nothing" — and then applied whatever explanations it was handed with no period at
+        // all, on the one input that can make the deviation SMALLER. An explanation approved in
+        // 2019 closed a 2027 difference. It is worse for BILLING_DAY_TIMING, which this package
+        // documents as self-reversing: a carried-forward timing explanation is guaranteed to have
+        // the wrong sign next period.
+        ContractualLegInterest.requirePeriodId(periodId);
         Objects.requireNonNull(amount, "amount");
         contractId = contractId.strip();
         if (contractId.isEmpty()) {
@@ -80,13 +90,14 @@ public record DifferenceExplanation(
      */
     public static DifferenceExplanation approved(
         String contractId,
+        int periodId,
         DifferenceReason reason,
         Money amount,
         String narrative,
         String statedBy,
         ApprovalRecord approval) {
         return new DifferenceExplanation(
-            contractId, reason, amount, narrative, statedBy,
+            contractId, periodId, reason, amount, narrative, statedBy,
             Objects.requireNonNull(approval, "approval"));
     }
 
@@ -100,11 +111,13 @@ public record DifferenceExplanation(
      */
     public static DifferenceExplanation prepared(
         String contractId,
+        int periodId,
         DifferenceReason reason,
         Money amount,
         String narrative,
         String statedBy) {
-        return new DifferenceExplanation(contractId, reason, amount, narrative, statedBy, null);
+        return new DifferenceExplanation(
+            contractId, periodId, reason, amount, narrative, statedBy, null);
     }
 
     /**
@@ -164,5 +177,27 @@ public record DifferenceExplanation(
             ? " [" + statedBy + ", " + approval.describe() + "]"
             : " [INEFFECTIVE: " + ineffectiveBecause() + "]";
         return head + tail;
+    }
+
+    /**
+     * The identity of this explanation as a filed row, for duplicate detection.
+     *
+     * <p>Every field, because a genuine second explanation on one contract differs in at least
+     * one of them — "several per contract is normal" is true, and two rows identical in reason,
+     * amount, narrative, preparer and approval are not two explanations, they are one filed twice.
+     * That matters because this is the input that <em>reduces</em> a difference: the aggregator
+     * refuses a duplicate engine line and a duplicate CBS line with careful reasoning, and had no
+     * guard at all on the third collection. A close spreadsheet re-uploaded — which this package's
+     * own four-eyes argument names as the threat model — doubled every claim in the book.
+     */
+    public String identityKey() {
+        return contractId + "|" + periodId + "|" + reason + "|" + amount.amount().toPlainString()
+            + "|" + narrative + "|" + statedBy
+            + "|" + (approval == null ? "-" : approval.checker() + "@" + approval.checkedOn());
+    }
+
+    /** Whether this explanation was filed for {@code period}. */
+    public boolean appliesToPeriod(int period) {
+        return periodId == period;
     }
 }

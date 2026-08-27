@@ -90,7 +90,7 @@ class CoreBankingReconciliationTest {
 
     private static DifferenceExplanation timing(String contractId, String amount) {
         return DifferenceExplanation.approved(
-            contractId, DifferenceReason.BILLING_DAY_TIMING, Money.inr(amount),
+            contractId, PERIOD, DifferenceReason.BILLING_DAY_TIMING, Money.inr(amount),
             "CBS bills on the 5th; the accrual runs to month-end.",
             "recon.preparer", ApprovalRecord.by("recon.checker", CHECKED_ON));
     }
@@ -109,9 +109,12 @@ class CoreBankingReconciliationTest {
         @Test
         @DisplayName("a book billed at the presented figure ties, and says what it compared")
         void aCleanBookTies() {
-            // Three contracts each accruing 9,629.2653 against a CBS that billed 9,629.27 — the
-            // LMS_AUTHORITATIVE shape ADR-0004 prefers. Engine total 28,887.7959 presents as
-            // 28,887.80; CBS total 28,887.81. Both by hand.
+            // Three contracts each accruing 9,629.2653, reduced to the billed 9,629.27 by
+            // ContractualLegInterest.fromContractualLeg, against a CBS that billed 9,629.27 — the
+            // LMS_AUTHORITATIVE shape ADR-0004 prefers. 3 x 9,629.27 = 28,887.81 on both sides,
+            // by hand. Before the reduction moved to the adapter this read 28,887.80 against
+            // 28,887.81 and tied only because the residual was rounded, which is the tolerance
+            // 03 section 5.7 forbids.
             CoreBankingReconciliation recon = over(
                 List.of(engine("A1"), engine("A2"), engine("A3")),
                 List.of(cbs("A1", "9629.27"), cbs("A2", "9629.27"), cbs("A3", "9629.27")),
@@ -123,7 +126,6 @@ class CoreBankingReconciliationTest {
             assertThat(result.deviation()).isEqualByComparingTo(BigDecimal.ZERO);
             assertThat(result.detail())
                 .contains("3 contracts tie for period 202705")
-                .contains("INR 28887.80")
                 .contains("INR 28887.81");
             assertThat(recon.contractsReconciled()).isEqualTo(3);
         }
@@ -183,7 +185,7 @@ class CoreBankingReconciliationTest {
             // explanation claims exactly that; 9,629.2653 - 9,616.3853 = 12.8800 by hand.
             CoreBankingReconciliation recon = over(
                 List.of(engine("A1"), engine("A2")),
-                List.of(cbs("A1", "9629.27"), cbs("A2", "9616.3853")),
+                List.of(cbs("A1", "9629.27"), cbs("A2", "9616.39")),
                 List.of(timing("A2", "12.88")));
 
             InvariantResult result = recon.tiesToCoreBanking();
@@ -193,19 +195,58 @@ class CoreBankingReconciliationTest {
         }
 
         @Test
-        @DisplayName("an explanation that does not add up is called out as its own finding")
-        void misstatedExplanationIsNamed() {
-            // 12.88 of difference, 10.00 claimed, 2.88 left. Without the amount arithmetic this
-            // contract would read as reconciled because a note is attached to it.
+        @DisplayName("a claim short of the difference is partial attribution, not a misstatement")
+        void shortClaimIsPartialAttribution() {
+            // 12.88 of difference, 10.00 claimed, 2.88 left. The 2.88 stays in the deviation —
+            // attaching a note to a contract does not reconcile it — but this is NOT the
+            // "does not add up" finding. over()'s own javadoc says several explanations per
+            // contract are normal, which makes partial coverage mid-close normal too: 10.00
+            // attributed to timing with 2.88 still under investigation is the ordinary shape of a
+            // close in flight. Reporting it under the aggregator's most escalatory heading, which
+            // reads "the same preparer and checker are presumably applying the same method to
+            // every other contract in the book", fired that escalation on routine work.
             CoreBankingReconciliation recon = over(
-                List.of(engine("A1")), List.of(cbs("A1", "9616.3853")),
+                List.of(engine("A1")), List.of(cbs("A1", "9616.39")),
                 List.of(timing("A1", "10.00")));
 
             InvariantResult result = recon.tiesToCoreBanking();
             assertThat(result.satisfied()).isFalse();
             assertThat(result.deviation()).isEqualByComparingTo("2.88");
+            assertThat(recon.misstatedExplanations())
+                .as("short is not misstated")
+                .isEmpty();
+            assertThat(recon.lines().getFirst().isPartlyAttributed()).isTrue();
+        }
+
+        @Test
+        @DisplayName("a claim that OVERSHOOTS the difference is its own finding")
+        void overClaimIsAMisstatement() {
+            // 12.88 of difference, 20.00 claimed. This cannot be a partial account of anything —
+            // the preparer's method is wrong rather than incomplete, and that is the reading the
+            // escalation was written for.
+            CoreBankingReconciliation recon = over(
+                List.of(engine("A1")), List.of(cbs("A1", "9616.39")),
+                List.of(timing("A1", "20.00")));
+
+            InvariantResult result = recon.tiesToCoreBanking();
+            assertThat(result.satisfied()).isFalse();
             assertThat(result.detail())
                 .contains("carry a signed-off explanation whose amount is not the difference");
+            assertThat(recon.misstatedExplanations())
+                .extracting(ContractReconciliation::contractId)
+                .containsExactly("A1");
+        }
+
+        @Test
+        @DisplayName("a claim pointing the other way is a misstatement too")
+        void wrongDirectionIsAMisstatement() {
+            // The engine is ABOVE the CBS by 12.88 and the claim says the CBS is above the engine.
+            // Same magnitude class, opposite sign, and no amount of further attribution reaches
+            // the difference from there.
+            CoreBankingReconciliation recon = over(
+                List.of(engine("A1")), List.of(cbs("A1", "9616.39")),
+                List.of(timing("A1", "-5.00")));
+
             assertThat(recon.misstatedExplanations())
                 .extracting(ContractReconciliation::contractId)
                 .containsExactly("A1");
@@ -215,8 +256,8 @@ class CoreBankingReconciliationTest {
         @DisplayName("an unapproved explanation leaves the whole difference, and the detail says so")
         void unapprovedExplanationLeavesItAll() {
             CoreBankingReconciliation recon = over(
-                List.of(engine("A1")), List.of(cbs("A1", "9616.3853")),
-                List.of(DifferenceExplanation.prepared("A1", DifferenceReason.BILLING_DAY_TIMING,
+                List.of(engine("A1")), List.of(cbs("A1", "9616.39")),
+                List.of(DifferenceExplanation.prepared("A1", PERIOD, DifferenceReason.BILLING_DAY_TIMING,
                     Money.inr("12.88"), "CBS bills on the 5th.", "recon.preparer")));
 
             InvariantResult result = recon.tiesToCoreBanking();
@@ -336,8 +377,11 @@ class CoreBankingReconciliationTest {
 
             assertThat(ContractualLegInterest.fromTwoLegs("A1", PERIOD, twoLeg, 2)
                 .contractualInterest().amount())
-                .as("the contractual leg's 9,629.2653, not the EIR leg's 9,986.87")
-                .isEqualByComparingTo("9629.2653");
+                .as("the contractual leg's 9,629.2653 at the scale it was billed, 9,629.27 —"
+                    + " and emphatically not the EIR leg's 9,986.87, which is what this test is"
+                    + " for. The reduction happens in the adapter; read its javadoc for why it"
+                    + " cannot happen in the comparison.")
+                .isEqualByComparingTo("9629.27");
         }
     }
 
@@ -435,7 +479,7 @@ class CoreBankingReconciliationTest {
         void reportAccessors() {
             CoreBankingReconciliation recon = over(
                 List.of(engine("A1"), engine("A2")),
-                List.of(cbs("A1", "9629.27"), cbs("A2", "9616.3853")),
+                List.of(cbs("A1", "9629.27"), cbs("A2", "9616.39")),
                 List.of(timing("A2", "10.00")));
 
             assertThat(recon.lineFor("A2")).isNotNull();

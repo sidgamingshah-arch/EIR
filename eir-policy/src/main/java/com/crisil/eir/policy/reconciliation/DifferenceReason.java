@@ -62,7 +62,7 @@ public enum DifferenceReason {
      * revisits.
      *
      * <p>Distinguishable from the others by size. A rounding-convention explanation carrying
-     * thousands of rupees is mislabelled, and the amount check RC-1 performs is what surfaces it
+     * thousands of rupees is mislabelled, and nothing here checks a reason against the magnitude it claims, and RC-1 does not either — it asks only whether the claim closes the difference, so a 481,463.27 "rounding" claim ties perfectly. Judging a reason against its size would need a threshold this engine has no authority to invent; what the control can do, and now does, is report one-sided and ineffectively-explained contracts on a PASS so the shape is visible even when the money agrees
      * when the difference it claims to explain is larger than rounding can produce.
      */
     ROUNDING_CONVENTION,
