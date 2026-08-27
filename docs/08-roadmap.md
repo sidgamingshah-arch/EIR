@@ -240,7 +240,20 @@ Must be ready **before** 1 April 2027; runs alongside Phase 3.
 reference on every contract where the presumption was applied.
 
 **Exit gate: met on the second half, and the first half is not this phase's to meet.** TF-1 asserts
-the rebuttal evidence over a population and per contract. "Completes over the full book" is a
+the rebuttal evidence over a population and per contract, and all five Phase 4 invariants are swept
+over generated populations as well as pinned on fixtures — 2,700 tries across six properties. Four
+of the five publish a **count** as their deviation, and a count is exactly the figure that comes out
+right on a four-row fixture and wrong on a population: an off-by-one at a boundary, a filter that
+drops a category, a shortcut that holds for the ordering the fixture happens to use.
+
+Every property recomputes the answer from the invariant's definition rather than from a run of the
+code. LC-1 is the clearest: it is *defined* pairwise — no survivor of the 2030 deadline queued behind
+any cohort that runs off before it — and implemented by comparing against the minimum non-survivor
+priority. The property computes the pairwise form and compares, which is what establishes that the
+shortcut computes the same set. Confirmed by mutation: `min` for `max`, `>` for `>=`, and TM-1's
+`isAfter` for `!isBefore` were each introduced deliberately and each was caught, one of them shrunk
+to a minimal counterexample in eighteen steps. A property suite that has never been seen to fail is
+not evidence, and this programme has recorded three tautologies wearing invariant ids already. "Completes over the full book" is a
 reconciliation between the valuation population and the contract master, and
 `TransitionValuationRun.coverageAgainst` performs it when a caller supplies the book size — but the
 run cannot know that a contract exists and was never presented to it, so the completeness half needs
