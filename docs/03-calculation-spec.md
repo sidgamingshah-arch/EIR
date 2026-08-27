@@ -908,10 +908,12 @@ period close.
 | POCI-1 | Credit-adjusted EIR unchanged across a cure | Event |
 | HB-1 | No discontinued hedge relationship without an active basis-adjustment amortisation schedule | Every period |
 | HB-2 | No hedging or swap cost present in any EIR cash flow stream | Every period |
-| SL-1 | Σ sub-ledger contract balances = GL control account balance | Period close |
-| SL-2 | Σ journal debits = Σ journal credits, per run and per contract | Every posting |
-| DT-1 | Re-run of a closed period reproduces published figures bit-identically | Nightly replay |
+| SL-1 | Σ sub-ledger contract balances = GL control account balance, with **zero unexplained** difference — an explained difference needs a cause and a narrative, and the claims filed against an account may not exceed its difference in gross | Period close |
+| SL-2 | Σ journal debits = Σ journal credits, **per contract** — the run grain is the sum of the same residuals and is not a second check. Deviation is the total **absolute** residual | Every posting |
+| DT-1 | Re-run of a closed period reproduces published figures **bit-identically** — scale included, so `1.0` against `1.00` is a breach — **and** resolves against the policy versions in force then, including a kind in force that neither run consulted | Nightly replay |
 | TG-1 | Every Tier 3 population has a current, in-date equivalence test on file | Annual |
+| CL-1 | A closed period is never mutated; a correction is a dated restatement artefact in system time, leaving business time alone (FR-902) | Period close |
+| RC-1 | The contractual interest leg ties to core banking with zero unexplained difference (FR-804, C-14) | Period close |
 | PL-1 | No exposure has income suspended except under a pool definition in force on the date (FR-608) | Every period |
 | PL-2 | Only portfolio-managed products — cards and KCC — are suspended at pool level (FR-608) | Pool approval |
 | TF-1 | No transition fair value relies on the ACPIR 19 paragraph 19 presumption without a rebuttal evidence reference (FR-908) | Transition valuation |
@@ -995,6 +997,41 @@ spending effort badly is not an accounting breach and putting a programme-manage
 this table is how the table stops being read. And valuation coverage against the contract master is
 reported as data too: a contract missing from a valuation population was never presented, so an id
 raised from the run would attribute a data-feed problem to the valuation.
+
+**On what four independent reviews of Phase 5 found, and why the tally matters.** Phase 5's four
+units were built in parallel and reviewed adversarially, one reviewer per unit, each asked to
+construct a failing input for every invariant the unit published. Every unit's own tests passed —
+205 of them — and the reviews still found:
+
+| Finding | Family |
+|---|---|
+| DT-1's policy leg iterated only the kinds a *run* had stamped, so two unstamped runs compared nothing and returned a **pass** | control that cannot fail |
+| `isVacuous()` was computed, honest, and **not in the result**, so a comparison of nothing reported green | control that cannot fail |
+| SL-1's register check gated on the account *already agreeing*, so a cancelling pair of explanations was invisible wherever it was not | control that cannot fail |
+| An explanation filed twice reduced RC-1's deviation twice; duplicate *figure* lines were refused with careful reasoning | asymmetric guard on the input that reduces |
+| Explanations carried no period, while both figure sides were period-checked | asymmetric guard on the input that reduces |
+| A UTC+14 date-widening copied between two packages | one rule, two places |
+| Multi-currency aggregation answered in opposite ways by two files in one package | one rule, two places |
+| Three javadocs describing a scope the code did not have | one rule, two places |
+
+**Two families, and both were already in this document.** "A computed control nobody asserts is
+indistinguishable from one that does not exist, and a control asserting something other than its own
+statement is worse — it reads as coverage" was written for `S3-1`. "One rule stated in two places,
+where only one place has it" was written for the four-eyes comparison. Phase 5 supplies eight more
+instances, which is enough to stop treating either as a surprise.
+
+The third family is new and worth naming: **the guard was always on the input that could only make a
+figure worse, never on the input that could make it better.** RC-1 refused a duplicate engine
+figure and a duplicate explanation was free; both figure sides were period-checked and the
+explanation was not. An input that *reduces* a deviation deserves the stricter guard, not the
+looser one, and in both cases it had none.
+
+**What that says about the method.** A unit's own tests are written by whoever holds its
+assumptions, so they verify the implementation against the intent and cannot see a defect in the
+intent. Two mitigations are now standard here: an adversarial reader per unit who must construct a
+failing input for each published invariant, and **mutating the implementation to confirm the test
+can fail at all**. The second caught nothing in Phase 5 — every fix's test failed as designed under
+mutation — which is the outcome that makes it worth continuing to run.
 
 **On PC-1's arity.** A projection can be screened along more than one route at once: the
 classified-fee route always applies, and `LMS_AUTHORITATIVE` adds the billed-schedule attestation on

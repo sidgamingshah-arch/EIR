@@ -292,19 +292,52 @@ goes first, and it is the one that never needs a reconstructed rate at all.
 
 ---
 
-## Phase 5 — Batch, ledger and close (Feb–Apr 2027)
+## Phase 5 — Batch, ledger and close (Feb–Apr 2027) — **FRAMEWORK-FREE CORE DELIVERED**
 
-| Workstream | Deliverable | Requirements |
-|---|---|---|
-| `eir-batch` | Spring Batch partitioned runs; restartability; per-contract isolation | [ADR-0007](adr/0007-spring-batch-for-runs.md) |
-| `eir-gl` | Balanced journals; summarised GL postings | FR-802…803 |
-| Close workflow | Hard gates; immutable closed periods; read-only partitions | FR-901…902 |
-| Replay | Shadow-table replay with byte comparison; nightly sampled run | FR-903, C-12 |
-| Reconciliations | SL-1, C-14 to core banking, C-04, C-05 | FR-803…804 |
-| `eir-api` | Full surface including the trace endpoint | [06](06-api-spec.md) |
+| Workstream | Deliverable | Requirements | State |
+|---|---|---|---|
+| `eir-gl` | Balanced journals; summarised GL postings | FR-802…803 | `gl/journal` and `gl/posting`. **SL-2** and **SL-1** both had identifiers and no evaluator |
+| Close workflow | Hard gates; immutable closed periods; read-only partitions | FR-901…902 | `policy/close` — refusals as values, exception acceptance under four eyes, **CL-1** on immutability |
+| Replay | Shadow-table replay with byte comparison; nightly sampled run | FR-903, C-12 | `policy/replay` — **DT-1** with a scale-sensitive comparison and the policy-then-in-force half |
+| Reconciliations | SL-1, C-14 to core banking, C-04, C-05 | FR-803…804 | `policy/reconciliation` — **RC-1**; C-04 and C-05 landed in Phase 3 |
+| `eir-batch` | Spring Batch partitioned runs; restartability; per-contract isolation | [ADR-0007](adr/0007-spring-batch-for-runs.md) | **Deferred.** Unblocked by [ADR-0010](adr/0010-framework-ban-fails-closed.md); see below |
+| `eir-api` | Full surface including the trace endpoint | [06](06-api-spec.md) | **Not started** |
 
 **Exit gate:** a 10M-contract synthetic close inside 4 hours; a replay of that close is
 byte-identical; the close workflow refuses to close on any red invariant.
+
+**Exit gate: one of three met.** The close workflow refuses to close on any red invariant —
+that is `policy/close`, and it is the third clause. The first two are load and replay *at scale*,
+and neither is met: there is no run to load, so there is no 10M-contract close to time and no close
+to replay. What exists is the arithmetic each of those gates would be measuring, with the controls
+that would decide whether the answer was right.
+
+**Why the Spring half is deferred rather than blocked.** Central is reachable and Spring Batch
+resolves; this is a choice. Spring Batch is the *runner*, and wiring a runner with no database
+connection and no application to host it buys network dependence and configuration ceremony rather
+than verified behaviour — the same reasoning that made `eir-persistence` ship as DDL in Phase 2.
+ADR-0010 makes `eir-batch` a one-pom change when there is something for it to run.
+
+**What "delivered" does not mean here.** Three qualifications:
+
+- **Nothing in `src/main` calls any of it.** `GlReconciliation`, `PeriodCloseGate`,
+  `ReplayComparison` and `CoreBankingReconciliation` are reachable only from their own tests. Every
+  Phase 5 control is live code with no caller, and will stay so until an orchestration layer exists.
+  SL-1's only appearance in `main` outside its own package remains `FailureIsolation`'s run-level
+  breach set — a control named in a list of controls, which is what it was before Phase 5 gave it an
+  evaluator.
+- **`read-only partitions` is schema, not code.** FR-902's partition-level enforcement lives in
+  V2's DDL (verified by execution in Phase 2); the Java models the *restatement artefact* that makes
+  immutability workable, not the lock.
+- **The 4-hour figure is untested and remains an estimate**, as does ADR-0009's core-hour costing.
+  A load test belongs with `eir-batch`.
+
+**The review finding worth carrying into Phase 6.** Four units, built in parallel, reviewed
+adversarially one reviewer each — every unit green on its own 205 tests, and the reviews still
+found three controls that could not fail, two guards missing on exactly the input that reduces a
+figure, and three javadocs describing a scope the code did not have. The full tally and the two
+mitigations now standard — an adversarial reader per unit, and mutating the implementation to prove
+each test can fail — are in [03 § 9](03-calculation-spec.md#9-invariants).
 
 ---
 

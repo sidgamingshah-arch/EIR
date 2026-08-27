@@ -83,9 +83,9 @@ from the [functional spec](02-functional-spec.md) and audit workpapers.
 | C-09 | **Product taxonomy audit.** Classification decisions audited; gold-loan segregation verified | Periodic internal audit |
 | C-10 | **Tier 3 equivalence re-test.** Solved-versus-approximated comparison re-performed (invariant TG-1) | Annual |
 | C-11 | **Pool back-test.** Pool EIR against contract-level on a statistical sample; breach forces contract-level | Quarterly |
-| C-12 | **Determinism replay.** Sampled closed period replayed and byte-compared (invariant DT-1) | Nightly |
-| C-13 | **Sub-ledger to GL.** Zero unexplained difference (invariant SL-1) | Period close |
-| C-14 | **Contractual leg to core banking.** Zero unexplained difference | Period close |
+| C-12 | **Determinism replay.** Sampled closed period replayed and byte-compared — scale included, and against the policy versions in force then, not today's (invariant DT-1) | Nightly |
+| C-13 | **Sub-ledger to GL.** Zero *unexplained* difference: an explanation carries a cause and a narrative, and the claims on an account may not exceed its difference in gross (invariant SL-1) | Period close |
+| C-14 | **Contractual leg to core banking.** Zero unexplained difference, compared at the scale the borrower was billed (invariant RC-1) | Period close |
 | C-15 | **FTP coherence.** EIR compared to treasury's internal funds-transfer-pricing rate for the same exposure; material divergence investigated | Monthly |
 
 C-03, C-04 and C-05 have **no IFRS 9 analogue** — they exist because of ACPIR's India-specific
