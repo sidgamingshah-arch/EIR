@@ -198,11 +198,24 @@ class ReplayDeterminismPropertiesTest {
         assertThat(withStamps.policyDiscrepancyCount()).isEqualTo(1);
         assertThat(withStamps.dtOne().satisfied()).isFalse();
 
-        // Cite nothing, and the same figures pass outright.
+        // Cite nothing, and the same figures pass outright — PROVIDED there are figures. jqwik
+        // shrank this to the empty list and found the case: no figures and no stamps is a
+        // comparison that compared nothing, and DT-1 now refuses to be satisfied by one. The
+        // guard is the precondition rather than a narrower generator, because the empty case is
+        // worth asserting and not worth excluding.
         ReplayComparison withoutStamps = compare(figures, figures, Map.of(), Map.of());
-        assertThat(withoutStamps.dtOne().satisfied()).isTrue();
-        assertThat(withoutStamps.dtOne().deviation()).isEqualByComparingTo(BigDecimal.ZERO);
         assertThat(withoutStamps.isBitIdentical()).isTrue();
+        if (figures.isEmpty()) {
+            assertThat(withoutStamps.isVacuous())
+                .as("nothing on either leg")
+                .isTrue();
+            assertThat(withoutStamps.dtOne().satisfied())
+                .as("a control that looked at nothing does not report a reproduction")
+                .isFalse();
+        } else {
+            assertThat(withoutStamps.dtOne().satisfied()).isTrue();
+            assertThat(withoutStamps.dtOne().deviation()).isEqualByComparingTo(BigDecimal.ZERO);
+        }
     }
 
     /**

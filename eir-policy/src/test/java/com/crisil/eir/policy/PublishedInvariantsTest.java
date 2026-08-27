@@ -39,8 +39,16 @@ import org.junit.jupiter.api.Test;
  *
  * <p><b>On the deviations.</b> None of the four has a money size, and each therefore carries a
  * count: versions implicated, uncovered days, fee codes without a default, or simply one. That
- * is deliberate and it is why they could not share {@link InvariantId#DT_1}, whose deviation is
- * an amount. {@code InvariantResult.conjunction} keeps only the first breach's deviation among
+ * is deliberate and it is why they could not share {@link InvariantId#DT_1}.
+ *
+ * <p>This paragraph used to say DT-1's own deviation "is an amount". It is not, and it never was
+ * asserted to be here — DT-1 had no evaluator when this was written, and Phase 5's
+ * {@code replay.ReplayComparison} gave it one whose deviation is a count of figures and policy
+ * kinds that did not reproduce. A count is right for it: a scale-only difference ({@code 1.0}
+ * against {@code 1.00}) is precisely what a bit-identical comparison exists to catch and has no
+ * meaningful money size at all. Corrected here rather than left standing, because a sentence
+ * describing a control in a file that does not implement it is the "one rule stated in two
+ * places" defect in its cheapest form — the copy nobody runs is the copy that goes stale. {@code InvariantResult.conjunction} keeps only the first breach's deviation among
  * results sharing an id — a defect this engine has recorded finding three times — so a count
  * and an amount under one identifier publishes whichever came first and loses the other.
  */

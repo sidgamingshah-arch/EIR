@@ -98,7 +98,24 @@ public enum DiscrepancyKind {
      * here too, because a replay whose policy has been dropped from the registry has to fail
      * something, and DT-1 is the control that was asked to run.
      */
-    POLICY_NOT_IN_FORCE_AT_PERIOD_END(true, "the version used was not in force for the period");
+    POLICY_NOT_IN_FORCE_AT_PERIOD_END(true, "the version used was not in force for the period"),
+
+    /**
+     * A policy kind the registry says governed the period, which <em>neither</em> run cited.
+     *
+     * <p>Added because without it the policy half of FR-903 degraded to a no-op that reported a
+     * pass. The comparison iterated only the kinds at least one run had stamped, so two runs
+     * carrying no stamps at all compared nothing and returned green — against a registry that did
+     * hold a version in force for the period. "Under the policy then in force is not an optional
+     * half of the requirement" was in the class javadoc while nothing forced the runs to give it
+     * anything to check.
+     *
+     * <p>It is the one policy finding the <em>timeline</em> raises rather than the two runs, which
+     * is what makes the registry argument load-bearing instead of decorative: a kind in force that
+     * nobody consulted is a period reproduced without reference to a rule that governed it, and
+     * neither run can notice its own omission.
+     */
+    POLICY_KIND_NOT_CONSULTED(true, "a kind in force for the period was cited by neither run");
 
     private final boolean policy;
     private final String statement;

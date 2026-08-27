@@ -248,18 +248,33 @@ public final class ReplayComparison {
 
         // Declaration order, via a LinkedHashSet over PolicyKind.values(), so the report reads the
         // same every night regardless of which kinds each run happened to consult.
-        Set<PolicyKind> consulted = new LinkedHashSet<>();
+        // Seeded from the kinds the REGISTRY says governed the period as well as the kinds the
+        // runs cited. Iterating only what the runs cited made the whole policy leg unfailable
+        // whenever neither run carried stamps — the default shape of a partly-wired harness — so
+        // two runs with one matching figure and no stamps at all returned a pass against a
+        // registry that held a version in force. The timeline could never raise a finding of its
+        // own, which made the registry argument decorative.
+        Set<PolicyKind> inScope = new LinkedHashSet<>();
         for (PolicyKind kind : PolicyKind.values()) {
-            if (published.versionOf(kind).isPresent() || replayed.versionOf(kind).isPresent()) {
-                consulted.add(kind);
+            if (published.versionOf(kind).isPresent() || replayed.versionOf(kind).isPresent()
+                || inForceAtPeriodEnd.containsKey(kind)) {
+                inScope.add(kind);
             }
         }
 
         List<ReplayDiscrepancy> findings = new ArrayList<>();
-        for (PolicyKind kind : consulted) {
+        for (PolicyKind kind : inScope) {
             Optional<String> citedAtClose = published.versionOf(kind);
             Optional<String> citedOnReplay = replayed.versionOf(kind);
 
+            if (citedAtClose.isEmpty() && citedOnReplay.isEmpty()) {
+                // In force for the period and cited by neither run. Only the timeline can see
+                // this: a run cannot notice a rule it never consulted.
+                findings.add(new ReplayDiscrepancy(
+                    DiscrepancyKind.POLICY_KIND_NOT_CONSULTED, kind.name(),
+                    inForceAtPeriodEnd.get(kind), ReplayDiscrepancy.ABSENT));
+                continue;
+            }
             if (citedAtClose.isPresent() && citedOnReplay.isEmpty()) {
                 findings.add(new ReplayDiscrepancy(
                     DiscrepancyKind.POLICY_VERSION_MISSING_FROM_REPLAY, kind.name(),
@@ -341,6 +356,20 @@ public final class ReplayComparison {
      */
     public InvariantResult dtOne() {
         String detail = describe();
+        if (isVacuous()) {
+            // A comparison that compared nothing is not a reproduction. isVacuous() existed and
+            // was honest, and it was not in the RESULT — so a caller doing
+            // allMatch(InvariantResult::satisfied) got green from a control that had looked at
+            // nothing, with the only trace a substring in a prose detail. That is the codebase's
+            // signature defect, and publishing the fact in the detail is not a substitute for
+            // publishing it in the verdict.
+            //
+            // Deviation 1: one thing needs a remedy, which is the comparison itself.
+            return InvariantResult.fail(InvariantId.DT_1,
+                detail + " — DT-1 cannot be satisfied by a comparison that compared nothing;"
+                    + " C-12's nightly replay proves the property only over what it looked at",
+                BigDecimal.ONE);
+        }
         if (discrepancies.isEmpty()) {
             return InvariantResult.pass(InvariantId.DT_1, detail);
         }
@@ -438,6 +467,17 @@ public final class ReplayComparison {
      * a control that did not run rather than as one that passed.
      */
     public boolean isVacuous() {
+        // BOTH legs empty. Widening this to "either leg" was tried and reverted, and the reason
+        // is worth recording: the case it was aimed at — figures present, no policy stamps — is
+        // now caught at its source by POLICY_KIND_NOT_CONSULTED, which fires for every kind the
+        // registry says governed the period and neither run cited. Two mechanisms for one
+        // condition is this codebase's recurring defect, and the second one over-reached: it also
+        // failed a comparison whose registry legitimately holds nothing in force for the period.
+        //
+        // That residual case — a closed period with no policy version in force at all — is real
+        // and is NOT this control's to raise. PV-1 already states it ("a policy version resolves
+        // for every date in a closed period"), and duplicating it here would put one rule in two
+        // places with two deviations.
         return figuresCompared() == 0 && policyKindsCompared() == 0;
     }
 

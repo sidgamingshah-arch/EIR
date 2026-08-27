@@ -375,10 +375,12 @@ class ReplayComparisonTest {
             // in force however well the figures reproduce.
             ReplayRun published = ReplayRun.published(
                 "RUN-202704-ORIGINAL", 202704, publishedFigures(),
-                Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.2"));
+                Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.2",
+                    PolicyKind.ROUTING_TABLE, "ROUTE-2027.1"));
             ReplayRun replayed = ReplayRun.replayOf(
                 "RUN-202704-REPLAY-N1", "RUN-202704-ORIGINAL", 202704, publishedFigures(),
-                Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.2"));
+                Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.2",
+                    PolicyKind.ROUTING_TABLE, "ROUTE-2027.1"));
 
             ReplayComparison comparison =
                 ReplayComparison.of(APRIL_2027, published, replayed, supersededTimeline());
@@ -394,6 +396,61 @@ class ReplayComparisonTest {
                     assertThat(finding.found()).isEqualTo("FEE-2027.2");
                 });
             assertThat(comparison.dtOne().deviation()).isEqualByComparingTo(BigDecimal.ONE);
+        }
+
+        @Test
+        @DisplayName("a kind in force that NEITHER run cited is a finding only the timeline can raise")
+        void aKindNeitherRunConsulted() {
+            // The no-op this closes. The comparison used to iterate only the kinds at least one
+            // run had stamped, so two runs carrying no stamps compared nothing on the policy leg
+            // and DT-1 returned a pass — against a registry that did hold versions in force for
+            // the period. Half of FR-903 degraded silently, and the only trace was
+            // "0 policy kinds compared" inside a prose detail.
+            //
+            // Neither run can notice its own omission: a run cannot report a rule it never
+            // consulted. So this is the one policy finding the TIMELINE raises rather than the two
+            // runs, and it is what makes the registry argument load-bearing rather than
+            // decorative.
+            ReplayComparison comparison = ReplayComparison.of(
+                APRIL_2027,
+                ReplayRun.published("RUN-NO-STAMPS", 202704, publishedFigures(), Map.of()),
+                ReplayRun.replayOf("RUN-NO-STAMPS-REPLAY", "RUN-NO-STAMPS", 202704,
+                    publishedFigures(), Map.of()),
+                supersededTimeline());
+
+            assertThat(comparison.figureDiscrepancyCount())
+                .as("the figures reproduce perfectly, which is exactly why the policy leg had to"
+                    + " be able to fail on its own")
+                .isZero();
+            assertThat(comparison.dtOne().satisfied()).isFalse();
+            assertThat(comparison.discrepanciesOf(DiscrepancyKind.POLICY_KIND_NOT_CONSULTED))
+                .as("FEE_RULE_SET and ROUTING_TABLE both governed April 2027 and neither run"
+                    + " cited either")
+                .hasSize(2)
+                .allSatisfy(finding -> assertThat(finding.found())
+                    .isEqualTo(ReplayDiscrepancy.ABSENT));
+            assertThat(comparison.dtOne().deviation()).isEqualByComparingTo(BigDecimal.valueOf(2));
+        }
+
+        @Test
+        @DisplayName("a kind BOTH runs cited correctly raises nothing, so the check is not blanket")
+        void consultedKindsRaiseNothing() {
+            // The other half: the finding fires on absence, not on the registry merely holding a
+            // version. Without this the previous test would pass against an implementation that
+            // flagged every governing kind unconditionally.
+            ReplayComparison comparison = ReplayComparison.of(
+                APRIL_2027,
+                ReplayRun.published("RUN-STAMPED", 202704, publishedFigures(),
+                    Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.1",
+                        PolicyKind.ROUTING_TABLE, "ROUTE-2027.1")),
+                ReplayRun.replayOf("RUN-STAMPED-REPLAY", "RUN-STAMPED", 202704, publishedFigures(),
+                    Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.1",
+                        PolicyKind.ROUTING_TABLE, "ROUTE-2027.1")),
+                supersededTimeline());
+
+            assertThat(comparison.discrepanciesOf(DiscrepancyKind.POLICY_KIND_NOT_CONSULTED))
+                .isEmpty();
+            assertThat(comparison.dtOne().satisfied()).isTrue();
         }
 
         @Test
@@ -456,10 +513,12 @@ class ReplayComparisonTest {
             // twice would make the deviation a function of how many checks happen to be written.
             ReplayRun published = ReplayRun.published(
                 "RUN-202704-ORIGINAL", 202704, publishedFigures(),
-                Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.2"));
+                Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.2",
+                    PolicyKind.ROUTING_TABLE, "ROUTE-2027.1"));
             ReplayRun replayed = ReplayRun.replayOf(
                 "RUN-202704-REPLAY-N1", "RUN-202704-ORIGINAL", 202704, publishedFigures(),
-                Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.1"));
+                Map.of(PolicyKind.FEE_RULE_SET, "FEE-2027.1",
+                    PolicyKind.ROUTING_TABLE, "ROUTE-2027.1"));
 
             ReplayComparison comparison =
                 ReplayComparison.of(APRIL_2027, published, replayed, supersededTimeline());
@@ -551,12 +610,20 @@ class ReplayComparisonTest {
                 ReplayRun.replayOf("RUN-EMPTY-REPLAY", "RUN-EMPTY", 202704, Map.of(), Map.of()),
                 supersededTimeline());
 
-            assertThat(comparison.dtOne().satisfied()).isTrue();
-            assertThat(comparison.isVacuous())
-                .as("passed, and compared nothing — a control that did not run")
-                .isTrue();
+            assertThat(comparison.isVacuous()).isTrue();
+            assertThat(comparison.dtOne().satisfied())
+                .as("compared nothing, so it does not report a reproduction. This assertion"
+                    + " previously expected TRUE — isVacuous() existed and was honest, and it was"
+                    + " not in the RESULT, so a caller doing allMatch(InvariantResult::satisfied)"
+                    + " got green from a control that had looked at nothing. Publishing the fact"
+                    + " in a prose detail is not a substitute for publishing it in the verdict.")
+                .isFalse();
+            assertThat(comparison.dtOne().deviation())
+                .as("one thing needs a remedy: the comparison itself")
+                .isEqualByComparingTo(BigDecimal.ONE);
             assertThat(comparison.dtOne().detail())
-                .contains("0 figures and 0 policy kinds compared");
+                .contains("0 figures and 0 policy kinds compared")
+                .contains("cannot be satisfied by a comparison that compared nothing");
         }
 
         @Test
