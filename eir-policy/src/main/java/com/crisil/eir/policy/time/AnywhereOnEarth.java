@@ -1,4 +1,4 @@
-package com.crisil.eir.domain;
+package com.crisil.eir.policy.time;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -29,14 +29,27 @@ import java.util.Objects;
  * {@link ZoneOffset#MAX} reach ±18:00, which no jurisdiction uses; using them would widen the
  * range by another six hours for no gain in honesty.
  *
- * <p><b>Why this lives in {@code eir-domain}.</b> It was package-private to
- * {@code policy.preview}, and {@code policy.close.PeriodCloseGate} then needed the same widening
- * for the same reason — an operator's close timestamp against a period end date — and copied the
- * {@code UTC+14} constant with a comment saying it belonged here. Two statements of one rule is
- * this codebase's recurring defect, and a date-to-instant widening with no dependencies is
- * exactly the shape {@code eir-domain} is for. Both callers now read the same constant, so the
- * conservative range cannot drift between the gate that admits a policy version and the gate that
- * closes a period.
+ * <p><b>Why this lives in {@code eir-policy.time} and not in {@code eir-domain}.</b> It was
+ * package-private to {@code policy.preview}, and {@code policy.close.PeriodCloseGate} then needed
+ * the same widening for the same reason — an operator's close timestamp against a period end date
+ * — and copied the {@code UTC+14} constant with a comment saying it belonged in
+ * {@code eir-domain}. A review agreed. Both were wrong, and the build said so: eir-calc's
+ * {@code DeterminismTest.noSourceInTheCalculationPathReadsAClock} scans every main source in
+ * {@code eir-domain} and {@code eir-calc} and bans the tokens {@code Instant}, {@code ZoneOffset},
+ * {@code ZoneId}, {@code LocalDateTime} and the rest, because "time is always an input (03 § 1.1);
+ * a calculation that reads 'now' cannot be replayed" — invariant DT-1 and the basis of ADR-0003.
+ *
+ * <p>This class reads no clock: every method is a pure function of a supplied {@link LocalDate}.
+ * But the ban is a deliberately conservative <em>proxy</em>, and a proxy that admits the first
+ * plausible exception stops being one — the exemption would then have to be argued case by case
+ * inside a test whose value is that it never is. Keeping the audit surface free of time-zone
+ * vocabulary is itself the property worth having, and this widening is a policy-gate concern rather
+ * than a calculation one: nothing in the arithmetic needs it.
+ *
+ * <p>A sibling package inside {@code eir-policy} serves both callers, so the duplication is still
+ * gone — the conservative range cannot drift between the gate that admits a policy version and the
+ * gate that closes a period — without putting {@code ZoneOffset} where DT-1's guard would have to
+ * make an exception for it.
  */
 public final class AnywhereOnEarth {
 

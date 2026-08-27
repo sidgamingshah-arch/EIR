@@ -1,8 +1,8 @@
 package com.crisil.eir.policy.close;
 
-import com.crisil.eir.domain.AnywhereOnEarth;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.policy.exception.ExceptionRecord;
+import com.crisil.eir.policy.time.AnywhereOnEarth;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumMap;

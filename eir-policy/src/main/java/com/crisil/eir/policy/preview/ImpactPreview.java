@@ -1,9 +1,9 @@
 package com.crisil.eir.policy.preview;
 
-import com.crisil.eir.domain.AnywhereOnEarth;
 import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Precision;
 import com.crisil.eir.domain.Rate;
+import com.crisil.eir.policy.time.AnywhereOnEarth;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
