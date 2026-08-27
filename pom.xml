@@ -21,6 +21,7 @@
     <module>eir-calc</module>
     <module>eir-policy</module>
     <module>eir-persistence</module>
+    <module>eir-gl</module>
   </modules>
 
   <properties>
@@ -117,6 +118,15 @@
         <artifactId>maven-enforcer-plugin</artifactId>
         <version>${enforcer.version}</version>
         <executions>
+          <!-- ADR-0010: this ban is INHERITED BY EVERY MODULE and fails closed. A module that
+               legitimately needs a framework disables this execution in its own pom with
+               <phase>none</phase> and a "FRAMEWORK EXEMPTION: <authority>" comment above the
+               plugin. FrameworkBanTest in eir-domain enforces all of that: it asserts the root
+               still declares the ban, that eir-domain and eir-calc carry no override of it, and
+               that every module which does override it states its authority. Do not move this to
+               pluginManagement — scoping the ban to the two modules 05 section 2.1 names would
+               make adding eir-batch a silent unbanning, and would drop the protection eir-policy
+               has acquired since that sentence was written. -->
           <execution>
             <id>ban-frameworks-in-calculation-path</id>
             <phase>validate</phase>

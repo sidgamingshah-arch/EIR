@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.crisil.eir</groupId>
+    <artifactId>eir-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>eir-gl</artifactId>
+  <name>EIR :: gl</name>
+  <description>
+    Journal construction and the GL boundary: balanced postings per contract (FR-802, invariant
+    SL-2) and the sub-ledger to control-account reconciliation (FR-803, invariant SL-1). The
+    engine POSTS to a general ledger; it is not one, per 08's scope table.
+
+    Framework-free, and it takes no exemption under ADR-0010. That is worth stating because
+    "GL adapter" sounds like the module where a framework would arrive: an adapter that speaks
+    to a real GL needs transport, and transport needs a library. It does not live here. This
+    module produces the postings as values; carrying them anywhere is eir-batch's problem, and
+    eir-batch is the module ADR-0010's exemption mechanism exists for.
+
+    Depends on eir-domain only. Journals are built from balances and amounts, not from
+    projections or solves — nothing here needs eir-calc, and depending on it would make the
+    ledger boundary look like part of the calculation path.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-domain</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>net.jqwik</groupId>
+      <artifactId>jqwik</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+    </dependency>
+  </dependencies>
+</project>
