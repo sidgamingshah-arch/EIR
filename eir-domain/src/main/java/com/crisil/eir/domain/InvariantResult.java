@@ -2,10 +2,12 @@ package com.crisil.eir.domain;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * The outcome of asserting one invariant, retained so that a run's invariant
@@ -152,6 +154,51 @@ public record InvariantResult(InvariantId id, boolean satisfied, String detail, 
      *
      * <p>See {@link #conjunction} for why this is not merely tidiness.
      */
+    /**
+     * The invariants a run was answerable for and produced no result under.
+     *
+     * <p><b>Why this is a method and not two copies of a loop.</b> Two runs in this engine publish
+     * population-level invariant sets, and both must answer "did anything actually assert this?"
+     * rather than "is there a failure in the list". A set derived only from what the subjects
+     * happened to publish cannot distinguish <em>no breaches</em> from <em>nothing looked at</em>,
+     * and the close gate's only absence check is that the whole list is empty — so a run that
+     * asserted one invariant and silently skipped the rest reads as clean. The two runs were
+     * written independently and only one of them had this; that is the shape of the defect this
+     * codebase records finding most often, and the remedy is one statement of the rule.
+     *
+     * <p><b>Order follows {@code answerableFor}, not the results.</b> A gap list is read by a
+     * person against a declared list of obligations, so it has to arrive in the order that list is
+     * written in; deriving it from result order would make the same gap render differently on two
+     * runs of the same book (FR-903 wants the opposite).
+     *
+     * <p>Note what this deliberately does not do: it does not publish a failed
+     * {@link InvariantResult} for a gap. An invariant's statement is a claim about figures, and
+     * marking S3-1 <em>breached</em> because nobody evaluated it is a false statement about the
+     * book in service of a true statement about the run. The caller reports the gap as a property
+     * of the run.
+     *
+     * @param answerableFor the invariants the run is obliged to answer, declared rather than
+     *                      derived; duplicates are ignored
+     * @param results       what it actually published
+     * @return the ids in {@code answerableFor} with no result of any kind, in that list's order
+     */
+    public static List<InvariantId> idsWithoutEvidence(
+        List<InvariantId> answerableFor, List<InvariantResult> results) {
+        Objects.requireNonNull(answerableFor, "answerableFor");
+        Objects.requireNonNull(results, "results");
+        Set<InvariantId> asserted = EnumSet.noneOf(InvariantId.class);
+        for (InvariantResult result : results) {
+            asserted.add(result.id());
+        }
+        List<InvariantId> gaps = new ArrayList<>();
+        for (InvariantId id : answerableFor) {
+            if (!asserted.contains(id) && !gaps.contains(id)) {
+                gaps.add(id);
+            }
+        }
+        return List.copyOf(gaps);
+    }
+
     public static List<InvariantResult> oneResultPerInvariant(List<InvariantResult> results) {
         Objects.requireNonNull(results, "results");
         Map<InvariantId, List<InvariantResult>> grouped = new LinkedHashMap<>();

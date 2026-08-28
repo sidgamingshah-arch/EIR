@@ -81,6 +81,37 @@ public record RunAggregate(
     List<String> policyVersionIds,
     List<String> blockingReasons) {
 
+    /**
+     * The invariants a month-end run is answerable for, declared rather than derived.
+     *
+     * <p><b>Why a declared list is needed when the aggregation already refuses an empty one.</b>
+     * {@code of} blocks a close where contracts computed and <em>no</em> invariant was asserted.
+     * That is all-or-nothing, and the failure it misses is the per-id one: a run whose contracts
+     * all published SL-2 and none published ST-2 has a non-empty invariant set, no red in it, and a
+     * control that simply is not there. Derived from what the subjects happened to publish, an id
+     * that stopped being asserted becomes indistinguishable from an id that passed —
+     * {@code OnboardingRun.POPULATION_INVARIANTS} makes the same point for onboarding, and this
+     * type not having it was the seam between two independently written units.
+     *
+     * <p><b>Why exactly these two.</b> {@code ContractPipeline.assertions} publishes SL-2 from
+     * {@code JournalEntry.sidesBalance()} and ST-2 from {@code Stage3Decomposition.againstLedger}
+     * for every contract it computes, unconditionally. Those are the two an obligation can be
+     * asserted over without knowing anything about the book.
+     *
+     * <p><b>Why S3-1 is deliberately absent, though it is the one with the most moving parts.</b>
+     * The pipeline publishes it only where a Stage 3 reconciliation exists, so a book with no
+     * Stage 3 accounts legitimately asserts it nowhere. An obligation red on every performing book
+     * is a control that gets argued down to a soft one within a quarter — the reasoning applied to
+     * TM-1 in 03 § 9, reached the same way. Its absence is caught elsewhere and by a mechanism that
+     * does not false-refuse: {@code ReconciliationScope.requiredForClose()} is true for the Stage 3
+     * four-way, so a close must present that tie from whoever holds the figures, and
+     * {@code RunClose} refuses to synthesise it. The two halves are complementary — this list
+     * catches an invariant that stopped being evaluated over subjects that exist, and the tie
+     * requirement catches a reconciliation nobody ran at all.
+     */
+    public static final List<InvariantId> POPULATION_INVARIANTS =
+        List.of(InvariantId.SL_2, InvariantId.ST_2);
+
     public RunAggregate {
         Objects.requireNonNull(runId, "runId");
         results = List.copyOf(Objects.requireNonNull(results, "results"));
@@ -183,6 +214,20 @@ public record RunAggregate(
             // contracts computed, nothing asserted, everything green.
             reasons.add(computed + " contract(s) computed and asserted no invariant at all");
         }
+        if (computed > 0) {
+            // The finer version of the check above. Conditioned on computed > 0 because an
+            // obligation cannot be owed over subjects that do not exist: on an empty population
+            // the reason two lines up is the one that applies, and reporting both would send a
+            // reader after a missing control when the missing thing is the population.
+            List<InvariantId> gaps =
+                InvariantResult.idsWithoutEvidence(POPULATION_INVARIANTS, aggregated);
+            if (!gaps.isEmpty()) {
+                reasons.add("no contract in a population of " + inPopulation.size() + " asserted "
+                    + gaps + ", which this run is answerable for; " + computed + " computed, so"
+                    + " the subjects existed and the control did not run — an id absent from the"
+                    + " report reads the same as an id that passed");
+            }
+        }
         for (InvariantResult result : aggregated) {
             if (!result.satisfied()) {
                 reasons.add(result.id() + " breached: " + result.detail());
@@ -213,6 +258,25 @@ public record RunAggregate(
             aggregated.add(entry.getValue().collapse(entry.getKey()));
         }
         return List.copyOf(aggregated);
+    }
+
+    /**
+     * The invariants this run is answerable for and produced no result under.
+     *
+     * <p>Reported as a gap rather than published as a failed {@link InvariantResult}: SL-2's
+     * statement is a claim about two sides of a journal, and marking it <em>breached</em> because
+     * nobody evaluated it would be a false statement about the book in service of a true one about
+     * the run. {@code InvariantResult.idsWithoutEvidence} holds the rule, shared with
+     * {@code OnboardingRun}, so that the two runs cannot drift on what an absence means.
+     *
+     * <p>Non-empty here always corresponds to a blocking reason, and the accessor exists anyway,
+     * because a reason is a sentence and a control report needs the ids.
+     */
+    public List<InvariantId> unassertedInvariants() {
+        if (computedCount() == 0) {
+            return List.of();
+        }
+        return InvariantResult.idsWithoutEvidence(POPULATION_INVARIANTS, invariants);
     }
 
     /** How many contracts produced figures. */

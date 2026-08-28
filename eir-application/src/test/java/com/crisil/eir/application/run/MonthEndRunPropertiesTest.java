@@ -149,8 +149,14 @@ class MonthEndRunPropertiesTest {
                 JournalLine.debit("1401-EIR-RECEIVABLE", debit, "accrual"),
                 JournalLine.credit("4101-INTEREST-INCOME", credit, "income")));
             population.add(contractId);
+            // Both obligations in RunAggregate.POPULATION_INVARIANTS, so that reportsCleanClose()
+            // below turns on the residual and not on a missing control. ST-2 is a pass because
+            // this property is about how SL-2's deviations aggregate; a generator that omitted it
+            // would make every case blocked and the assertion vacuous.
             results.add(ContractResult.computed(
-                contractId, Money.inr("486840.64"), entry, List.of(entry.sidesBalance())));
+                contractId, Money.inr("486840.64"), entry, List.of(
+                    entry.sidesBalance(),
+                    InvariantResult.pass(InvariantId.ST_2, "the accrual exponents agree"))));
             expectedAbsolute = expectedAbsolute.add(residual.amount().abs());
             signedSum = signedSum.add(residual.amount());
         }

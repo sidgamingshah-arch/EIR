@@ -73,8 +73,22 @@ class RunCloseTest {
             JournalLine.credit("2301-UNAMORTISED-FEE", Money.inr("208.63"), "fee amortisation")));
     }
 
+    /**
+     * A computed contract, carrying the two invariants {@code RunAggregate.POPULATION_INVARIANTS}
+     * declares a month-end run answerable for.
+     *
+     * <p>SL-2 is the journal's own {@code sidesBalance()} rather than a hand-written pass, so the
+     * fixture cannot claim a balance the entry does not have. ST-2 is a pass, because
+     * {@code Stage3Decomposition.againstLedger} is not reachable from this class's inputs — and
+     * carrying it at all is the point: a computed contract that publishes neither is what the
+     * unasserted-obligation refusal exists to catch, and {@code aRunThatSkippedAnObligation}
+     * exercises exactly that.
+     */
     private static ContractResult computed(String contractId) {
-        return ContractResult.computed(contractId, CLOSING_GCA, journal(contractId), List.of());
+        return ContractResult.computed(contractId, CLOSING_GCA, journal(contractId), List.of(
+            journal(contractId).sidesBalance(),
+            com.crisil.eir.domain.InvariantResult.pass(InvariantId.ST_2,
+                "accrual exponent from the schedule agrees with the one from the vector")));
     }
 
     /**
@@ -303,6 +317,54 @@ class RunCloseTest {
                 .extracting(com.crisil.eir.domain.InvariantResult::id)
                 .containsExactly(InvariantId.RC_1);
             assertThat(presentation.mayClose()).isFalse();
+        }
+    }
+
+    @Nested
+    @DisplayName("an obligation the run never evaluated")
+    class TheInvariantThatWasNotAsserted {
+
+        @Test
+        @DisplayName("a run that computed figures and skipped an obligation is refused")
+        void aRunThatSkippedAnObligation() {
+            // Found reviewing the seam between two units written independently. OnboardingRun
+            // declared its obligations and reported the gaps; RunAggregate derived its invariant
+            // list from whatever the contracts happened to publish. The gate cannot catch it: its
+            // only absence check is that the whole list is empty, and here it is not — SL-2 is
+            // present, green, over three contracts. Nothing is red and ST-2 simply is not there.
+            List<ContractResult> withoutStTwo = List.of("C1", "C2", "C3").stream()
+                .map(id -> ContractResult.computed(id, CLOSING_GCA, journal(id),
+                    List.of(journal(id).sidesBalance())))
+                .toList();
+
+            RunClose.ClosePresentation presentation = present(
+                List.of("C1", "C2", "C3"), List.of("C1", "C2", "C3"),
+                withoutStTwo, Money.inr("1601742.33"), portfolioTies());
+
+            assertThat(presentation.breaches())
+                .as("nothing is red: %s", presentation.evidence())
+                .isEmpty();
+            assertThat(presentation.decision().isRefused())
+                .as("and the gate is content, because a dashboard of one green control is"
+                    + " indistinguishable from a complete one")
+                .isFalse();
+            assertThat(presentation.mayClose()).isFalse();
+            assertThat(presentation.populationRefusals())
+                .singleElement(org.assertj.core.api.InstanceOfAssertFactories.STRING)
+                .contains("no result at all for [ST_2]");
+        }
+
+        @Test
+        @DisplayName("an empty population reports the population, not a missing control")
+        void anEmptyPopulationOwesNothing() {
+            // An obligation cannot be owed over subjects that do not exist. Two refusals for one
+            // fact would send a reader after a control that did not run when the missing thing is
+            // the population, so the gap is conditioned on something having been computed.
+            RunClose.ClosePresentation presentation = present(List.of(), List.of(), null);
+
+            assertThat(presentation.populationRefusals())
+                .singleElement(org.assertj.core.api.InstanceOfAssertFactories.STRING)
+                .contains("an empty population is a feed failure");
         }
     }
 

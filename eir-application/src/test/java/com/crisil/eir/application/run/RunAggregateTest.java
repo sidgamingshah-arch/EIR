@@ -45,6 +45,21 @@ class RunAggregateTest {
         JournalEntry entry = new JournalEntry(contractId, PERIOD, RUN, "MAIN", POSTED, List.of(
             JournalLine.debit("1401-EIR-RECEIVABLE", debit, "accrual"),
             JournalLine.credit("4101-INTEREST-INCOME", credit, "income")));
+        // Both of POPULATION_INVARIANTS, because that is what a computed contract publishes:
+        // ContractPipeline.assertions() takes SL-2 from the entry's own sidesBalance() and ST-2
+        // from Stage3Decomposition.againstLedger for every contract it computes. A fixture
+        // publishing only SL-2 is a run that skipped an obligation, which is the subject of
+        // ObligationsWithNoEvidence below and not the subject of the tests that use this helper.
+        return ContractResult.computed(contractId, CLOSING, entry, List.of(
+            entry.sidesBalance(),
+            InvariantResult.pass(InvariantId.ST_2, "the accrual exponents agree")));
+    }
+
+    /** A computed contract publishing only SL-2 — a run that skipped ST-2 entirely. */
+    private static ContractResult computedWithoutStTwo(String contractId) {
+        JournalEntry entry = new JournalEntry(contractId, PERIOD, RUN, "MAIN", POSTED, List.of(
+            JournalLine.debit("1401-EIR-RECEIVABLE", Money.inr("1000.00"), "accrual"),
+            JournalLine.credit("4101-INTEREST-INCOME", Money.inr("1000.00"), "income")));
         return ContractResult.computed(
             contractId, CLOSING, entry, List.of(entry.sidesBalance()));
     }
@@ -110,7 +125,11 @@ class RunAggregateTest {
             // the level of a single id: S3-1 was never in scope here, so it is silent rather than
             // green.
             assertThat(aggregate.invariants()).extracting(InvariantResult::id)
-                .containsExactly(InvariantId.SL_2);
+                .containsExactly(InvariantId.SL_2, InvariantId.ST_2);
+            assertThat(aggregate.unassertedInvariants())
+                .as("S3-1 is not an obligation: a performing book asserts it nowhere, and an"
+                    + " obligation red on every performing book becomes a soft one")
+                .isEmpty();
             assertThat(aggregate.reportsCleanClose()).isTrue();
         }
     }
@@ -250,6 +269,65 @@ class RunAggregateTest {
             assertThat(aggregate.describe()).contains("clean");
             assertThat(aggregate.policyVersionIds())
                 .containsExactly("ROUTING_TABLE=POL-RT-2028.1");
+        }
+    }
+
+    @Nested
+    @DisplayName("an obligation with no evidence, which is not the same as one with no breach")
+    class ObligationsWithNoEvidence {
+
+        @Test
+        @DisplayName("a run that computed figures and asserted only SL-2 is not a clean close")
+        void aSkippedObligationBlocks() {
+            // Found reviewing the seam between this type and OnboardingRun, written independently.
+            // OnboardingRun declared POPULATION_INVARIANTS and reported the gaps; this type derived
+            // its invariant list from whatever the contracts happened to publish, so an id that
+            // stopped being asserted became indistinguishable from one that passed. The existing
+            // all-or-nothing check does not reach it: the invariant set here is not empty.
+            RunAggregate aggregate = RunAggregate.of(
+                RUN, PERIOD, List.of("C-1", "C-2", "C-3"),
+                List.of(computedWithoutStTwo("C-1"), computedWithoutStTwo("C-2"),
+                    computedWithoutStTwo("C-3")),
+                List.of());
+
+            assertThat(aggregate.breaches())
+                .as("nothing is red — SL-2 passed over all three")
+                .isEmpty();
+            assertThat(aggregate.invariants()).extracting(InvariantResult::id)
+                .containsExactly(InvariantId.SL_2);
+            assertThat(aggregate.unassertedInvariants()).containsExactly(InvariantId.ST_2);
+            assertThat(aggregate.reportsCleanClose()).isFalse();
+            assertThat(aggregate.blockingReasons())
+                .anySatisfy(reason -> assertThat(reason)
+                    .contains("asserted [ST_2]")
+                    .contains("the subjects existed and the control did not run"));
+        }
+
+        @Test
+        @DisplayName("an empty population owes no obligation, and says so as a population fact")
+        void anEmptyPopulationOwesNothing() {
+            // Conditioned on something having been computed, because an obligation cannot be owed
+            // over subjects that do not exist. Two refusals for one fact would send a reader after
+            // a control that did not run when the missing thing is the population.
+            RunAggregate aggregate =
+                RunAggregate.of(RUN, PERIOD, List.of(), List.of(), List.of());
+
+            assertThat(aggregate.unassertedInvariants()).isEmpty();
+            assertThat(aggregate.reportsCleanClose()).isFalse();
+            assertThat(aggregate.blockingReasons())
+                .noneSatisfy(reason -> assertThat(reason).contains("answerable for"));
+        }
+
+        @Test
+        @DisplayName("a whole population quarantined owes nothing either")
+        void allQuarantinedOwesNothing() {
+            // Same reasoning: nothing computed, so nothing to assert an obligation over. The run
+            // is blocked, and blocked for the reason that is true of it.
+            RunAggregate aggregate = RunAggregate.of(
+                RUN, PERIOD, List.of("C-1"), List.of(quarantined("C-1")), List.of());
+
+            assertThat(aggregate.unassertedInvariants()).isEmpty();
+            assertThat(aggregate.reportsCleanClose()).isFalse();
         }
     }
 }

@@ -50,7 +50,13 @@ import java.util.Set;
  *   <li><b>a population, nothing computed</b> — every contract quarantined, which reconciles
  *       perfectly and means the run failed entirely;</li>
  *   <li><b>a shortfall</b> — contracts named and neither computed nor quarantined, which is the
- *       silent one, because those contracts are absent from both sides of every total.</li>
+ *       silent one, because those contracts are absent from both sides of every total;</li>
+ *   <li><b>a population that measured itself incompletely</b> — an invariant the run is answerable
+ *       for and produced no result under. Found reviewing the seam between two independently
+ *       written units: {@code OnboardingRun} declared its obligations and reported the gaps, and
+ *       {@code RunAggregate} derived its invariant list from whatever the contracts happened to
+ *       publish. The close gate cannot catch it, because its only absence check is that the whole
+ *       list is empty.</li>
  * </ul>
  *
  * <p>{@code RunAggregate.unaccountedFor()} already measures the third; this class is what makes it
@@ -210,6 +216,19 @@ public final class RunClose {
      */
     private static List<String> populationRefusals(RunAggregate aggregate) {
         List<String> refusals = new ArrayList<>();
+        // An invariant the run was answerable for and never evaluated. The gate cannot catch this:
+        // its only absence check is that the whole invariant list is empty, so a run that asserted
+        // SL-2 over ten million contracts and ST-2 over none presents a non-empty, all-green
+        // dashboard. Refused here, alongside the population failures, because it is the same kind
+        // of fact — a reason the evidence cannot be believed rather than a figure that does not
+        // tie — and because giving it an invariant id would put "nobody ran this" in the same list
+        // as a residual, where a reader would try to reconcile it.
+        if (!aggregate.unassertedInvariants().isEmpty()) {
+            refusals.add("the run produced no result at all for " + aggregate.unassertedInvariants()
+                + ", which it is answerable for over the " + aggregate.computedCount()
+                + " contract(s) it computed; an id absent from the dashboard reads exactly like an"
+                + " id that passed, and the close gate scans for red");
+        }
         if (aggregate.populationSize() == 0) {
             refusals.add("the contract source named no contracts for run " + aggregate.runId()
                 + " period " + aggregate.periodId() + "; every total below is nil and every"

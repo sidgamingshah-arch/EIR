@@ -314,6 +314,76 @@ class InvariantResultTest {
         }
     }
 
+    @Nested
+    @DisplayName("idsWithoutEvidence — no breaches and nothing looked at are different answers")
+    class WithoutEvidence {
+
+        @Test
+        @DisplayName("an obligation with no result of any kind is a gap")
+        void aMissingIdIsReported() {
+            // The defect this method exists for. A run answerable for SL-2 and ST-2 that publishes
+            // only SL-2 has a non-empty, all-green invariant set: nothing is red, and the control
+            // that would have found a Stage 3 exponent disagreement simply did not run. Scanning
+            // for red cannot see it, which is why the obligations are declared and not derived.
+            List<InvariantId> gaps = InvariantResult.idsWithoutEvidence(
+                List.of(InvariantId.SL_2, InvariantId.ST_2),
+                List.of(InvariantResult.pass(InvariantId.SL_2, "the entry balances")));
+
+            assertThat(gaps).containsExactly(InvariantId.ST_2);
+        }
+
+        @Test
+        @DisplayName("a failed result is evidence: the id was asserted and the answer was no")
+        void aBreachIsNotAGap() {
+            // Worth pinning because the two are easy to conflate and their remedies are opposite:
+            // a breach sends somebody to a figure, a gap sends somebody to the pipeline.
+            List<InvariantId> gaps = InvariantResult.idsWithoutEvidence(
+                List.of(InvariantId.SL_2),
+                List.of(InvariantResult.fail(InvariantId.SL_2, "8,000.00 against 7,000.00",
+                    new BigDecimal("1000.00"))));
+
+            assertThat(gaps).isEmpty();
+        }
+
+        @Test
+        @DisplayName("the order is the obligation list's, not the results'")
+        void orderFollowsTheObligations() {
+            // FR-903 wants the same run to render the same text. Derived from result order, the
+            // same two gaps would come back in whichever order the loop happened to produce, so a
+            // control report diffed between two runs of one book would show a spurious change.
+            List<InvariantId> gaps = InvariantResult.idsWithoutEvidence(
+                List.of(InvariantId.PC_1, InvariantId.SL_2, InvariantId.ST_2),
+                List.of(InvariantResult.pass(InvariantId.SL_2, "the entry balances")));
+
+            assertThat(gaps).containsExactly(InvariantId.PC_1, InvariantId.ST_2);
+        }
+
+        @Test
+        @DisplayName("an id declared twice is reported once")
+        void duplicatesCollapse() {
+            assertThat(InvariantResult.idsWithoutEvidence(
+                List.of(InvariantId.ST_2, InvariantId.ST_2), List.of()))
+                .containsExactly(InvariantId.ST_2);
+        }
+
+        @Test
+        @DisplayName("no obligations means no gaps, whatever was published")
+        void nothingOwedIsNoGap() {
+            // Not a vacuous case: it is the answer the callers rely on where an obligation cannot
+            // be owed — an empty population owes nothing, and reporting a missing control there
+            // would send a reader after the wrong fact.
+            assertThat(InvariantResult.idsWithoutEvidence(List.of(),
+                List.of(InvariantResult.pass(InvariantId.SL_2, "the entry balances")))).isEmpty();
+        }
+
+        @Test
+        @DisplayName("the gap list is unmodifiable, like every other list this type returns")
+        void theGapListIsUnmodifiable() {
+            assertThat(InvariantResult.idsWithoutEvidence(List.of(InvariantId.ST_2), List.of()))
+                .isUnmodifiable();
+        }
+    }
+
     @ParameterizedTest(name = "{0}")
     @EnumSource(InvariantId.class)
     @DisplayName("every invariant states itself, so a breach, a test and a workpaper name the same thing")

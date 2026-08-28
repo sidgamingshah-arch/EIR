@@ -294,17 +294,10 @@ public record OnboardingRun(
      * before the gate could examine an SPPI outcome.
      */
     public List<InvariantId> unassertedInvariants() {
-        Set<InvariantId> asserted = new LinkedHashSet<>();
-        for (InvariantResult result : invariants()) {
-            asserted.add(result.id());
-        }
-        List<InvariantId> gaps = new ArrayList<>();
-        for (InvariantId id : POPULATION_INVARIANTS) {
-            if (!asserted.contains(id)) {
-                gaps.add(id);
-            }
-        }
-        return List.copyOf(gaps);
+        // Delegated rather than looped here. RunAggregate needs the same answer over its own
+        // obligation list, and this method existing only in this class was how the month-end run
+        // came to have no per-id absence check at all.
+        return InvariantResult.idsWithoutEvidence(POPULATION_INVARIANTS, invariants());
     }
 
     /**
