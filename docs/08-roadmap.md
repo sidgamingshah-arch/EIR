@@ -146,6 +146,8 @@ the phase is not:
   nine modules and four now exist. Phase 2 never promised the rest, but "policy, routing and
   persistence delivered" should not be read as an engine anything can call: there is no
   orchestration layer, no run, no journal and no API.
+  *Superseded in part:* `eir-gl` landed in Phase 5 and `eir-application` after it, so six of the
+  nine exist. `eir-batch`, `eir-api` and `eir-app` still do not.
 
 > **Start the fee and cost taxonomy in Phase 0, not Phase 2.** It appears here because that is where
 > it completes, but it is the longest-lead item in the programme and it depends on other teams. If
@@ -220,6 +222,9 @@ worse — it reads as coverage.**
 - **Still no orchestration layer.** `eir-application`, `eir-batch`, `eir-gl`, `eir-api` and
   `eir-app` do not exist. There is no run that walks a portfolio calling any of this, so
   "reconciled every period" is a property of the types rather than of a close.
+  *Superseded:* `eir-gl` and `eir-application` landed in Phase 5. `RunClose` walks a population and
+  closes it, so this is now a property of a close — over a population supplied through a port, not
+  yet over a database. See Phase 5.
 
 ---
 
@@ -284,6 +289,9 @@ goes first, and it is the one that never needs a reconstructed rate at all.
 - **No transition job runs any of this.** 05 § 2 puts transition jobs in `eir-batch`, which does not
   exist, along with `eir-application`, `eir-gl`, `eir-api` and `eir-app`. These are types a run
   would call, and there is no run.
+  *Still true of the transition types specifically*, and narrower than it was: `eir-application`
+  exists and runs the month-end and replay paths (Phase 5), but nothing in it reaches the
+  `policy/transition` package. That remains the untouched half.
 - **The legacy cohort definitions are strings.** `LegacyCohort.definition` carries what the cohort
   selects as free text, matching the schema's `JSONB`. Nothing evaluates it, so a cohort's
   membership is asserted rather than derived — which is the right place to stop, since the
@@ -302,6 +310,7 @@ goes first, and it is the one that never needs a reconstructed rate at all.
 | Reconciliations | SL-1, C-14 to core banking, C-04, C-05 | FR-803…804 | `policy/reconciliation` — **RC-1**; C-04 and C-05 landed in Phase 3 |
 | `eir-batch` | Spring Batch partitioned runs; restartability; per-contract isolation | [ADR-0007](adr/0007-spring-batch-for-runs.md) | **Deferred.** Unblocked by [ADR-0010](adr/0010-framework-ban-fails-closed.md); see below |
 | `eir-api` | Full surface including the trace endpoint | [06](06-api-spec.md) | **Not started** |
+| `eir-application` | Framework-free orchestration: ports, onboarding, the per-contract run, replay, the run-level close | 05 § 3.1–3.3 | Delivered. The layer that gives every Phase 5 control a caller; see the first qualification below |
 
 **Exit gate:** a 10M-contract synthetic close inside 4 hours; a replay of that close is
 byte-identical; the close workflow refuses to close on any red invariant.
@@ -320,17 +329,39 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
 
 **What "delivered" does not mean here.** Three qualifications:
 
-- **Nothing in `src/main` calls any of it.** `GlReconciliation`, `PeriodCloseGate`,
-  `ReplayComparison` and `CoreBankingReconciliation` are reachable only from their own tests. Every
-  Phase 5 control is live code with no caller, and will stay so until an orchestration layer exists.
-  SL-1's only appearance in `main` outside its own package remains `FailureIsolation`'s run-level
-  breach set — a control named in a list of controls, which is what it was before Phase 5 gave it an
-  evaluator.
+- ~~**Nothing in `src/main` calls any of it.**~~ **Closed by `eir-application`.**
+  `application/close/RunClose` assembles a run's evidence and puts it to the gate: it constructs the
+  `JournalBatch` and reads **SL-2**, the `GlReconciliation` against the GL port and reads **SL-1**,
+  and the `CoreBankingReconciliation` against the CBS port and reads **RC-1**, then calls
+  `PeriodCloseGate.evaluate`. `application/replay/ReplayUseCase` does the same for
+  `ReplayComparison` and **DT-1**. What the wiring found, which no unit's own tests could:
+  - **No run could ever have closed.** `ReconciliationScope.requiredForClose()` is true for all
+    four of step 6's reconciliations and `RunClose` presented two, so the gate refused every close
+    with `RECONCILIATION_NOT_PRESENTED`. The gate was right. The Stage 3 four-way and the floor
+    duality are not derivable from a `ContractResult` — it carries a closing gross carrying amount
+    and a journal, no ECL allowance, no suspense balance, no stage — so they are a parameter,
+    supplied by whoever holds the figures and attributable to them. Synthesising them internally as
+    nil against nil would have presented as tied on every run in the book's history.
+  - **An invariant nobody evaluated read exactly like one that passed.** `OnboardingRun` declared
+    its obligations and reported the gaps; `RunAggregate`, written independently, derived its
+    invariant list from whatever the contracts happened to publish. Its existing absence check was
+    all-or-nothing, and the gate's only absence check is that the whole list is empty, so a run
+    whose contracts all published SL-2 and none published ST-2 closed clean. The rule now has one
+    statement — `InvariantResult.idsWithoutEvidence` — called by both runs.
+
+  SL-1's only appearance in `main` outside its own package used to be `FailureIsolation`'s run-level
+  breach set — a control named in a list of controls. That is no longer the only one.
 - **`read-only partitions` is schema, not code.** FR-902's partition-level enforcement lives in
   V2's DDL (verified by execution in Phase 2); the Java models the *restatement artefact* that makes
   immutability workable, not the lock.
 - **The 4-hour figure is untested and remains an estimate**, as does ADR-0009's core-hour costing.
   A load test belongs with `eir-batch`.
+
+**The one qualification `eir-application` adds rather than removes.** Its four units were built in
+parallel and **carry no independent adversarial review** — all four reviewers failed on the session
+limit. The merge commit records that, and the two findings above came from a self-review of the
+seams afterwards rather than from any unit's own 144 tests. Both were seam defects between units
+that were individually green, which is Phase 1's lesson arriving for the fourth time.
 
 **The review finding worth carrying into Phase 6.** Four units, built in parallel, reviewed
 adversarially one reviewer each — every unit green on its own 205 tests, and the reviews still

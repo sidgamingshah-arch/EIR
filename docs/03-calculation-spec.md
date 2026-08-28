@@ -1014,6 +1014,31 @@ construct a failing input for every invariant the unit published. Every unit's o
 | Multi-currency aggregation answered in opposite ways by two files in one package | one rule, two places |
 | Three javadocs describing a scope the code did not have | one rule, two places |
 
+**Two more, from wiring Phase 5's controls to a caller in `eir-application`.** The four
+`eir-application` units carry no independent adversarial review — all four reviewers failed on the
+session limit — so the substitute was a self-review of the *seams* between them, which is where
+Phase 1's four defects were and where these two were:
+
+| Finding | Family |
+|---|---|
+| `ReconciliationScope.requiredForClose()` is true for all four of step 6's reconciliations and `RunClose` presented two, so the gate refused **every** close | control with no caller |
+| `OnboardingRun` declared its obligations and reported the gaps; `RunAggregate` derived its invariant set from what the contracts happened to publish, so an invariant nobody evaluated read as one that passed | control that cannot fail; one rule, two places |
+
+**A fourth family, and the one this pair is really about: an unwired control is wrong in whichever
+direction nobody checked.** The first finding is the mirror image of everything above it — not a
+control that could not fail, but one that could not *pass*. `PeriodCloseGate` and
+`ReconciliationScope` were both correct and both well tested, and together they made a close
+impossible; a gate whose refusals nobody has to satisfy has no pressure on it in either direction.
+The lesson is not that the gate was wrong. It is that "live code with no caller", recorded honestly
+as a qualification in [08 § Phase 5](08-roadmap.md), was itself the defect, and the tests that
+found it could only be written once something called it.
+
+The second finding is the two older families arriving together, and its remedy is the same one the
+four-eyes comparison got: `InvariantResult.idsWithoutEvidence` states the rule once and both runs
+call it. Note what was *not* wrong — `RunAggregate` already refused a close where contracts computed
+and no invariant at all was asserted. The check was all-or-nothing, and the failure it missed was
+per-id. A control can be present, correct, and one granularity too coarse.
+
 **Two families, and both were already in this document.** "A computed control nobody asserts is
 indistinguishable from one that does not exist, and a control asserting something other than its own
 statement is worse — it reads as coverage" was written for `S3-1`. "One rule stated in two places,
@@ -1032,6 +1057,13 @@ intent. Two mitigations are now standard here: an adversarial reader per unit wh
 failing input for each published invariant, and **mutating the implementation to confirm the test
 can fail at all**. The second caught nothing in Phase 5 — every fix's test failed as designed under
 mutation — which is the outcome that makes it worth continuing to run.
+
+A third is now standard, from the `eir-application` pair: **wire a control to a caller and assert
+the caller's outcome, not only the control's.** Neither finding above is reachable from a unit test
+of the control itself, because both are statements about what a control does *for whoever invokes
+it*. The strongest single piece of evidence produced in that work was a mutation, not a test:
+breaking `idsWithoutEvidence` fails tests in three separate packages, which is what "one rule, one
+place" looks like from the outside once it is true.
 
 **On PC-1's arity.** A projection can be screened along more than one route at once: the
 classified-fee route always applies, and `LMS_AUTHORITATIVE` adds the billed-schedule attestation on
