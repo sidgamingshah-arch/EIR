@@ -1,5 +1,6 @@
 package com.crisil.eir.application.close;
 
+import com.crisil.eir.application.ContractResult;
 import com.crisil.eir.application.RunRequest;
 import com.crisil.eir.application.run.RunAggregate;
 import com.crisil.eir.domain.InvariantId;
@@ -146,8 +147,12 @@ public final class RunClose {
         // against its own input could not fail.
         GlSummary summary = GlSummary.summarise(batch);
         List<SubLedgerBalance> subLedger = new ArrayList<>();
+        // No null guard on the closing balance, deliberately. One was here, and it was what made
+        // a computed contract with no balance vanish from this side of SL-1 while its journal
+        // balanced on the other. ContractResult.computed refuses that contract now, so the rule is
+        // stated where the contract is built rather than absorbed where it is read.
         aggregate.results().stream()
-            .filter(result -> result.isComputed() && result.closingGca() != null)
+            .filter(ContractResult::isComputed)
             .forEach(result -> subLedger.add(SubLedgerBalance.of(
                 result.contractId(), gcaAccountCode, result.closingGca())));
         GlReconciliation glReconciliation = GlReconciliation.of(

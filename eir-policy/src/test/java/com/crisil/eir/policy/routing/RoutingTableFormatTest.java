@@ -1,6 +1,7 @@
 package com.crisil.eir.policy.routing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
 import com.crisil.eir.calc.routing.RoutingTable;
@@ -227,6 +228,23 @@ class RoutingTableFormatTest {
 
             assertThat(RoutingTableFormat.parse(text, SOURCE)
                 .mechanismFor(RateDriver.DISBURSEMENT_TIMING)).isEqualTo(Mechanism.NONE);
+        }
+
+        @Test
+        @DisplayName("a DERECOGNITION routing is refused by the domain, not by the format")
+        void aDerecognitionRoutingIsRefusedByTheDomainNotTheFormat() {
+            // The boundary of the sibling test above, and the reason it is worth a test of its own.
+            // The format holds no accounting opinion: it reads the word, resolves the constant and
+            // hands the mapping to RoutingTable, which refuses it. So the failure a policy author
+            // sees names the accounting reason rather than a parse fault, and the rule lives in one
+            // place — Mechanism.isRoutable() — instead of being restated by every reader of a file.
+            String text = MINIMAL.replace(
+                "route.NEGOTIATED = MODIFICATION_TEST", "route.NEGOTIATED = DERECOGNITION");
+
+            assertThatIllegalArgumentException()
+                .isThrownBy(() -> RoutingTableFormat.parse(text, SOURCE))
+                .withMessageContaining("conclusion of the substantiality assessment")
+                .withMessageContaining("[NEGOTIATED]");
         }
 
         @Test

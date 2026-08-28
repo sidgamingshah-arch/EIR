@@ -24,7 +24,8 @@ import java.util.Objects;
  * exception queue should have to decide which.
  *
  * @param contractId the contract
- * @param closingGca the gross carrying amount carried out, or null where the contract was isolated
+ * @param closingGca the gross carrying amount carried out; null only where the contract was
+ *                   isolated, and {@link #computed} refuses a null — see the reason there
  * @param journal    the period's postings, or null where the contract was isolated
  * @param invariants the per-contract invariant results; empty where the contract was isolated,
  *                   because a contract that could not be computed has nothing to assert about
@@ -62,6 +63,17 @@ public record ContractResult(
         String contractId, Money closingGca, JournalEntry journal,
         List<InvariantResult> invariants) {
         Objects.requireNonNull(journal, "journal");
+        // The closing balance is required here, and the omission of this line was the shortfall
+        // trap one level below the population check built to catch it. A computed contract with no
+        // closing balance counts as computed, so no population refusal fires; its journal balances,
+        // so SL-2 passes; and RunClose filtered it out of the sub-ledger with a defensive null
+        // guard, so SL-1 tied over a book short by exactly that contract's balance. A contract
+        // absent from one side of a reconciliation and present on the other is the one shape every
+        // total in this engine agrees about.
+        Objects.requireNonNull(closingGca,
+            "contract " + contractId + " was computed and carries no closing gross carrying"
+                + " amount; it would be counted as computed, balance under SL-2 and be absent from"
+                + " the sub-ledger side of SL-1, which would then tie without it");
         return new ContractResult(contractId, closingGca, journal, invariants, null);
     }
 

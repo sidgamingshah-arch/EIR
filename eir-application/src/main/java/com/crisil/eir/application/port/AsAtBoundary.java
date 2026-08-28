@@ -48,6 +48,18 @@ public record AsAtBoundary(
     public static AsAtBoundary replaying(
         java.time.LocalDate periodEnd, Instant originalRecordedAt, String runId) {
         Objects.requireNonNull(runId, "runId");
+        // Blank as well as null, because the compact constructor above treats a blank replayOf as
+        // absent. Null-checking alone let this factory — whose whole job is to mark a boundary as a
+        // replay — return one with isReplay() false, and a replay carrying a live boundary asks
+        // every port as at now instead of as at the original run. DT-1 would then fail on version
+        // drift the replay itself introduced, which is a confusing way to learn that a run id was
+        // whitespace.
+        if (runId.isBlank()) {
+            throw new IllegalArgumentException(
+                "a replay boundary needs the run id it is replaying; blank is treated as absent by"
+                    + " this type, so the boundary would read as live and every port would answer"
+                    + " as at now rather than as at " + originalRecordedAt);
+        }
         return new AsAtBoundary(periodEnd, originalRecordedAt, runId);
     }
 

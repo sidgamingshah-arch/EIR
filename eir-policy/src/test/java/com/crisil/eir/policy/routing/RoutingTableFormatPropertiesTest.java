@@ -105,7 +105,18 @@ class RoutingTableFormatPropertiesTest {
      */
     @Provide
     Arbitrary<List<Mechanism>> oneMechanismPerDriver() {
-        return Arbitraries.of(Mechanism.values()).list().ofSize(RateDriver.values().length);
+        // Filtered to what RoutingTable will accept, on the same reasoning policyText() gives
+        // below: a table naming DERECOGNITION for a driver is not a table this format has to be
+        // able to represent, because the domain refuses to construct one. Derecognition is the
+        // conclusion of the substantiality assessment, reached per modification, never a treatment
+        // a driver carries — Mechanism.isRoutable() holds that rule, and driving the filter off it
+        // rather than off a list here means the property follows the rule if it ever changes.
+        //
+        // Note where the refusal is NOT: the format can still carry the word. See
+        // RoutingTableFormatTest.aDerecognitionRoutingIsRefusedByTheDomainNotTheFormat.
+        return Arbitraries.of(Mechanism.values())
+            .filter(Mechanism::isRoutable)
+            .list().ofSize(RateDriver.values().length);
     }
 
     /**
