@@ -351,6 +351,20 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
 
   SL-1's only appearance in `main` outside its own package used to be `FailureIsolation`'s run-level
   breach set — a control named in a list of controls. That is no longer the only one.
+
+  **And the two halves are joined.** `MonthEndRun` produced a `RunAggregate` and `RunClose`
+  consumed one, with nothing between them. `MonthEndCloseTest` closes that: a two-contract
+  performing run publishes SL-2 and ST-2, reaches the gate on SL-2, SL-1 and RC-1, and returns
+  `mayClose() == true`. That is the first end-to-end close in the repository. It also settles a
+  question no unit test could — `RunAggregate.POPULATION_INVARIANTS` was derived by *reading*
+  `ContractPipeline.assertions`, and a declared obligation the pipeline does not satisfy would
+  block every performing book's close. Adding S3-1 to that list fails three tests, so a wrongly
+  strict obligation list cannot be introduced quietly either.
+
+  **What still has no caller**, stated as narrowly as it now deserves: `NightlyReplayReport` is
+  built by `ReplayUseCase.replayNightly` and nothing schedules it, which is `eir-batch`'s job; and
+  nothing in `eir-application` reaches `policy/transition` at all. The month-end and replay paths
+  have callers; the nightly schedule and the transition jobs do not.
 - **`read-only partitions` is schema, not code.** FR-902's partition-level enforcement lives in
   V2's DDL (verified by execution in Phase 2); the Java models the *restatement artefact* that makes
   immutability workable, not the lock.
