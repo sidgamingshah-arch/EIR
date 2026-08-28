@@ -129,9 +129,10 @@ public final class RunClose {
         List<InvariantResult> evidence = new ArrayList<>();
         List<String> refusals = new ArrayList<>();
 
-        // (1) The population, before anything is measured. Everything below is a total over
-        // `results`, and every one of them is nil-and-tying on an empty list.
-        refusals.addAll(populationRefusals(aggregate));
+        // (1) The run's own refusals, before anything is measured. Everything below is a total
+        // over `results`, and every one of them is nil-and-tying on an empty list. Read from the
+        // aggregate rather than recomputed — see runRefusals.
+        refusals.addAll(runRefusals(aggregate));
 
         // (2) SL-2 over the batch. JournalBatch deliberately permits an unbalanced entry to exist
         // so that SL-2 has something to detect; this is where the detection reaches a decision.
@@ -206,44 +207,33 @@ public final class RunClose {
     }
 
     /**
-     * The three population failures, each named separately because each has its own remedy.
+     * Every reason this run must not be reported as a clean close, taken from the run itself.
      *
-     * <p>Returned as refusal strings rather than as {@link InvariantResult}s, and the distinction
-     * matters: none of them is a statement about a figure. "This run measured nothing" is not an
-     * invariant breach, it is a reason the invariants cannot be believed — and giving it an id
-     * would put it in the same list as a figure that does not tie, where a reader would try to
+     * <p><b>Delegated, not restated.</b> This method used to recompute three of
+     * {@code RunAggregate}'s reasons — empty population, nothing computed, and a shortfall between
+     * what was named and what came back. It was the fourth instance in this codebase of one rule
+     * stated in two places where only one place has it, and the two the copy was missing are the
+     * dangerous kind: a result naming a contract the population does not, and two results for one
+     * contract, where one contract's figures overwrote another reading of the same contract and
+     * whichever survived did so by iteration order. Both were caught by the aggregate, reported in
+     * its {@code blockingReasons}, and closed anyway.
+     *
+     * <p><b>What this list therefore contains, and what the gate contains.</b> These are the run's
+     * own facts — its population arithmetic, its unasserted obligations, and its per-contract
+     * invariant breaches. The gate holds the run-level ones: SL-2 over the batch, SL-1 against the
+     * GL, RC-1 against the CBS, the four reconciliation ties, the period's attestation and the
+     * exception queue. A per-contract breach appears in both, once as a reason the run blocked and
+     * once as a {@code CloseGateRefusal}; that is duplication in a report and not two answers to
+     * one question, and it is the price of the two lists being sourced from the two places that
+     * actually know.
+     *
+     * <p>None of these is published as an {@link InvariantResult}. "This run measured nothing" is
+     * not an invariant breach — it is a reason the invariants cannot be believed — and giving it an
+     * id would put it in the same list as a figure that does not tie, where a reader would try to
      * reconcile it.
      */
-    private static List<String> populationRefusals(RunAggregate aggregate) {
-        List<String> refusals = new ArrayList<>();
-        // An invariant the run was answerable for and never evaluated. The gate cannot catch this:
-        // its only absence check is that the whole invariant list is empty, so a run that asserted
-        // SL-2 over ten million contracts and ST-2 over none presents a non-empty, all-green
-        // dashboard. Refused here, alongside the population failures, because it is the same kind
-        // of fact — a reason the evidence cannot be believed rather than a figure that does not
-        // tie — and because giving it an invariant id would put "nobody ran this" in the same list
-        // as a residual, where a reader would try to reconcile it.
-        if (!aggregate.unassertedInvariants().isEmpty()) {
-            refusals.add("the run produced no result at all for " + aggregate.unassertedInvariants()
-                + ", which it is answerable for over the " + aggregate.computedCount()
-                + " contract(s) it computed; an id absent from the dashboard reads exactly like an"
-                + " id that passed, and the close gate scans for red");
-        }
-        if (aggregate.populationSize() == 0) {
-            refusals.add("the contract source named no contracts for run " + aggregate.runId()
-                + " period " + aggregate.periodId() + "; every total below is nil and every"
-                + " reconciliation ties, so nothing here is evidence of a close — an empty"
-                + " population is a feed failure, not a period without activity");
-        } else if (aggregate.computedCount() == 0) {
-            refusals.add("all " + aggregate.populationSize() + " contracts were quarantined, so the"
-                + " run produced no figures; the reconciliations tie because both sides are empty");
-        }
-        if (aggregate.unaccountedFor() > 0) {
-            refusals.add(aggregate.unaccountedFor() + " of " + aggregate.populationSize()
-                + " contracts were neither computed nor quarantined; they are absent from both"
-                + " sides of every total, so the reconciliations tie without them (FR-905)");
-        }
-        return refusals;
+    private static List<String> runRefusals(RunAggregate aggregate) {
+        return aggregate.blockingReasons();
     }
 
     /**
@@ -274,13 +264,14 @@ public final class RunClose {
      * What a close was presented with, and what the gate made of it.
      *
      * @param evidence            every invariant result put to the gate
-     * @param populationRefusals  reasons the population itself cannot support a close; empty on a
-     *                            run that measured what it was given
+     * @param runRefusals         reasons the run itself cannot support a close — its population
+     *                            arithmetic, its unasserted obligations and its per-contract
+     *                            breaches; empty on a run that measured what it was given
      * @param decision            the gate's answer
      */
     public record ClosePresentation(
         List<InvariantResult> evidence,
-        List<String> populationRefusals,
+        List<String> runRefusals,
         CloseDecision decision,
         JournalBatch batch,
         GlReconciliation glReconciliation,
@@ -288,21 +279,20 @@ public final class RunClose {
 
         public ClosePresentation {
             evidence = List.copyOf(Objects.requireNonNull(evidence, "evidence"));
-            populationRefusals =
-                List.copyOf(Objects.requireNonNull(populationRefusals, "populationRefusals"));
+            runRefusals = List.copyOf(Objects.requireNonNull(runRefusals, "runRefusals"));
             Objects.requireNonNull(decision, "decision");
         }
 
         /**
          * Whether the period may be closed.
          *
-         * <p><b>Both halves, and the population half comes first.</b> The gate answers on the
+         * <p><b>Both halves, and the run's own half comes first.</b> The gate answers on the
          * evidence it was given; it cannot know that the evidence covers nothing. A run over an
-         * empty population produces a clean gate decision, which is exactly why this is not
-         * delegated.
+         * empty population produces a clean gate decision, which is exactly why the run's own
+         * verdict is asked separately and not inferred from the gate's.
          */
         public boolean mayClose() {
-            return populationRefusals.isEmpty() && !decision.isRefused();
+            return runRefusals.isEmpty() && !decision.isRefused();
         }
 
         /** The invariant results that failed. */

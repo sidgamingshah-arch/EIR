@@ -189,7 +189,7 @@ class RunCloseTest {
             assertThat(presentation.breaches())
                 .as("breaches: %s", presentation.breaches())
                 .isEmpty();
-            assertThat(presentation.populationRefusals()).isEmpty();
+            assertThat(presentation.runRefusals()).isEmpty();
             assertThat(presentation.mayClose()).isTrue();
             assertThat(presentation.coreBanking().totalCbsBilledInterest())
                 .isEqualTo(Money.inr("15894.48"));
@@ -236,9 +236,9 @@ class RunCloseTest {
             assertThat(presentation.mayClose())
                 .as("and the close still refuses")
                 .isFalse();
-            assertThat(presentation.populationRefusals())
+            assertThat(presentation.runRefusals())
                 .singleElement(org.assertj.core.api.InstanceOfAssertFactories.STRING)
-                .contains("an empty population is a feed failure, not a period without activity");
+                .contains("accounted for no contracts at all");
         }
 
         @Test
@@ -254,9 +254,12 @@ class RunCloseTest {
                 present(List.of("C1", "C2"), isolated, null);
 
             assertThat(presentation.mayClose()).isFalse();
-            assertThat(presentation.populationRefusals())
-                .singleElement(org.assertj.core.api.InstanceOfAssertFactories.STRING)
-                .contains("all 2 contracts were quarantined");
+            assertThat(presentation.runRefusals())
+                .as("two reasons, both true of this run and both from the aggregate: no contract"
+                    + " produced figures, and the exceptions are unresolved (04 § 3)")
+                .hasSize(2)
+                .anySatisfy(reason -> assertThat(reason).contains("produced figures"))
+                .anySatisfy(reason -> assertThat(reason).contains("exceptions are unresolved"));
             // Caught twice, and the second detection is worth pinning rather than leaving masked
             // behind mayClose(): the CBS billed both contracts, the engine projected neither, so
             // RC-1 is red on presence at 2 x 5,298.16 = 10,596.32 and the gate refuses on its own
@@ -295,9 +298,9 @@ class RunCloseTest {
                 .as("and the gate, on that evidence, is content")
                 .isFalse();
             assertThat(presentation.mayClose()).isFalse();
-            assertThat(presentation.populationRefusals())
+            assertThat(presentation.runRefusals())
                 .singleElement(org.assertj.core.api.InstanceOfAssertFactories.STRING)
-                .contains("1 of 3 contracts were neither computed nor quarantined");
+                .contains("neither figures nor an exception record");
         }
 
         @Test
@@ -317,6 +320,83 @@ class RunCloseTest {
                 .extracting(com.crisil.eir.domain.InvariantResult::id)
                 .containsExactly(InvariantId.RC_1);
             assertThat(presentation.mayClose()).isFalse();
+        }
+    }
+
+    @Nested
+    @DisplayName("the reasons a copied subset was missing")
+    class ReasonsOnlyTheAggregateHad {
+
+        @Test
+        @DisplayName("two results for one contract never reach the refusal list: RC-1 throws first")
+        void aDuplicateResultThrowsAtRcOne() {
+            // The other reason the copied subset was missing, and it turns out not to need the
+            // refusal list. A duplicated ContractResult produces a duplicated engine contractual
+            // leg, and CoreBankingReconciliation refuses two figures for one contract-period by
+            // construction — 03 § 9's tally records that guard being added and its asymmetric
+            // counterpart on explanations being the defect. So the duplicate is caught, harder than
+            // a refusal, and RunAggregate's own "more than one result" reason is the belt to that
+            // braces: it is what blocks a close where an adapter deduplicated the engine lines
+            // against a keyed store and the duplicate survived only in the results list.
+            //
+            // Pinned as a throw rather than left as an assumption, because the difference matters
+            // to a caller: a close that returns a refused presentation can be reported on, and one
+            // that throws has to be caught.
+            assertThatThrownBy(() -> present(
+                List.of("C1", "C2"), List.of("C1", "C2"),
+                List.of(computed("C1"), computed("C1"), computed("C2")),
+                Money.inr("1067828.22"), portfolioTies()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("presented contract C1 twice");
+        }
+
+        @Test
+        @DisplayName("and the aggregate's own duplicate reason blocks where the engine lines agree")
+        void aDuplicateResultBlocksOnceRcOneCanBeBuilt() {
+            // The same duplicate with the engine lines deduplicated, which is what an adapter
+            // reading a keyed store produces. RC-1 constructs and ties; the sub-ledger, the
+            // journals and the CBS all agree, on the reading that happened to win. Only the
+            // aggregate knows two results named one contract.
+            RunClose.ClosePresentation presentation = RunClose.present(
+                request(List.of("C1", "C2"), List.of("C1", "C2"), Money.inr("1067828.22")),
+                RunAggregate.of(RUN, PERIOD, List.of("C1", "C2"),
+                    List.of(computed("C1"), computed("C1"), computed("C2")),
+                    List.of("FEE-2027.1")),
+                GCA,
+                List.of(new ContractualLegInterest("C1", PERIOD, BILLED),
+                    new ContractualLegInterest("C2", PERIOD, BILLED)),
+                portfolioTies(),
+                AccountingPeriod.open(PERIOD, "FY2028-29", LocalDate.of(2028, 4, 1), PERIOD_END)
+                    .startClosing(Instant.parse("2028-05-11T09:00:00Z")),
+                "financial.controller", CLOSED_AT, List.of(), List.of());
+
+            assertThat(presentation.breaches())
+                .as("everything ties: %s", presentation.breaches())
+                .isEmpty();
+            assertThat(presentation.decision().isRefused())
+                .as("and the gate is content")
+                .isFalse();
+            assertThat(presentation.mayClose()).isFalse();
+            assertThat(presentation.runRefusals())
+                .anySatisfy(reason -> assertThat(reason)
+                    .contains("has more than one result"));
+        }
+
+        @Test
+        @DisplayName("a result naming a contract outside the population blocks the close")
+        void aStrangerBlocks() {
+            // The other one. A figure in the close that no contract in the population accounts for
+            // is either a run reading the wrong population or a population reading the wrong run,
+            // and the sub-ledger total is wrong by whatever the stranger contributed.
+            RunClose.ClosePresentation presentation = present(
+                List.of("C1", "C2"), List.of("C1", "C2"),
+                List.of(computed("C1"), computed("C2"), computed("C9")),
+                Money.inr("1601742.33"), portfolioTies());
+
+            assertThat(presentation.mayClose()).isFalse();
+            assertThat(presentation.runRefusals())
+                .anySatisfy(reason -> assertThat(reason)
+                    .contains("name contracts the population does not"));
         }
     }
 
@@ -349,9 +429,9 @@ class RunCloseTest {
                     + " indistinguishable from a complete one")
                 .isFalse();
             assertThat(presentation.mayClose()).isFalse();
-            assertThat(presentation.populationRefusals())
+            assertThat(presentation.runRefusals())
                 .singleElement(org.assertj.core.api.InstanceOfAssertFactories.STRING)
-                .contains("no result at all for [ST_2]");
+                .contains("asserted [ST_2]");
         }
 
         @Test
@@ -362,9 +442,9 @@ class RunCloseTest {
             // the population, so the gap is conditioned on something having been computed.
             RunClose.ClosePresentation presentation = present(List.of(), List.of(), null);
 
-            assertThat(presentation.populationRefusals())
+            assertThat(presentation.runRefusals())
                 .singleElement(org.assertj.core.api.InstanceOfAssertFactories.STRING)
-                .contains("an empty population is a feed failure");
+                .contains("accounted for no contracts at all");
         }
     }
 
@@ -388,7 +468,7 @@ class RunCloseTest {
             assertThat(presentation.breaches())
                 .as("nothing breached: the two it does compute tie")
                 .isEmpty();
-            assertThat(presentation.populationRefusals()).isEmpty();
+            assertThat(presentation.runRefusals()).isEmpty();
             assertThat(presentation.decision().isRefused())
                 .as("and the close is refused anyway, on the two nobody presented")
                 .isTrue();
