@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.crisil.eir</groupId>
+    <artifactId>eir-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>eir-application</artifactId>
+  <name>EIR :: application</name>
+  <description>
+    Use-case orchestration and ports (05 § 2). The layer that gives every control below it a
+    caller: until now SL-1, SL-2, CL-1, RC-1 and DT-1 were live code nothing in src/main
+    constructed, which docs/08 recorded as Phase 5's honest qualification.
+
+    Framework-free, and it takes no ADR-0010 exemption. 05 § 2 says "use-case orchestration,
+    transaction boundaries, ports", and the reason all three fit without a framework is that a
+    PORT is an interface this module declares and something outside it implements. Transaction
+    boundaries are declared here as an interface too; eir-batch supplies the Spring-managed
+    implementation, and eir-batch is the module ADR-0010's exemption mechanism exists for.
+
+    Depends on eir-domain, eir-calc, eir-policy and eir-gl. Dependencies point strictly inward
+    per 05 § 2, and nothing below this module depends on it — which is what lets a run be
+    assembled here without any of the arithmetic knowing there is a run.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-domain</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-calc</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-policy</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-gl</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>net.jqwik</groupId>
+      <artifactId>jqwik</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+    </dependency>
+  </dependencies>
+</project>
