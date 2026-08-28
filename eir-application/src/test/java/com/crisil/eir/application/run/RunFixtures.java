@@ -270,6 +270,35 @@ final class RunFixtures {
             new FakeGeneralLedger(), new FakePolicy());
     }
 
+    /**
+     * The same request with a general ledger that reports one control-account balance.
+     *
+     * <p>{@code FakeGeneralLedger} and {@code FakeCoreBanking} both answer empty, which is what the
+     * run path wants — nothing in {@code MonthEndRun} reads either. A close reads both, and reads
+     * them as the independent sides of SL-1 and RC-1, so a seam test needs a request whose two
+     * downstream ports have something to say. Only those two are substituted: the contract,
+     * state and policy ports stay as the run had them, because a replacement there would be a
+     * different population.
+     *
+     * <p>The CBS side is scoped to {@code cbsContracts} rather than to the population, because the
+     * two scopes detect a dropped contract differently and the caller has to choose which it is
+     * testing — see {@code RunCloseTest.aShortfallIsTheSilentOne}.
+     */
+    static RunRequest requestForClose(
+        RunRequest request, String accountCode, Money balance, List<String> cbsContracts) {
+        return new RunRequest(
+            request.runId(), request.periodId(), request.bookId(), request.boundary(),
+            request.contracts(), request.contractState(),
+            boundary -> cbsContracts.stream()
+                .map(id -> new com.crisil.eir.policy.reconciliation.CbsBilledInterest(
+                    id, request.periodId(), BILLED_INTEREST,
+                    "CBS-EOD-" + request.periodId()))
+                .toList(),
+            boundary -> List.of(com.crisil.eir.gl.posting.GlControlAccountBalance.of(
+                accountCode, balance, "TB-" + request.periodId() + "-FINAL")),
+            request.policy());
+    }
+
     /** One contract, one state, one period — the shape most tests want. */
     static Harness harness(
         String contractId,
