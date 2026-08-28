@@ -33,5 +33,32 @@ public enum Mechanism {
     DERECOGNITION,
 
     /** No EIR consequence — an allowance remeasurement, a staging change. */
-    NONE
+    NONE;
+
+    /**
+     * Whether a versioned routing table may name this mechanism as a driver's treatment.
+     *
+     * <p><b>Four of the five may; {@link #DERECOGNITION} may not, and the distinction is between a
+     * routing and a conclusion.</b> A routing says "events with this driver tag are treated this
+     * way", which is a policy position a bank takes once and has approved. Derecognition is not
+     * available as a position: IFRS 9 reaches it only through the substantiality assessment, run
+     * per modification, and {@link #MODIFICATION_TEST} is the routing that gets an event there.
+     * {@code ModificationConclusion.SUBSTANTIAL.mechanism()} returning {@code DERECOGNITION} is the
+     * only legitimate way this value arises, and it arises per instrument from evidence.
+     *
+     * <p><b>Why the check is here and not in the routing table's parser.</b>
+     * {@code RoutingTableFormat}'s own tests state the principle — "the format's job is to say what
+     * the file means, not to hold an accounting opinion that {@code RoutingTable} itself does not
+     * hold" — and they are right. The opinion belongs to the domain, so it lives on the type that
+     * names the mechanisms, and every table, parsed or constructed, is held to it.
+     *
+     * <p><b>{@code NONE} is routable, and deliberately.</b> A driver a bank has elected as
+     * immaterial — a late drawdown whose present-value effect is not worth restating for — is a
+     * position it is entitled to take and to have approved. The engine's obligation is then to roll
+     * the period forward at the unchanged rate and restate nothing, which is what this value means.
+     * Refusing {@code NONE} here would move an accounting election into a build-time constraint.
+     */
+    public boolean isRoutable() {
+        return this != DERECOGNITION;
+    }
 }

@@ -1024,6 +1024,40 @@ Phase 1's four defects were and where these two were:
 | `ReconciliationScope.requiredForClose()` is true for all four of step 6's reconciliations and `RunClose` presented two, so the gate refused **every** close | control with no caller |
 | `OnboardingRun` declared its obligations and reported the gaps; `RunAggregate` derived its invariant set from what the contracts happened to publish, so an invariant nobody evaluated read as one that passed | control that cannot fail; one rule, two places |
 
+**Two more, from the adversarial review of `eir-application`'s own four units** — the review those
+units shipped without, and the third pass over this seam:
+
+| Finding | Family |
+|---|---|
+| `ContractPipeline` threw on `Mechanism.NONE` alongside `DERECOGNITION`, so every contract whose driver a bank had elected as immaterial was quarantined, every month | control with no caller, in the strict direction |
+| `RoutingTable` accepted `DERECOGNITION` as a driver's treatment, which derecognises every event on that driver with no substantiality assessment | missing guard, at the artefact a maker–checker gate approves |
+| `TierAssignmentResult.requiresEquivalenceTest()` is true for every Tier 3 assignment and `InitialRecognition` never asks; `EquivalenceTestGate` has no caller outside its own package | control with no caller, in the permissive direction — **open**, see below |
+
+**The `NONE` pair is the fourth family in both directions at once.** `Mechanism.NONE` means "no EIR
+consequence", which is precisely a roll-forward; throwing on it was the pipeline being *too strict*
+about a value the routing table may legitimately carry, and `RoutingTableFormat`'s own tests already
+pinned that "DISBURSEMENT_TIMING routed to NONE is a legitimate materiality election". Those tests
+also located the accounting opinion correctly — "the format's job is to say what the file means, not
+to hold an accounting opinion that `RoutingTable` itself does not hold" — and `RoutingTable` then
+held no opinion, so the question fell through three files to the pipeline, which answered it by
+quarantining the contract. `Mechanism.isRoutable()` is where the opinion now lives: `NONE` is
+routable because it is an election a bank is entitled to have approved, and `DERECOGNITION` is not,
+because derecognition is the *conclusion* of the substantiality assessment reached per modification,
+never a treatment a driver carries. One refusal when a table is authored beats a wrong number per
+contract for as long as the version stays in force.
+
+**The tier finding is open, and deliberately.** `requiresEquivalenceTest()`'s javadoc says a Tier 3
+assignment "is only usable once the equivalence test has passed" and that § 10.3 "refuses it
+outright for zero-coupon and deep-discount instruments at any tenor" — Case 9's 81.0% year-one
+overstatement. `EquivalenceTestGate` implements all of it, including `NO_TEST_ON_FILE` demoting to
+Tier 2 and raising an exception. Nothing calls it. Wiring it needs an `EquivalenceTestSubject`, and
+three of its six fields — `populationId`, `redemptionAmount`, `contractualCouponTotal` — are not
+derivable from an `OnboardingRequest` or a `ProjectionResult` without a judgement about how a
+contract maps to an equivalence-test population and how a coupon leg is separated from principal
+repayment across a schedule shape. Supplying a guessed `contractualCouponTotal` to the gate whose
+purpose is catching a fabricated approximation would be the worst available version of this fix, so
+it is recorded rather than half-made. It is the top item in [08](08-roadmap.md)'s Phase 5 tail.
+
 **A fourth family, and the one this pair is really about: an unwired control is wrong in whichever
 direction nobody checked.** The first finding is the mirror image of everything above it — not a
 control that could not fail, but one that could not *pass*. `PeriodCloseGate` and

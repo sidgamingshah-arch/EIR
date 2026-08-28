@@ -317,10 +317,40 @@ final class RunFixtures {
         Map<String, ContractStateSource.OpeningState> states,
         Map<String, ContractPeriod> periods,
         RateSolver solver) {
+        return harness(population, states, periods, solver, ROUTING);
+    }
+
+    /**
+     * One contract under a caller-supplied routing table.
+     *
+     * <p>{@link #ROUTING} is the compiled-in baseline, which routes all eight drivers to a
+     * substantive mechanism. A test about a bank's own election — a driver routed to
+     * {@code NONE} — needs a table the baseline does not contain, and the point of ADR-0006 is
+     * that such a table is data rather than a code change.
+     */
+    static Harness harnessRoutedBy(
+        String contractId,
+        ContractStateSource.OpeningState state,
+        ContractPeriod period,
+        RateSolver solver,
+        RoutingTableRegistry routing) {
+        Map<String, ContractStateSource.OpeningState> states = new LinkedHashMap<>();
+        states.put(contractId, state);
+        Map<String, ContractPeriod> periods = new LinkedHashMap<>();
+        periods.put(contractId, period);
+        return harness(List.of(contractId), states, periods, solver, routing);
+    }
+
+    static Harness harness(
+        List<String> population,
+        Map<String, ContractStateSource.OpeningState> states,
+        Map<String, ContractPeriod> periods,
+        RateSolver solver,
+        RoutingTableRegistry routing) {
         RunRequest request = request(population, states);
         SolveAudit audit = SolveAudit.over(solver);
         ContractPipeline pipeline =
-            new ContractPipeline(request, new FakePeriods(periods), ROUTING, audit);
+            new ContractPipeline(request, new FakePeriods(periods), routing, audit);
         return new Harness(request, audit, pipeline, new MonthEndRun(request, pipeline));
     }
 

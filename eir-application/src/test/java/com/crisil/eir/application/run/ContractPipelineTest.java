@@ -5,14 +5,18 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
 import com.crisil.eir.application.ContractResult;
 import com.crisil.eir.calc.routing.ModificationConclusion;
+import com.crisil.eir.calc.routing.RoutingTable;
+import com.crisil.eir.calc.routing.RoutingTableVersion;
 import com.crisil.eir.domain.InvariantId;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Mechanism;
 import com.crisil.eir.domain.Money;
-import com.crisil.eir.domain.RateDriver;
 import com.crisil.eir.domain.Rate;
+import com.crisil.eir.domain.RateDriver;
 import com.crisil.eir.gl.journal.JournalEntry;
+import com.crisil.eir.policy.routing.RoutingTableRegistry;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
@@ -454,6 +458,55 @@ class ContractPipelineTest {
             assertThat(computation.closingGca().atPresentationScale())
                 .isEqualTo(Money.inr("487146.33"));
             assertThat(computation.catchUp()).isNull();
+        }
+
+        @Test
+        @DisplayName("a driver a bank has elected as immaterial rolls forward, and is not quarantined")
+        void noneRollsForwardUnchanged() {
+            // The defect this test was written for: both this branch and DERECOGNITION threw, on
+            // the reasoning that "neither is a roll-forward". For DERECOGNITION that holds. NONE is
+            // precisely a roll-forward — Mechanism.NONE is "no EIR consequence" — so every contract
+            // whose driver a bank had elected as immaterial was quarantined, every month, with a
+            // message telling the operator the routing was not a roll-forward. RoutingTable
+            // requires every driver mapped and RoutingTableFormatTest pins that
+            // "DISBURSEMENT_TIMING routed to NONE is a legitimate materiality election", so an
+            // approved table carries it and the whole affected sub-book is lost.
+            //
+            // The expected figures are the performing baseline, unchanged by the event, and they
+            // are the SAME figures SteadyState.rollsForwardAtTheStoredRate asserts: that is the
+            // claim — an immaterial event changes nothing. 528,407.32 x 0.0104214918 = 5,506.79...,
+            // and 528,407.32 + 5,506.79 − 47,073.47 = 486,840.64.
+            RoutingTableVersion elected = new RoutingTableVersion(
+                "RT-2028.2-IMMATERIAL-DRAWDOWN",
+                "late drawdown elected immaterial; no restatement",
+                LocalDate.of(2028, 4, 1), "policy.maker", "policy.checker",
+                LocalDate.of(2028, 3, 20));
+            RoutingTableRegistry registry = RoutingTableRegistry.of(
+                RoutingTable.currentDefault().reroute(
+                    RateDriver.DISBURSEMENT_TIMING, Mechanism.NONE, elected));
+
+            ContractPeriod period = RunFixtures.performingPeriod("C-0009").withEvent(
+                PeriodEvent.of(RateDriver.DISBURSEMENT_TIMING, RunFixtures.PERIOD_START,
+                    RunFixtures.remainingInstalments(Money.inr("45000.00"))));
+            RunFixtures.Harness harness = RunFixtures.harnessRoutedBy(
+                "C-0009", RunFixtures.performingState(), period,
+                RunFixtures.EXPLODING_SOLVER, registry);
+
+            ContractComputation computation = harness.pipeline().compute("C-0009");
+
+            assertThat(computation.routing().mechanism()).isEqualTo(Mechanism.NONE);
+            assertThat(computation.solves())
+                .as("no EIR consequence cannot re-solve; the exploding solver would have said so")
+                .isZero();
+            assertThat(computation.catchUp())
+                .as("and restates nothing")
+                .isNull();
+            assertThat(computation.rateMoved()).isFalse();
+            assertThat(computation.eirAfter()).isEqualTo(RunFixtures.EIR);
+            assertThat(computation.openingGca()).isEqualTo(RunFixtures.OPENING_GCA);
+            assertThat(computation.row().presentedEirInterest()).isEqualTo(Money.inr("5506.79"));
+            assertThat(computation.closingGca().atPresentationScale())
+                .isEqualTo(Money.inr("486840.64"));
         }
 
         @Test

@@ -362,8 +362,29 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   strict obligation list cannot be introduced quietly either.
 
   **What still has no caller**, stated as narrowly as it now deserves: `NightlyReplayReport` is
-  built by `ReplayUseCase.replayNightly` and nothing schedules it, which is `eir-batch`'s job; and
-  nothing in `eir-application` reaches `policy/transition` at all. The month-end and replay paths
+  built by `ReplayUseCase.replayNightly` and nothing schedules it, which is `eir-batch`'s job;
+  nothing in `eir-application` reaches `policy/transition` at all; and — the one that matters —
+  **`EquivalenceTestGate` has no caller**, so FR-411/FR-412's Tier 3 permission is never asked for.
+  See below.
+
+- **The Tier 3 permission gate is unwired, and it is the highest-value open item in the engine.**
+  `TierAssignment` assigns the tier and `InitialRecognition` uses it for one thing: the solver's
+  tolerance. `TierAssignmentResult.requiresEquivalenceTest()` is true for every Tier 3 assignment
+  and nothing asks it. `EquivalenceTestGate` — built in Phase 2 specifically because "until now
+  TG-1 was a label" — implements the whole second gate, including `FORBIDDEN_APPROXIMATION` for
+  zero-coupon and deep-discount instruments and `NO_TEST_ON_FILE` demoting to Tier 2 with an
+  exception raised, and has no caller outside its own package. So a 15-year zero-coupon instrument
+  is assigned Tier 3, solved on Tier 3's tolerance and recognised, with nothing recording that the
+  permission was never sought. That is the Cambodia failure mode in the risk register arriving
+  through an unwired gate rather than through a decision, and Case 9 measures it at **81.0%**
+  year-one income overstatement.
+
+  Not fixed in the review that found it, for a stated reason. `EquivalenceTestSubject` needs
+  `populationId`, `redemptionAmount` and `contractualCouponTotal`, none of which is derivable from
+  an `OnboardingRequest` or a `ProjectionResult`: the first is a judgement about how a contract maps
+  to an equivalence-test population, and the third needs a coupon leg separated from principal
+  repayment across a schedule shape, which is projector work. Handing a guessed coupon total to the
+  gate whose purpose is catching a fabricated approximation would defeat the gate. The month-end and replay paths
   have callers; the nightly schedule and the transition jobs do not.
 - **`read-only partitions` is schema, not code.** FR-902's partition-level enforcement lives in
   V2's DDL (verified by execution in Phase 2); the Java models the *restatement artefact* that makes

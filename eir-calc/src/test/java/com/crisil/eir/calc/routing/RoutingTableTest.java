@@ -2,6 +2,7 @@ package com.crisil.eir.calc.routing;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.crisil.eir.domain.Mechanism;
@@ -11,6 +12,7 @@ import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -28,6 +30,65 @@ import org.junit.jupiter.params.provider.EnumSource;
  * event routed by either indistinguishable on replay.
  */
 class RoutingTableTest {
+
+    @Nested
+    @DisplayName("a routing is a policy position; a conclusion is not available as one")
+    class RoutableMechanisms {
+
+        private static final RoutingTableVersion VERSION = new RoutingTableVersion(
+            "RT-2028.9", "a table for the reader's own tests", LocalDate.of(2028, 4, 1),
+            "policy.maker", "policy.checker", LocalDate.of(2028, 3, 20));
+
+        @Test
+        @DisplayName("a table routing a driver to DERECOGNITION is refused at construction")
+        void derecognitionIsNotRoutable() {
+            // The companion to the totality check, and the more dangerous of the two. A table
+            // naming DERECOGNITION for a driver derecognises every event on that driver without
+            // running the substantiality assessment — no 10% test, no qualitative triggers, no
+            // evidence — and the assessment is the whole of the decision. IFRS 9 reaches
+            // derecognition only through it, per modification, which is what MODIFICATION_TEST
+            // routes an event to; ModificationConclusion.SUBSTANTIAL.mechanism() is the only
+            // legitimate origin of this value.
+            //
+            // Refused when the table is authored rather than when a contract meets it, so the cost
+            // is one refusal at the maker-checker gate instead of a wrong number per contract for
+            // as long as the version stays in force.
+            assertThatIllegalArgumentException()
+                .isThrownBy(() -> RoutingTable.currentDefault()
+                    .reroute(RateDriver.NEGOTIATED, Mechanism.DERECOGNITION, VERSION))
+                .withMessageContaining("[NEGOTIATED]")
+                .withMessageContaining("conclusion of the substantiality assessment");
+        }
+
+        @Test
+        @DisplayName("a table routing a driver to NONE is accepted: it is an accounting election")
+        void noneIsRoutable() {
+            // Deliberately permitted, and the boundary of the rule above. A driver a bank has
+            // elected as immaterial — a late drawdown whose present-value effect is not worth
+            // restating for — is a position it is entitled to take and to have approved. Refusing
+            // NONE here would move an accounting election into a build-time constraint, and
+            // RoutingTableFormat's own tests make the same point about the parser: the format's
+            // job is to say what the file means, not to hold an opinion this type does not hold.
+            RoutingTable elected = RoutingTable.currentDefault()
+                .reroute(RateDriver.DISBURSEMENT_TIMING, Mechanism.NONE, VERSION);
+
+            assertThat(elected.mechanismFor(RateDriver.DISBURSEMENT_TIMING))
+                .isEqualTo(Mechanism.NONE);
+            assertThat(elected.mechanismFor(RateDriver.NEGOTIATED))
+                .as("and nothing else moves")
+                .isEqualTo(Mechanism.MODIFICATION_TEST);
+        }
+
+        @ParameterizedTest
+        @EnumSource(Mechanism.class)
+        @DisplayName("isRoutable partitions the mechanisms, and only DERECOGNITION falls outside")
+        void exactlyOneMechanismIsNotRoutable(Mechanism mechanism) {
+            // Over the whole enum, so a mechanism added later is forced through this decision
+            // rather than defaulting into routability.
+            assertThat(mechanism.isRoutable())
+                .isEqualTo(mechanism != Mechanism.DERECOGNITION);
+        }
+    }
 
     @ParameterizedTest
     @EnumSource(RateDriver.class)

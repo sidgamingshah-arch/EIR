@@ -181,12 +181,50 @@ public final class ContractPipeline {
                     catchUp = onModificationTest(contractId, event, base, period, eirBefore);
                     base = catchUp.restatedGca();
                 }
-                case DERECOGNITION, NONE -> throw new IllegalStateException(
+                case NONE -> {
+                    // No EIR consequence: roll the period forward at the unchanged rate over its
+                    // own flows and restate nothing. That is Mechanism.NONE's definition and what
+                    // ModificationConclusion's javadoc predicts a downstream reader will do with
+                    // the value.
+                    //
+                    // This branch used to throw alongside DERECOGNITION, on the reasoning that
+                    // "neither is a roll-forward". For DERECOGNITION that holds. For NONE it is
+                    // the opposite: NONE is precisely a roll-forward, and quarantining it lost
+                    // every contract whose driver the bank had elected as immaterial —
+                    // RoutingTableFormatTest pins that "DISBURSEMENT_TIMING routed to NONE is a
+                    // legitimate materiality election", and RoutingTable requires every driver
+                    // mapped, so an approved table can carry it. A retail book with a late-drawdown
+                    // election would have quarantined every affected contract, every month, with a
+                    // message telling the operator the routing was not a roll-forward.
+                    //
+                    // Guarded rather than trusted, in the style of this method's two other
+                    // structural throws: the two claims NONE makes about this period are that the
+                    // balance was not restated and that nothing re-solved, and both are decidable
+                    // right here from locals the switch above may have moved.
+                    if (!base.equals(state.openingGca())) {
+                        throw new IllegalStateException(
+                            "contract " + contractId + " routed to " + Mechanism.NONE + " under"
+                                + " table version " + decision.routingTableVersionId()
+                                + " and its balance was restated from " + state.openingGca()
+                                + " to " + base + "; NONE means no EIR consequence, so a"
+                                + " restatement here is a branch reached by accident");
+                    }
+                    if (solves.solveCountFor(contractId) != solvesBefore) {
+                        throw new IllegalStateException(
+                            "contract " + contractId + " routed to " + Mechanism.NONE + " and"
+                                + " reached a solver " + (solves.solveCountFor(contractId)
+                                    - solvesBefore) + " time(s); a mechanism with no EIR"
+                                + " consequence cannot re-solve the rate");
+                    }
+                }
+                case DERECOGNITION -> throw new IllegalStateException(
                     "contract " + contractId + " routed to " + decision.mechanism() + " under table"
-                        + " version " + decision.routingTableVersionId() + "; neither is a"
-                        + " roll-forward. 05 § 3.2's loop has two calc branches, a reset and a"
+                        + " version " + decision.routingTableVersionId() + ", which is not a"
+                        + " roll-forward: 05 § 3.2's loop has two calc branches, a reset and a"
                         + " catch-up, and rolling a derecognised contract forward at its old rate"
-                        + " would carry a balance that should have left the book");
+                        + " would carry a balance that should have left the book. Reachable only"
+                        + " from a ModificationConclusion, never from a table —"
+                        + " Mechanism.isRoutable() refuses a table that names it");
             }
         }
 

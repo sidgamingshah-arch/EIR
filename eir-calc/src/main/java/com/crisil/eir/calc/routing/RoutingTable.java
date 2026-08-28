@@ -84,6 +84,26 @@ public record RoutingTable(RoutingTableVersion version, Map<RateDriver, Mechanis
             RateDriver driver = Objects.requireNonNull(entry.getKey(), "mapping key");
             copy.put(driver, Objects.requireNonNull(entry.getValue(), "mechanism for " + driver));
         }
+        List<RateDriver> notRoutable = new ArrayList<>();
+        for (Map.Entry<RateDriver, Mechanism> entry : copy.entrySet()) {
+            if (!entry.getValue().isRoutable()) {
+                notRoutable.add(entry.getKey());
+            }
+        }
+        if (!notRoutable.isEmpty()) {
+            // The companion to the totality check below, and the more dangerous of the two. A
+            // table naming DERECOGNITION for a driver derecognises every event on that driver
+            // without running the substantiality assessment — no 10% test, no qualitative
+            // triggers, no evidence — and the assessment is the whole of the decision. Refused at
+            // construction, so it is one refusal when the table is authored rather than a wrong
+            // number per contract for as long as the version stays in force. See
+            // Mechanism.isRoutable() for why the opinion lives on the mechanism.
+            throw new IllegalArgumentException(
+                "routing table " + version.id() + " routes " + notRoutable + " to a mechanism no"
+                    + " routing may name; derecognition is the conclusion of the substantiality"
+                    + " assessment, reached per modification through " + Mechanism.MODIFICATION_TEST
+                    + ", never a treatment a driver carries");
+        }
         List<RateDriver> missing = new ArrayList<>();
         for (RateDriver driver : RateDriver.values()) {
             if (!copy.containsKey(driver)) {
