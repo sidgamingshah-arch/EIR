@@ -146,8 +146,9 @@ the phase is not:
   nine modules and four now exist. Phase 2 never promised the rest, but "policy, routing and
   persistence delivered" should not be read as an engine anything can call: there is no
   orchestration layer, no run, no journal and no API.
-  *Superseded in part:* `eir-gl` landed in Phase 5 and `eir-application` after it, so six of the
-  nine exist. `eir-batch`, `eir-api` and `eir-app` still do not.
+  *Superseded in part:* `eir-gl` landed in Phase 5, then `eir-application`, then `eir-api`, so seven of
+  the nine exist. `eir-batch` and `eir-app` still do not — and `eir-api` now serves the console
+  `eir-app` was to have been.
 
 > **Start the fee and cost taxonomy in Phase 0, not Phase 2.** It appears here because that is where
 > it completes, but it is the longest-lead item in the programme and it depends on other teams. If
@@ -309,7 +310,7 @@ goes first, and it is the one that never needs a reconstructed rate at all.
 | Replay | Shadow-table replay with byte comparison; nightly sampled run | FR-903, C-12 | `policy/replay` — **DT-1** with a scale-sensitive comparison and the policy-then-in-force half |
 | Reconciliations | SL-1, C-14 to core banking, C-04, C-05 | FR-803…804 | `policy/reconciliation` — **RC-1**; C-04 and C-05 landed in Phase 3 |
 | `eir-batch` | Spring Batch partitioned runs; restartability; per-contract isolation | [ADR-0007](adr/0007-spring-batch-for-runs.md) | **Deferred.** Unblocked by [ADR-0010](adr/0010-framework-ban-fails-closed.md); see below |
-| `eir-api` | Full surface including the trace endpoint | [06](06-api-spec.md) | **Not started** |
+| `eir-api` | Full surface including the trace endpoint | [06](06-api-spec.md) | **Delivered as a working tool, not the full 06 surface.** Seven endpoints over eir-application's entry points plus a month-end console: the book, initial recognition, the run, repair, four-eyes acceptance, posting, the close and replay. Framework-free on `com.sun.net.httpserver`, no ADR-0010 exemption, so the repo still builds and runs offline. 06's trace endpoint, pagination and auth are not built |
 | `eir-application` | Framework-free orchestration: ports, onboarding, the per-contract run, replay, the run-level close | 05 § 3.1–3.3 | Delivered. The layer that gives every Phase 5 control a caller; see the first qualification below |
 
 **Exit gate:** a 10M-contract synthetic close inside 4 hours; a replay of that close is
@@ -360,6 +361,21 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   `ContractPipeline.assertions`, and a declared obligation the pipeline does not satisfy would
   block every performing book's close. Adding S3-1 to that list fails three tests, so a wrongly
   strict obligation list cannot be introduced quietly either.
+
+  **And now a user.** `eir-api` serves a console that drives the whole cycle, verified end to end
+  in a browser: a run over three contracts leaves one quarantined and refuses the close with five
+  gate reasons and 41,358.04 of deviation; repairing the missing opening balance, re-running,
+  posting and closing reaches a permitted close at nil deviation; the replay then proves
+  reproduction. Posting is a separate step because SL-1's two sides have to be in different states
+  for the tie to mean anything.
+
+  **Four defects the wiring exposed**, which is the fourth time Phase 1's lesson has arrived: DT-1
+  caught a run citing a routing-table version the registry did not carry, on a book where every
+  figure was bit-identical; the demonstration ledger summed opening balances against the
+  sub-ledger's closing ones and produced a 36,059.88 SL-1 break where nothing was wrong; a
+  "contract with no opening state" was documentation with no mechanism, so nothing was ever
+  quarantined; and `RunClose.evidence()` showed SL-2 twice — found by rendering an invariant list to
+  a person for the first time, which is a test no unit had.
 
   **What still has no caller**, stated as narrowly as it now deserves: `NightlyReplayReport` is
   built by `ReplayUseCase.replayNightly` and nothing schedules it, which is `eir-batch`'s job;
