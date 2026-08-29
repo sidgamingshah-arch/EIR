@@ -23,6 +23,7 @@
     <module>eir-persistence</module>
     <module>eir-gl</module>
     <module>eir-application</module>
+    <module>eir-api</module>
   </modules>
 
   <properties>

@@ -300,6 +300,26 @@ public final class RunClose {
             return runRefusals.isEmpty() && !decision.isRefused();
         }
 
+        /**
+         * One result per invariant id — what the gate actually weighed.
+         *
+         * <p><b>Why {@link #evidence} is not already this.</b> Two of the results this class
+         * presents legitimately carry the same id: SL-2 over the run's {@code JournalBatch}, and
+         * SL-2 collapsed across the contracts. Both are true claims about different scopes, and
+         * {@code evidence} is the audit record of what was handed to the gate, so it keeps both.
+         * But {@code PeriodCloseGate} collapses before it reads — deliberately, because
+         * {@code conjunction} keeps only the first breach's deviation among results sharing an id —
+         * so a reader shown the raw list sees SL-2 twice and tries to reconcile two rows that were
+         * never two answers.
+         *
+         * <p>Found by looking at the operator console, which is the first thing in this repository
+         * to render an invariant list to a person. A control report that shows one id twice is one
+         * an operator learns to distrust.
+         */
+        public List<InvariantResult> dashboard() {
+            return InvariantResult.oneResultPerInvariant(evidence);
+        }
+
         /** The invariant results that failed. */
         public List<InvariantResult> breaches() {
             return evidence.stream().filter(result -> !result.satisfied()).toList();

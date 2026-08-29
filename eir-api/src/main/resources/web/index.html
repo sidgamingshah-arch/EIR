@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EIR Engine — month-end console</title>
+<style>
+/* No external resources of any kind: this page is served from a localhost that may be
+   air-gapped, and a stylesheet or font that silently fails to load is a console an operator
+   cannot read. System stacks only. */
+:root{
+  --paper:#F5F6F8; --surface:#FFFFFF; --surface-2:#EDEFF3; --sunken:#E4E7EC;
+  --ink:#161A21; --slate:#5A6270; --faint:#8A93A1; --hairline:#D5D9E0;
+  --accent:#1D6B67; --accent-soft:#DCEBE9;
+  --ok:#1D6B4F; --ok-soft:#DDEDE4;
+  --no:#A33529; --no-soft:#F7E5E2;
+  --owe:#7E5D12; --owe-soft:#F6EEDA;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --paper:#0E1116; --surface:#161A20; --surface-2:#1C212A; --sunken:#11151A;
+    --ink:#E3E7EC; --slate:#98A2B0; --faint:#6E7885; --hairline:#2A313A;
+    --accent:#4FA6A0; --accent-soft:#16302F;
+    --ok:#5FB88C; --ok-soft:#14261D;
+    --no:#E08578; --no-soft:#2E1B18;
+    --owe:#D9B45C; --owe-soft:#2A2415;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.55}
+h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.01em}
+button{font-family:inherit;font-size:inherit}
+code,.mono{font-family:var(--mono)}
+.num{font-variant-numeric:tabular-nums}
+
+/* header */
+header{position:sticky;top:0;z-index:10;background:var(--surface);border-bottom:1px solid var(--hairline);padding:.9rem 1.25rem}
+.hdr{max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;gap:.75rem 1.5rem;align-items:baseline}
+.brand{font-size:1.02rem;font-weight:600}
+.brand span{color:var(--accent);font-family:var(--mono);font-size:.78rem;letter-spacing:.09em;text-transform:uppercase;margin-left:.6rem}
+.hdr dl{display:flex;gap:1.4rem;margin:0;flex-wrap:wrap}
+.hdr div{display:flex;flex-direction:column}
+.hdr dt{font-family:var(--mono);font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+.hdr dd{margin:0;font-family:var(--mono);font-size:.82rem}
+
+main{max-width:1180px;margin:0 auto;padding:1.5rem 1.25rem 5rem;display:grid;gap:1rem}
+
+/* stage cards */
+.stage{background:var(--surface);border:1px solid var(--hairline);border-radius:5px;overflow:hidden}
+.stage>.top{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;padding:.85rem 1.05rem;border-bottom:1px solid var(--hairline)}
+.stage.idle>.top{border-bottom:none}
+.step{font-family:var(--mono);font-size:.7rem;font-weight:600;color:var(--accent);background:var(--accent-soft);padding:.16rem .42rem;border-radius:3px;letter-spacing:.05em}
+.title{font-weight:600;font-size:.96rem}
+.sub{color:var(--slate);font-size:.83rem}
+.grow{flex:1 1 auto}
+.body{padding:1.05rem}
+
+/* buttons */
+.btn{background:var(--ink);color:var(--paper);border:1px solid var(--ink);border-radius:4px;padding:.4rem .85rem;cursor:pointer;font-weight:500;white-space:nowrap}
+.btn:hover:not(:disabled){opacity:.87}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.ghost{background:transparent;color:var(--ink);border-color:var(--hairline)}
+.btn.key{background:var(--accent);border-color:var(--accent);color:#fff}
+@media (prefers-color-scheme:dark){.btn.key{color:#08100F}}
+.btn:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* verdict chips */
+.chip{display:inline-flex;align-items:center;gap:.32rem;font-family:var(--mono);font-size:.72rem;font-weight:500;padding:.18rem .48rem;border-radius:3px;letter-spacing:.03em;white-space:nowrap}
+.chip.ok{background:var(--ok-soft);color:var(--ok)}
+.chip.no{background:var(--no-soft);color:var(--no)}
+.chip.owe{background:var(--owe-soft);color:var(--owe)}
+.chip.neutral{background:var(--surface-2);color:var(--slate)}
+.chip::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+
+/* metric row */
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:1px;background:var(--hairline);border:1px solid var(--hairline);border-radius:4px;overflow:hidden;margin-bottom:1rem}
+.metric{background:var(--surface);padding:.6rem .75rem}
+.metric .k{font-family:var(--mono);font-size:.62rem;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);display:block;margin-bottom:.15rem}
+.metric .v{font-family:var(--mono);font-size:1.15rem;font-variant-numeric:tabular-nums}
+.metric.bad .v{color:var(--no)}
+.metric.good .v{color:var(--ok)}
+.metric.warn .v{color:var(--owe)}
+
+/* tables */
+.tw{overflow-x:auto;border:1px solid var(--hairline);border-radius:4px;margin-bottom:1rem}
+table{width:100%;border-collapse:collapse;font-size:.83rem}
+th{text-align:left;font-family:var(--mono);font-size:.63rem;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);font-weight:600;padding:.5rem .7rem;background:var(--surface-2);border-bottom:1px solid var(--hairline);white-space:nowrap}
+td{padding:.5rem .7rem;border-bottom:1px solid var(--hairline);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td.r,th.r{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono)}
+tr.dim td{color:var(--slate)}
+
+/* refusal list — the most important element on the page */
+.refusals{border:1px solid var(--no);border-left-width:3px;background:var(--no-soft);border-radius:4px;padding:.85rem 1rem;margin-bottom:1rem}
+.refusals.owe{border-color:var(--owe);background:var(--owe-soft)}
+.refusals.ok{border-color:var(--ok);background:var(--ok-soft)}
+.refusals h4{margin:0 0 .5rem;font-size:.79rem;font-family:var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--no)}
+.refusals.owe h4{color:var(--owe)}
+.refusals.ok h4{color:var(--ok)}
+.refusals ol,.refusals ul{margin:0;padding-left:1.15rem}
+.refusals li{margin-bottom:.5rem;font-size:.84rem;line-height:1.5}
+.refusals li:last-child{margin-bottom:0}
+.refusals li code{font-size:.94em}
+
+/* invariant rows */
+.inv{display:grid;grid-template-columns:auto auto 1fr;gap:.5rem .75rem;align-items:start;padding:.55rem 0;border-bottom:1px solid var(--hairline)}
+.inv:last-child{border-bottom:none}
+.inv .id{font-family:var(--mono);font-size:.76rem;font-weight:600}
+.inv .st{font-family:var(--mono);font-size:.78rem}
+.inv .detail{font-size:.81rem;color:var(--slate);min-width:0;overflow-wrap:anywhere}
+.inv .dev{font-family:var(--mono);font-size:.78rem;font-variant-numeric:tabular-nums}
+
+/* forms */
+.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.7rem;margin-bottom:.9rem}
+label{display:flex;flex-direction:column;gap:.22rem;font-size:.76rem;color:var(--slate)}
+input,select{font-family:var(--mono);font-size:.83rem;padding:.36rem .5rem;border:1px solid var(--hairline);border-radius:3px;background:var(--surface);color:var(--ink);min-width:0}
+.hint{font-size:.78rem;color:var(--slate);margin:0 0 .9rem}
+details{margin-bottom:.75rem}
+summary{cursor:pointer;font-size:.8rem;color:var(--accent);font-weight:500}
+details pre{background:var(--sunken);border:1px solid var(--hairline);border-radius:3px;padding:.7rem;overflow-x:auto;font-size:.74rem;margin:.55rem 0 0;max-height:340px}
+.caveats{font-size:.79rem;color:var(--slate);border-top:1px dashed var(--hairline);padding-top:.7rem;margin-top:.3rem}
+.caveats b{color:var(--owe);font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;display:block;margin-bottom:.3rem}
+.caveats li{margin-bottom:.4rem}
+.empty{color:var(--faint);font-size:.85rem;font-style:italic}
+.err{border:1px solid var(--no);background:var(--no-soft);color:var(--no);border-radius:4px;padding:.7rem .9rem;font-size:.84rem;margin-bottom:.9rem;font-family:var(--mono)}
+.row{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+.spin{opacity:.55}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="hdr">
+    <div class="brand">EIR Engine <span>month-end console</span></div>
+    <div class="grow"></div>
+    <dl>
+      <div><dt>Period</dt><dd id="h-period">—</dd></div>
+      <div><dt>Book</dt><dd id="h-book">—</dd></div>
+      <div><dt>As at</dt><dd id="h-asat">—</dd></div>
+      <div><dt>GL account</dt><dd id="h-gl">—</dd></div>
+    </dl>
+  </div>
+</header>
+
+<main>
+
+  <!-- ============ the book ============ -->
+  <section class="stage">
+    <div class="top">
+      <span class="step">BOOK</span>
+      <span class="title">Contracts on file</span>
+      <span class="sub" id="book-sub"></span>
+      <span class="grow"></span>
+      <button class="btn ghost" id="btn-book">Refresh</button>
+    </div>
+    <div class="body" id="book-body"><p class="empty">Loading…</p></div>
+  </section>
+
+  <!-- ============ 1 recognise ============ -->
+  <section class="stage">
+    <div class="top">
+      <span class="step">01</span>
+      <span class="title">Recognise a contract</span>
+      <span class="sub">05 § 3.1 — the gate first, then fees, tier, projection, solve</span>
+    </div>
+    <div class="body">
+      <p class="hint">The order is the control. An SPPI failure exits before any fee is looked up or
+      any rate solved, and the response says which steps actually ran. The rule set maps one fee
+      code — <code>PROC_FEE</code> — so anything else is quarantined rather than defaulted.</p>
+      <div class="form">
+        <label>Contract id<input id="on-id" value="C-0100"></label>
+        <label>Principal<input id="on-principal" value="1000000.00"></label>
+        <label>Periodic rate<input id="on-rate" value="0.010000000000"></label>
+        <label>Term (months)<input id="on-term" value="24"></label>
+        <label>Fee code<input id="on-fee" value="PROC_FEE"></label>
+        <label>Fee amount<input id="on-feeamt" value="15000.00"></label>
+        <label>SPPI<select id="on-sppi"><option value="pass">pass</option><option value="fail">fail</option></select></label>
+        <label>Declared<select id="on-cat">
+          <option>AMORTISED_COST</option><option>FVOCI</option><option>FVTPL</option></select></label>
+      </div>
+      <div class="row"><button class="btn" id="btn-onboard">Recognise</button></div>
+      <div id="on-out"></div>
+    </div>
+  </section>
+
+  <!-- ============ 2 run ============ -->
+  <section class="stage">
+    <div class="top">
+      <span class="step">02</span>
+      <span class="title">Roll the period forward</span>
+      <span class="sub">05 § 3.2 — one solve only inside an event branch</span>
+      <span class="grow"></span>
+      <button class="btn key" id="btn-run">Run month-end</button>
+    </div>
+    <div class="body" id="run-body"><p class="empty">Not run yet.</p></div>
+  </section>
+
+  <!-- ============ remediation ============ -->
+  <section class="stage">
+    <div class="top">
+      <span class="step">↺</span>
+      <span class="title">Work the exception queue</span>
+      <span class="sub">two routes past a queued exception, and only one of them fixes the book</span>
+    </div>
+    <div class="body">
+      <p class="hint"><b>Repair</b> supplies the opening balance C-0003 is missing, so it computes
+      with the rest. <b>Accept</b> signs for closing over it under four eyes — which does not make
+      the figure right. Put the same name on both sides of an acceptance and the close refuses it.</p>
+      <div class="row" style="margin-bottom:.9rem">
+        <button class="btn ghost" id="btn-repair">Repair C-0003</button>
+      </div>
+      <div class="form">
+        <label>Accepted by<input id="ac-by" value="ops.analyst"></label>
+        <label>Approved by<input id="ac-appr" value="financial.controller"></label>
+      </div>
+      <div class="row"><button class="btn ghost" id="btn-accept">Accept under four eyes</button></div>
+      <div id="rem-out"></div>
+    </div>
+  </section>
+
+  <!-- ============ 3 post + close ============ -->
+  <section class="stage">
+    <div class="top">
+      <span class="step">03</span>
+      <span class="title">Post to the ledger, then close</span>
+      <span class="sub">FR-802 then FR-901 — a close before posting is refused, correctly</span>
+      <span class="grow"></span>
+      <button class="btn ghost" id="btn-post">Post journals</button>
+      <button class="btn key" id="btn-close">Close period</button>
+    </div>
+    <div class="body" id="close-body"><p class="empty">Roll the period forward first.</p></div>
+  </section>
+
+  <!-- ============ 4 replay ============ -->
+  <section class="stage">
+    <div class="top">
+      <span class="step">04</span>
+      <span class="title">Prove the close reproduces</span>
+      <span class="sub">05 § 3.3 — the same job, byte-for-byte, at an as-at boundary</span>
+      <span class="grow"></span>
+      <button class="btn ghost" id="btn-replay">Replay</button>
+    </div>
+    <div class="body" id="replay-body"><p class="empty">Not replayed yet.</p></div>
+  </section>
+
+</main>
+
+<script>
+"use strict";
+
+/* ---------- transport ------------------------------------------------------------------
+   Every figure arrives as a JSON *string*, never a number, so nothing here can round one by
+   touching it. The page formats for display and never computes: there is no arithmetic in this
+   file, and there must not be — the engine owns every figure it publishes. */
+
+async function api(path, fields) {
+  const opts = fields === undefined ? {method:"GET"} : {
+    method: "POST",
+    headers: {"Content-Type": "application/x-www-form-urlencoded"},
+    body: new URLSearchParams(fields).toString()
+  };
+  const response = await fetch(path, opts);
+  const text = await response.text();
+  let data;
+  try { data = JSON.parse(text); } catch (e) { data = {error:"unreadable response", detail:text}; }
+  return {status: response.status, data};
+}
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* Indian digit grouping on a figure that arrived as a string. Splits on the decimal point and
+   groups the integer part 3 then 2s, which is how a rupee figure is read in this market. */
+function inr(value) {
+  if (value === null || value === undefined) return "—";
+  const s = String(value);
+  const neg = s.startsWith("-");
+  const [whole, frac] = (neg ? s.slice(1) : s).split(".");
+  let head = whole, out = "";
+  if (head.length > 3) {
+    out = "," + head.slice(-3);
+    head = head.slice(0, -3);
+    while (head.length > 2) { out = "," + head.slice(-2) + out; head = head.slice(0, -2); }
+  }
+  const grouped = head + out;
+  return (neg ? "−" : "") + grouped + (frac !== undefined ? "." + frac : "");
+}
+
+const chip = (kind, label) => `<span class="chip ${kind}">${esc(label)}</span>`;
+const metric = (k, v, cls) =>
+  `<div class="metric ${cls||""}"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
+
+function refusalBlock(title, items, kind) {
+  if (!items || items.length === 0) return "";
+  return `<div class="refusals ${kind||""}"><h4>${esc(title)} — ${items.length}</h4>
+    <ol>${items.map(r => `<li>${esc(r)}</li>`).join("")}</ol></div>`;
+}
+
+function invariantBlock(rows) {
+  if (!rows || rows.length === 0) return `<p class="empty">No invariant was asserted.</p>`;
+  return `<div>${rows.map(r => `<div class="inv">
+      <span class="id">${esc(r.id)}</span>
+      <span class="st">${r.satisfied ? chip("ok","green") : chip("no","RED " + inr(r.deviation))}</span>
+      <span class="detail"><b>${esc(r.statement)}</b><br>${esc(r.detail)}</span>
+    </div>`).join("")}</div>`;
+}
+
+function caveatBlock(items) {
+  if (!items || items.length === 0) return "";
+  return `<div class="caveats"><b>What this book cannot show you</b>
+    <ul>${items.map(c => `<li>${esc(c)}</li>`).join("")}</ul></div>`;
+}
+
+const raw = (label, data) =>
+  `<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(data, null, 2))}</pre></details>`;
+
+function errBlock(res) {
+  return `<div class="err">HTTP ${res.status} — ${esc(res.data.error || "error")}: ${esc(res.data.detail || "")}</div>`;
+}
+
+async function withSpinner(button, work) {
+  button.disabled = true; button.classList.add("spin");
+  try { await work(); } finally { button.disabled = false; button.classList.remove("spin"); }
+}
+
+/* ---------- the book ---------- */
+async function loadBook() {
+  const res = await api("/api/book");
+  if (res.status !== 200) { $("book-body").innerHTML = errBlock(res); return; }
+  const b = res.data;
+  $("h-period").textContent = b.periodId;
+  $("h-book").textContent = b.periodStart + " → " + b.periodEnd;
+  $("h-asat").textContent = b.recordedAsAt;
+  $("h-gl").textContent = b.gcaAccount;
+  $("book-sub").textContent = b.contracts + " contract" + (b.contracts === 1 ? "" : "s");
+
+  $("book-body").innerHTML = `
+    <div class="tw"><table>
+      <thead><tr>
+        <th>Contract</th><th>Stage</th><th class="r">EIR (periodic)</th>
+        <th class="r">Opening GCA</th><th class="r">Allowance</th><th class="r">Billed</th>
+        <th>State</th><th>Description</th>
+      </tr></thead>
+      <tbody>${b.holdings.map(h => `<tr class="${h.openingStateOnFile ? "" : "dim"}">
+        <td class="mono">${esc(h.contractId)}${h.onboardedHere ? " " + chip("neutral","new") : ""}</td>
+        <td class="mono">${esc(h.stage.replace("STAGE_","S"))}</td>
+        <td class="r">${esc(h.eir)}</td>
+        <td class="r">${inr(h.openingGca)}</td>
+        <td class="r">${inr(h.allowance)}</td>
+        <td class="r">${inr(h.billedInterest)}</td>
+        <td>${h.openingStateOnFile ? chip("ok","on file") : chip("no","no balance")}</td>
+        <td>${esc(h.description)}</td>
+      </tr>`).join("")}</tbody>
+    </table></div>
+    <p class="hint">Policy versions in force at the period end:
+      ${b.policyVersions.map(p => `<code>${esc(p)}</code>`).join(" · ")}</p>`;
+}
+
+/* ---------- 1 recognise ---------- */
+async function onboard() {
+  const res = await api("/api/onboard", {
+    contractId: $("on-id").value, principal: $("on-principal").value,
+    rate: $("on-rate").value, termPeriods: $("on-term").value,
+    feeCode: $("on-fee").value, feeAmount: $("on-feeamt").value,
+    sppi: $("on-sppi").value, declaredCategory: $("on-cat").value
+  });
+  if (res.status !== 200) { $("on-out").innerHTML = errBlock(res); return; }
+  const d = res.data;
+
+  const ALL = ["MEASUREMENT_GATE","FEE_CLASSIFICATION","TIER_ASSIGNMENT","PROJECTION","SOLVE"];
+  const steps = ALL.map(s => d.stepsPerformed.includes(s)
+    ? chip("ok", s.toLowerCase().replace(/_/g," "))
+    : chip("neutral", "— " + s.toLowerCase().replace(/_/g," "))).join(" ");
+
+  $("on-out").innerHTML = `
+    <div class="metrics">
+      ${metric("Recognised", d.recognised ? "yes" : "no", d.recognised ? "good" : "bad")}
+      ${metric("Measured at", d.measuredAt || "—")}
+      ${metric("EIR periodic", d.eir || "—", d.eir ? "good" : "")}
+      ${metric("Expensive work", d.expensiveWorkPerformed ? "yes" : "no",
+               d.expensiveWorkPerformed ? "" : "warn")}
+    </div>
+    <p class="hint"><b>Steps that ran:</b><br>${steps}</p>
+    <div class="refusals ${d.recognised ? "ok" : "owe"}">
+      <h4>${d.recognised ? "Recognised" : "Not recognised"}</h4>
+      <ul><li>${esc(d.decision)}</li>
+      ${d.exceptionDetail ? `<li><b>${esc(d.exceptionCategory)}</b> — ${esc(d.exceptionDetail)}</li>` : ""}
+      ${d.addedToBook ? `<li>${esc(d.addedToBook)}</li>` : ""}</ul>
+    </div>
+    ${d.invariants && d.invariants.length ? `<h3 style="font-size:.85rem;margin:.9rem 0 .3rem">Invariants asserted</h3>${invariantBlock(d.invariants)}` : ""}
+    ${raw("Raw response", d)}`;
+  await loadBook();
+}
+
+/* ---------- 2 run ---------- */
+async function run() {
+  const res = await api("/api/run", {});
+  if (res.status !== 200) { $("run-body").innerHTML = errBlock(res); return; }
+  const d = res.data;
+  const shortfall = d.unaccountedFor > 0;
+
+  $("run-body").innerHTML = `
+    <div class="metrics">
+      ${metric("Population", d.populationSize)}
+      ${metric("Computed", d.computed, "good")}
+      ${metric("Quarantined", d.quarantined, d.quarantined > 0 ? "bad" : "")}
+      ${metric("Unaccounted", d.unaccountedFor, shortfall ? "bad" : "")}
+      ${metric("Solves", d.solves)}
+      ${metric("Clean close", d.reportsCleanClose ? "yes" : "no", d.reportsCleanClose ? "good" : "warn")}
+    </div>
+    ${refusalBlock("This run must not be reported as a clean close", d.blockingReasons, "owe")}
+    ${d.unassertedInvariants && d.unassertedInvariants.length
+      ? refusalBlock("Obligations with no evidence", d.unassertedInvariants, "owe") : ""}
+    <h3 style="font-size:.85rem;margin:0 0 .3rem">Population invariants</h3>
+    ${invariantBlock(d.invariants)}
+    <h3 style="font-size:.85rem;margin:1rem 0 .3rem">Per contract</h3>
+    <div class="tw"><table>
+      <thead><tr>
+        <th>Contract</th><th></th><th class="r">Opening GCA</th><th class="r">Gross interest</th>
+        <th class="r">Closing GCA</th><th class="r">To suspense</th><th class="r">Solves</th>
+        <th>Note</th>
+      </tr></thead>
+      <tbody>${d.contracts.map(c => `<tr class="${c.computed ? "" : "dim"}">
+        <td class="mono">${esc(c.contractId)}</td>
+        <td>${c.computed
+              ? (c.incomeSuppressed ? chip("owe","suppressed") : chip("ok","computed"))
+              : chip("no","quarantined")}</td>
+        <td class="r">${inr(c.openingGca)}</td>
+        <td class="r">${inr(c.grossInterest)}</td>
+        <td class="r">${inr(c.closingGca)}</td>
+        <td class="r">${inr(c.toSuspense)}</td>
+        <td class="r">${c.solves ?? "—"}</td>
+        <td>${c.computed ? (c.rateMoved ? "rate re-solved" : "rolled at the stored rate")
+                         : esc(c.exceptionCategory || "")}</td>
+      </tr>`).join("")}</tbody>
+    </table></div>
+    ${refusalBlock("Exception queue", d.exceptions, "no")}
+    ${raw("Journals and raw response", d)}`;
+  $("close-body").innerHTML = `<p class="empty">Post the journals, then close.</p>`;
+}
+
+/* ---------- remediation ---------- */
+async function repair() {
+  const res = await api("/api/repair", {});
+  const d = res.data;
+  $("rem-out").innerHTML = res.status !== 200 ? errBlock(res) : `
+    <div class="refusals ${d.repaired ? "ok" : "owe"}">
+      <h4>${d.repaired ? "Repaired" : "Nothing to repair"}</h4>
+      <ul><li>${esc(d.note || d.message)}</li>
+      ${d.openingGca ? `<li>Opening balance now on file: <code>${inr(d.openingGca)}</code></li>` : ""}</ul>
+    </div>`;
+  await loadBook();
+}
+
+async function accept() {
+  const res = await api("/api/accept", {
+    acceptedBy: $("ac-by").value, approvedBy: $("ac-appr").value
+  });
+  if (res.status !== 200) { $("rem-out").innerHTML = errBlock(res); return; }
+  const d = res.data;
+  $("rem-out").innerHTML = `
+    <div class="refusals ${d.selfApproved ? "no" : "owe"}">
+      <h4>${d.ran ? (d.selfApproved ? "Self-approved — the close will refuse this" : "Acceptance recorded") : "No queue"}</h4>
+      <ul><li>${esc(d.note || d.message)}</li></ul>
+    </div>`;
+}
+
+/* ---------- 3 post + close ---------- */
+async function post() {
+  const res = await api("/api/post", {});
+  if (res.status !== 200) { $("close-body").innerHTML = errBlock(res); return; }
+  const d = res.data;
+  $("close-body").innerHTML = `
+    ${d.ran ? `<div class="metrics">
+      ${metric("Entries posted", d.entries)}
+      ${metric("GL before", inr(d.glBefore))}
+      ${metric("GL after", inr(d.glAfter))}
+      ${metric("Movement", inr(d.movement))}
+    </div>` : ""}
+    <div class="refusals ${d.ran ? "ok" : "owe"}"><h4>${d.ran ? "Posted" : "Nothing to post"}</h4>
+      <ul><li>${esc(d.note || d.message)}</li></ul></div>
+    <p class="hint">Now close the period.</p>`;
+}
+
+async function closePeriod() {
+  const res = await api("/api/close", {closedBy: "financial.controller"});
+  if (res.status !== 200) { $("close-body").innerHTML = errBlock(res); return; }
+  const d = res.data;
+  if (!d.ran) {
+    $("close-body").innerHTML = refusalBlock("Cannot close", [d.message], "owe");
+    return;
+  }
+  const gateLines = String(d.gateVerdict).split("\n").map(l => l.replace(/^\s*-\s*/, "").trim())
+    .filter(l => l.length > 0);
+  const headline = gateLines.shift();
+
+  $("close-body").innerHTML = `
+    <div class="metrics">
+      ${metric("May close", d.mayClose ? "YES" : "NO", d.mayClose ? "good" : "bad")}
+      ${metric("Gate refusals", d.refusalCount, d.refusalCount > 0 ? "bad" : "good")}
+      ${metric("Run refusals", d.runRefusals.length, d.runRefusals.length > 0 ? "bad" : "good")}
+      ${metric("Journals posted", d.journalsPosted ? "yes" : "no", d.journalsPosted ? "good" : "warn")}
+      ${metric("Total deviation", inr(d.totalDeviation), d.totalDeviation !== "0" ? "bad" : "good")}
+    </div>
+    <div class="refusals ${d.mayClose ? "ok" : "no"}">
+      <h4>${d.mayClose ? "Permitted" : "Refused"}</h4>
+      <ul><li>${esc(headline)}</li></ul>
+    </div>
+    ${refusalBlock("The gate's reasons", gateLines, "no")}
+    ${refusalBlock("The run's own reasons — the gate cannot see these", d.runRefusals, "owe")}
+    <h3 style="font-size:.85rem;margin:0 0 .3rem">Evidence put to the gate</h3>
+    ${invariantBlock(d.evidence)}
+    ${caveatBlock(d.caveats)}
+    ${raw("Raw response", d)}`;
+}
+
+/* ---------- 4 replay ---------- */
+async function replay() {
+  const res = await api("/api/replay", {});
+  if (res.status !== 200) { $("replay-body").innerHTML = errBlock(res); return; }
+  const d = res.data;
+  if (!d.ran) {
+    $("replay-body").innerHTML = refusalBlock("Cannot replay", [d.message], "owe");
+    return;
+  }
+  $("replay-body").innerHTML = `
+    <div class="metrics">
+      ${metric("DT-1", d.dtOneSatisfied ? "green" : "RED", d.dtOneSatisfied ? "good" : "bad")}
+      ${metric("Deviation", d.dtOneDeviation, d.dtOneDeviation !== "0" ? "bad" : "good")}
+      ${metric("Coverage", d.coverage.replace(/_/g," ").toLowerCase())}
+      ${metric("Reproduces", d.provesReproduction ? "PROVEN" : "not proven",
+               d.provesReproduction ? "good" : "bad")}
+    </div>
+    <div class="refusals ${d.provesReproduction ? "ok" : "no"}">
+      <h4>${d.provesReproduction ? "Reproduction proven" : "Reproduction not proven"}</h4>
+      <ul><li>${esc(d.dtOneDetail)}</li></ul>
+    </div>
+    ${caveatBlock(d.caveats)}
+    ${raw("Raw response", d)}`;
+}
+
+/* ---------- wiring ---------- */
+const bind = (id, fn) => $(id).addEventListener("click",
+  () => withSpinner($(id), fn));
+
+bind("btn-book", loadBook);
+bind("btn-onboard", onboard);
+bind("btn-run", run);
+bind("btn-repair", repair);
+bind("btn-accept", accept);
+bind("btn-post", post);
+bind("btn-close", closePeriod);
+bind("btn-replay", replay);
+
+loadBook();
+</script>
+</body>
+</html>

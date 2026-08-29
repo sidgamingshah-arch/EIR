@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.crisil.eir</groupId>
+    <artifactId>eir-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>eir-api</artifactId>
+  <name>EIR :: api</name>
+  <description>
+    The edge: an HTTP surface over eir-application's four entry points, and the operator page that
+    drives them. This is what makes the engine a tool rather than a library — until now every
+    control had a caller and no caller had a user.
+
+    NO ADR-0010 EXEMPTION, and that is a choice rather than an oversight. ADR-0010 exists so that a
+    module which genuinely needs a framework can take one; this module does not. It serves five
+    JSON endpoints and one page, which the JDK's own com.sun.net.httpserver covers, and it writes
+    JSON by hand for the same reason RoutingTableFormat parses a routing table by hand — Jackson is
+    banned in the calculation path and the format is small enough to own. Two things follow that are
+    worth more here than the convenience: the whole repository still builds and runs with -o, so a
+    bank's air-gapped CI needs no network, and there is no framework between an HTTP request and an
+    invariant result.
+
+    What a production deployment changes, stated so nobody mistakes this for one: authentication and
+    authorisation (there is none — FR-906's role model is unimplemented), TLS termination, the
+    in-memory book replaced by eir-persistence's schema behind a real ContractStateSource, and
+    eir-batch driving the population loop instead of a request thread. The seams for all four are
+    the seven ports this module implements in memory.
+
+    Depends on eir-application and, through it, everything below. Nothing depends on this module.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-application</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-domain</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-calc</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-policy</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-gl</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
