@@ -353,9 +353,36 @@ public final class ExceptionsModule implements ApiModule {
      * and the resolution is a claim with no correction behind it. For every other category the
      * engine has no remediation path at all, and the response says so rather than implying a fix.
      */
-    private Json.Obj resolve(FormBody body) {
+
+    /**
+     * The exception this request names, taken from the path segment 06 § 6 specifies.
+     *
+     * <p>The path is authoritative and the body's {@code id} is not silently ignored: an earlier
+     * shape of these two handlers read the id out of the form, and the subtree router that replaced
+     * it reads the id out of {@code /api/exceptions/{id}/resolve}. Both spellings therefore exist in
+     * callers' hands. Preferring one and dropping the other quietly is the shape of defect this
+     * repository keeps finding — a caller who posts {@code id=EX-7} to {@code .../EX-9/resolve}
+     * would work the wrong row and be told the work succeeded. So a body id that disagrees with the
+     * path is refused, and one that agrees is accepted.
+     *
+     * @throws IllegalArgumentException when the body names a different exception than the path.
+     *     Fails the request rather than returning a refusal value because it is a malformed
+     *     request, not an answer the engine declines to give (400, per the API's own convention).
+     */
+    private static String namedException(String pathId, FormBody body) {
+        String bodyId = body.textOr("id", "");
+        if (!bodyId.isBlank() && !bodyId.equals(pathId)) {
+            throw new IllegalArgumentException(
+                "the path names exception " + pathId + " and the body names " + bodyId
+                    + "; refused rather than picking one, because working the wrong row and"
+                    + " reporting success is worse than refusing an ambiguous request");
+        }
+        return pathId;
+    }
+
+    private Json.Obj resolve(String pathId, FormBody body) {
         ExceptionWorkQueue queue = workQueue();
-        ExceptionRecord row = queue.find(body.text("id"));
+        ExceptionRecord row = queue.find(namedException(pathId, body));
         String resolvedBy = body.text("resolvedBy");
         String note = body.text("note");
         String previously = row.isOpen() ? null : row.status() + " by " + row.resolvedBy();
@@ -496,9 +523,9 @@ public final class ExceptionsModule implements ApiModule {
      * covered exceptions it did not name. The seam that turns the guard into a real bound is a
      * per-exception acceptance on {@code EirService}.
      */
-    private Json.Obj accept(FormBody body) {
+    private Json.Obj accept(String pathId, FormBody body) {
         ExceptionWorkQueue queue = workQueue();
-        ExceptionRecord row = queue.find(body.text("id"));
+        ExceptionRecord row = queue.find(namedException(pathId, body));
         String acceptedBy = body.text("acceptedBy");
         String approvedBy = body.text("approvedBy");
         String reason = body.text("reason");
@@ -638,9 +665,10 @@ public final class ExceptionsModule implements ApiModule {
                 + " to be posted again after a re-run, and this endpoint allows a repeat for"
                 + " exactly that reason rather than refusing it as a second signature.",
             "An id is contractId" + ExceptionWorkQueue.ID_SEPARATOR + "CATEGORY, which is the pair"
-                + " ExceptionAcceptance matches on. 06 § 6 puts it in the path; Routes.post hands a"
-                + " handler the form body and not the exchange, so it travels as a form field"
-                + " until that interface carries the request path.");
+                + " ExceptionAcceptance matches on, and 06 § 6 puts it in the path:"
+                + " POST " + SUBTREE_PATH + "{id}/{resolve|accept}. A body field named id is"
+                + " accepted only when it agrees with the path, and a disagreement is refused"
+                + " rather than resolved in favour of either.");
     }
 
     /** The three things an operator accepting an exception has to be told. */

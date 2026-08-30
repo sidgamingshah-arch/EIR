@@ -509,7 +509,7 @@ class TraceModuleTest {
             // The inputs that do exist are still shown — the population named the contract and the
             // period movements are on file, which is the whole content of FR-905's data condition.
             assertThat(response.body())
-                .contains("\"openingStateOnFile\":false")
+                .contains("\"openingStateOnFileNow\":false")
                 .contains("\"flowVector\":[")
                 .contains("\"flowVectorAnchor\":\"2028-04-30\"");
             // And no figures, because none were published. A rollForward block here would be the
@@ -520,7 +520,7 @@ class TraceModuleTest {
         }
 
         @Test
-        @DisplayName("a period this process never ran says which period it is positioned at")
+        @DisplayName("a period this process never ran names the periods it has")
         void aPeriodWithNoRunIsNamed() throws IOException {
             post("/api/run", "");
             Response response = get("/api/contracts/C-0001/trace?period=202804");
@@ -530,7 +530,13 @@ class TraceModuleTest {
                 .contains("\"answered\":false")
                 .contains("\"reason\":\"NO_RUN_FOR_PERIOD\"")
                 .contains("no run for period 202804")
-                .contains("This book is positioned at period 202805")
+                // Read, not asserted. This assertion was originally written against a refusal that
+                // said "this book is positioned at period 202805" from Seed.PERIOD_ID -- a
+                // compile-time constant, on a service that takes any Book. What the service can
+                // honestly answer is which periods it has actually rolled forward, and one run has
+                // now been posted, so that list is exactly [202805].
+                .contains("\"periodsRunInThisProcess\":[\"202805\"]")
+                .contains("Periods this process has run: [202805]")
                 .contains("\"contractOnBook\":true");
         }
 
@@ -592,15 +598,36 @@ class TraceModuleTest {
         }
 
         @Test
-        @DisplayName("a path under the prefix that is not a trace names the shape this route serves")
-        void aNonTracePathIsRefused() throws IOException {
+        @DisplayName("a sibling module's path under the same prefix is served, not refused as a"
+            + " malformed trace")
+        void aNonTracePathGoesToItsOwnModule() throws IOException {
+            // This test asserted a 400 naming the trace shape until 06 §§ 2-3's contracts resource
+            // landed on the same prefix. Both modules register a subtree on /api/contracts and the
+            // server tries each until one claims the request, so a trace module that answered 400
+            // for every non-trace suffix would have taken GET /api/contracts/{id} away from the
+            // module that serves it -- a 400 on a working endpoint, which is worse than the 404 the
+            // original assertion was guarding against. The trace module must DECLINE what is not
+            // its shape, and declining is invisible from out here except as somebody else's answer.
             Response response = get("/api/contracts/C-0001");
 
-            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
-                .as("a 404 here would send an integrator looking for a missing deployment")
-                .contains("is not a trace request")
-                .contains("/api/contracts/{contractId}/trace");
+                .as("the contracts resource answered, so the trace module declined rather than"
+                    + " claiming the path")
+                .contains("\"contractId\":\"C-0001\"")
+                .doesNotContain("is not a trace request");
+        }
+
+        @Test
+        @DisplayName("a suffix no module under the prefix claims is a 404 naming the path")
+        void anUnclaimedSuffixIsANotFound() throws IOException {
+            Response response = get("/api/contracts/C-0001/provenance");
+
+            assertThat(response.status())
+                .as("no module serves this suffix, and the server must say so rather than let one"
+                    + " module's guess answer for it")
+                .isEqualTo(404);
+            assertThat(response.body()).contains("/api/contracts/C-0001/provenance");
         }
 
         @Test

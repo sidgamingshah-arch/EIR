@@ -5,6 +5,10 @@ import static org.assertj.core.api.Assertions.within;
 
 import com.crisil.eir.api.EirServer;
 import com.crisil.eir.api.EirService;
+import com.crisil.eir.api.http.FormBody;
+import com.crisil.eir.api.http.Json;
+import com.crisil.eir.api.http.PathOnlyExchange;
+import com.crisil.eir.api.http.Routes;
 import com.crisil.eir.api.store.Book;
 import com.crisil.eir.api.store.Seed;
 import com.crisil.eir.application.port.ContractStateSource;
@@ -20,6 +24,7 @@ import com.crisil.eir.domain.Rate;
 import com.crisil.eir.domain.RateType;
 import com.crisil.eir.domain.Stage;
 import com.crisil.eir.domain.TimeConvention;
+import com.sun.net.httpserver.HttpExchange;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigDecimal;
@@ -29,6 +34,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
@@ -817,18 +823,42 @@ class ContractsAndEventsModuleTest {
 
         @Test
         @DisplayName("the trace suffix is declined, so unit 1's module can claim it")
-        void theTraceSuffixIsDeclined() throws IOException {
-            // 06 § 2's audit endpoint (FR-808) is TraceModule's, and it registers on this same
-            // prefix. This module returns null for the suffix so the next handler on the prefix is
-            // tried; with no TraceModule registered in this fixture nobody claims it and the
-            // server's own 404 names the path. Claiming it — with a 404 or a refusal of our own —
-            // would make the collision silent and TraceModule unreachable.
-            Response response = get("/api/contracts/C-0001/trace?period=2028-05");
+        void theTraceSuffixIsDeclined() {
+            // 06 § 2's audit endpoint (FR-808) is TraceModule's and registers on this same prefix.
+            // This module must return null for the suffix so the next handler on the prefix is
+            // tried. Claiming it — with a 404 or a refusal of its own — would make the collision
+            // silent and TraceModule unreachable.
+            //
+            // Asserted at the module rather than over the socket, and the change is the finding.
+            // This test used to expect the server's 404 on the reasoning that no TraceModule was
+            // registered "in this fixture"; the fixture is the real server, so once TraceModule
+            // landed it claimed the path and answered 200. The 404 was therefore never evidence
+            // about THIS module's behaviour — it was evidence that a sibling did not exist yet, and
+            // it would have gone green again the moment somebody deleted the trace endpoint. The
+            // decline is only observable where it happens: in the handler's own return value.
+            List<Routes.PathHandler> claimed = new ArrayList<>();
+            new ContractsAndEventsModule(new EirService(Seed.book())).register(new Routes() {
+                @Override
+                public void get(String path, Function<HttpExchange, Json.Obj> handler) {
+                    throw new AssertionError("this module registers one subtree, not a get");
+                }
 
-            assertThat(response.status()).isEqualTo(404);
-            assertThat(response.body())
-                .contains("no handler claimed")
-                .contains("/api/contracts/C-0001/trace");
+                @Override
+                public void post(String path, Function<FormBody, Json.Obj> handler) {
+                    throw new AssertionError("this module registers one subtree, not a post");
+                }
+
+                @Override
+                public void route(String path, Routes.PathHandler handler) {
+                    claimed.add(handler);
+                }
+            });
+
+            assertThat(claimed).as("exactly one subtree registration").hasSize(1);
+            assertThat(claimed.get(0).handle(
+                PathOnlyExchange.get("/api/contracts/C-0001/trace"), FormBody.parse("")))
+                .as("null is the decline; anything else takes FR-808's endpoint away from it")
+                .isNull();
         }
 
         @Test

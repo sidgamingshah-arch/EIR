@@ -13,6 +13,7 @@ import com.crisil.eir.application.run.ContractComputation;
 import com.crisil.eir.application.run.ContractPeriod;
 import com.crisil.eir.calc.amort.AmortisationRow;
 import com.crisil.eir.calc.amort.Stage3Reconciliation;
+import com.crisil.eir.calc.amort.SuspenseLedger;
 import com.crisil.eir.calc.routing.RoutingDecision;
 import com.crisil.eir.domain.CashFlow;
 import com.crisil.eir.domain.InvariantResult;
@@ -26,6 +27,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * {@code GET /api/contracts/{id}/trace?period=YYYYMM} — FR-808, the audit endpoint.
@@ -204,7 +207,7 @@ public final class TraceModule implements ApiModule {
                 + " book is a map rather than a bitemporal store, so it cannot answer what it held"
                 + " when the run read it (05 § 2).");
 
-        Optional<Book.Holding> holding = service.holdingOnFile(contractId);
+        Optional<Book.Holding> holding = service.holding(contractId);
         Optional<EirService.RunPapers> papers = service.runPapers(periodId);
 
         if (papers.isEmpty()) {
@@ -215,15 +218,23 @@ public final class TraceModule implements ApiModule {
                 .bool("answered", false)
                 .str("reason", "NO_RUN_FOR_PERIOD")
                 .bool("contractOnBook", holding.isPresent())
-                // No claim here about which period the book is positioned at. The first version
-                // said "this book is positioned at period Seed.PERIOD_ID", a compile-time constant
-                // from the demonstration seed, while EirService takes any Book — so on any other
-                // book the audit endpoint stated a position it had never read. An endpoint that
-                // asserts an unread fact is exactly what this one exists not to be.
+                // Which periods this process HAS run, read from the service rather than asserted.
+                // The first version said "this book is positioned at period Seed.PERIOD_ID", a
+                // compile-time constant from the demonstration seed, while EirService takes any
+                // Book — so on any other book the audit endpoint stated a position it had never
+                // read. An endpoint that asserts an unread fact is exactly what this one exists not
+                // to be. EirService.periodsRun() answers the question the caller actually has next,
+                // and answers it from the runs the process holds.
+                .strings("periodsRunInThisProcess", service.periodsRun().stream()
+                    .map(String::valueOf)
+                    .toList())
                 .str("detail", "no run for period " + periodId + " in this process, so no figure has"
-                    + " been published for it and there is nothing to resolve to inputs. POST"
-                    + " /api/run to roll the book's current period forward, then ask again for that"
-                    + " period."
+                    + " been published for it and there is nothing to resolve to inputs. "
+                    + (service.periodsRun().isEmpty()
+                        ? "No period has been run in this process at all: POST /api/run to roll the"
+                            + " book's current period forward, then ask again for that period."
+                        : "Periods this process has run: " + service.periodsRun() + ". POST /api/run"
+                            + " to roll the book's current period forward.")
                     + (holding.isPresent() ? "" : " Separately, contract " + contractId
                         + " is not on the book at all."))
                 .str("note", "an in-memory book holds only what this process ran. A production"

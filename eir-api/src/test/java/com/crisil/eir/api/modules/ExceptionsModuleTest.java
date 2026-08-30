@@ -7,6 +7,7 @@ import com.crisil.eir.api.EirServer;
 import com.crisil.eir.api.EirService;
 import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.http.Json;
+import com.crisil.eir.api.http.PathOnlyExchange;
 import com.crisil.eir.api.http.Routes;
 import com.crisil.eir.api.store.Seed;
 import com.crisil.eir.policy.exception.ExceptionCategory;
@@ -19,6 +20,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Function;
@@ -266,8 +268,8 @@ class ExceptionsModuleTest {
         void aBlankNoteRefuses() throws IOException {
             post("/api/run", "");
 
-            Response response = post("/api/exceptions/resolve",
-                "id=" + QUARANTINED_ID + "&resolvedBy=dq.desk&note=");
+            Response response = post("/api/exceptions/" + QUARANTINED_ID + "/resolve",
+                "resolvedBy=dq.desk&note=");
 
             assertThat(response.status())
                 .as("04 § 3 makes the note mandatory: a resolved row with no note is"
@@ -288,8 +290,8 @@ class ExceptionsModuleTest {
         void anAbsentNoteRefuses() throws IOException {
             post("/api/run", "");
 
-            Response response = post("/api/exceptions/resolve",
-                "id=" + QUARANTINED_ID + "&resolvedBy=dq.desk");
+            Response response = post("/api/exceptions/" + QUARANTINED_ID + "/resolve",
+                "resolvedBy=dq.desk");
 
             assertThat(response.status()).isEqualTo(400);
             assertThat(response.body()).contains("'note' is required and arrived absent");
@@ -300,8 +302,8 @@ class ExceptionsModuleTest {
         void anUnsignedResolutionRefuses() throws IOException {
             post("/api/run", "");
 
-            Response response = post("/api/exceptions/resolve",
-                "id=" + QUARANTINED_ID + "&note=sourced from the CBS extract");
+            Response response = post("/api/exceptions/" + QUARANTINED_ID + "/resolve",
+                "note=sourced from the CBS extract");
 
             assertThat(response.status()).isEqualTo(400);
             assertThat(response.body()).contains("'resolvedBy' is required");
@@ -312,8 +314,8 @@ class ExceptionsModuleTest {
         void aSignedResolutionWorksTheRow() throws IOException {
             post("/api/run", "");
 
-            Response response = post("/api/exceptions/resolve",
-                "id=" + QUARANTINED_ID + "&resolvedBy=dq.desk"
+            Response response = post("/api/exceptions/" + QUARANTINED_ID + "/resolve",
+                "resolvedBy=dq.desk"
                     + "&note=opening balance sourced from the CBS extract");
 
             assertThat(response.status()).isEqualTo(200);
@@ -341,8 +343,8 @@ class ExceptionsModuleTest {
         void theResolutionCorrectsTheInputAndTheCloseThenPermits() throws IOException {
             post("/api/run", "");
 
-            Response resolved = post("/api/exceptions/resolve",
-                "id=" + QUARANTINED_ID + "&resolvedBy=dq.desk"
+            Response resolved = post("/api/exceptions/" + QUARANTINED_ID + "/resolve",
+                "resolvedBy=dq.desk"
                     + "&note=opening balance sourced from the CBS extract");
 
             // The half that makes the resolution more than a label. PeriodCloseGate reads the
@@ -378,11 +380,11 @@ class ExceptionsModuleTest {
         @DisplayName("a second resolution is allowed and names the working it replaced")
         void aSecondResolutionNamesWhatItReplaced() throws IOException {
             post("/api/run", "");
-            post("/api/exceptions/resolve",
-                "id=" + QUARANTINED_ID + "&resolvedBy=dq.desk&note=first, and signed");
+            post("/api/exceptions/" + QUARANTINED_ID + "/resolve",
+                "resolvedBy=dq.desk&note=first, and signed");
 
-            Response response = post("/api/exceptions/resolve",
-                "id=" + QUARANTINED_ID + "&resolvedBy=someone.else&note=second");
+            Response response = post("/api/exceptions/" + QUARANTINED_ID + "/resolve",
+                "resolvedBy=someone.else&note=second");
 
             assertThat(response.status()).isEqualTo(200);
             // Allowed rather than refused, because every POST /api/run rebuilds the engine's queue
@@ -400,16 +402,16 @@ class ExceptionsModuleTest {
         void theIdFoldsTheCategoryAndNotTheContract() throws IOException {
             post("/api/run", "");
 
-            Response folded = post("/api/exceptions/resolve",
-                "id=C-0003:missing_mandatory_field&resolvedBy=dq.desk&note=lower case category");
+            Response folded = post("/api/exceptions/C-0003:missing_mandatory_field/resolve",
+                "resolvedBy=dq.desk&note=lower case category");
 
             assertThat(folded.status())
                 .as("the category is an enum and the query filters already take it in any case")
                 .isEqualTo(200);
             assertThat(folded.body()).contains("\"id\":\"" + QUARANTINED_ID + "\"");
 
-            Response wrongCase = post("/api/exceptions/resolve",
-                "id=c-0003:MISSING_MANDATORY_FIELD&resolvedBy=dq.desk&note=lower case contract");
+            Response wrongCase = post("/api/exceptions/c-0003:MISSING_MANDATORY_FIELD/resolve",
+                "resolvedBy=dq.desk&note=lower case contract");
 
             assertThat(wrongCase.status())
                 .as("two contract ids differing in case are two contracts — folding this half"
@@ -417,8 +419,8 @@ class ExceptionsModuleTest {
                 .isEqualTo(400);
             assertThat(wrongCase.body()).contains("no queued exception has id 'c-0003:");
 
-            assertThat(post("/api/exceptions/resolve",
-                "id=C-0003&resolvedBy=dq.desk&note=no category at all").status())
+            assertThat(post("/api/exceptions/C-0003/resolve",
+                "resolvedBy=dq.desk&note=no category at all").status())
                 .as("an id with no category addresses every category on that contract, and one"
                     + " signature must not clear two exceptions that need two decisions")
                 .isEqualTo(400);
@@ -429,8 +431,8 @@ class ExceptionsModuleTest {
         void anUnknownIdIsRefused() throws IOException {
             post("/api/run", "");
 
-            Response response = post("/api/exceptions/resolve",
-                "id=C-9999:NO_SOLUTION&resolvedBy=dq.desk&note=nothing to fix");
+            Response response = post("/api/exceptions/C-9999:NO_SOLUTION/resolve",
+                "resolvedBy=dq.desk&note=nothing to fix");
 
             assertThat(response.status()).isEqualTo(400);
             assertThat(response.body())
@@ -454,9 +456,8 @@ class ExceptionsModuleTest {
             // 'ops.analyst' and 'Ops.Analyst' are one identity here as they are in the database.
             // A plain equals() here is the defect that let a maker approve their own artefact
             // under a different capitalisation.
-            Response accepted = post("/api/exceptions/accept",
-                "id=" + QUARANTINED_ID
-                    + "&acceptedBy=ops.analyst&approvedBy=Ops.Analyst&reason=immaterial this month");
+            Response accepted = post("/api/exceptions/" + QUARANTINED_ID + "/accept",
+                "acceptedBy=ops.analyst&approvedBy=Ops.Analyst&reason=immaterial this month");
 
             assertThat(accepted.status()).isEqualTo(200);
             assertThat(accepted.body())
@@ -505,9 +506,8 @@ class ExceptionsModuleTest {
         void aProperlyApprovedAcceptanceIsNotSelfApproved() throws IOException {
             post("/api/run", "");
 
-            Response accepted = post("/api/exceptions/accept",
-                "id=" + QUARANTINED_ID
-                    + "&acceptedBy=ops.analyst&approvedBy=fin.controller&reason=immaterial");
+            Response accepted = post("/api/exceptions/" + QUARANTINED_ID + "/accept",
+                "acceptedBy=ops.analyst&approvedBy=fin.controller&reason=immaterial");
 
             assertThat(accepted.body())
                 .contains("\"worked\":true")
@@ -531,15 +531,15 @@ class ExceptionsModuleTest {
         void bothSignaturesAndTheReasonAreMandatory() throws IOException {
             post("/api/run", "");
 
-            assertThat(post("/api/exceptions/accept",
-                "id=" + QUARANTINED_ID + "&approvedBy=fin.controller&reason=x").status())
+            assertThat(post("/api/exceptions/" + QUARANTINED_ID + "/accept",
+                "approvedBy=fin.controller&reason=x").status())
                 .isEqualTo(400);
-            assertThat(post("/api/exceptions/accept",
-                "id=" + QUARANTINED_ID + "&acceptedBy=ops.analyst&reason=x").status())
+            assertThat(post("/api/exceptions/" + QUARANTINED_ID + "/accept",
+                "acceptedBy=ops.analyst&reason=x").status())
                 .isEqualTo(400);
 
-            Response noReason = post("/api/exceptions/accept",
-                "id=" + QUARANTINED_ID + "&acceptedBy=ops.analyst&approvedBy=fin.controller");
+            Response noReason = post("/api/exceptions/" + QUARANTINED_ID + "/accept",
+                "acceptedBy=ops.analyst&approvedBy=fin.controller");
 
             assertThat(noReason.status())
                 .as("the reason is the whole audit trail of why a close proceeded over a known"
@@ -552,8 +552,8 @@ class ExceptionsModuleTest {
         @DisplayName("an acceptance survives a re-run by being posted again, and still refuses")
         void anAcceptanceCanBePostedAgainAfterARerun() throws IOException {
             post("/api/run", "");
-            post("/api/exceptions/accept", "id=" + QUARANTINED_ID
-                + "&acceptedBy=ops.analyst&approvedBy=Ops.Analyst&reason=first pass");
+            post("/api/exceptions/" + QUARANTINED_ID + "/accept",
+                "acceptedBy=ops.analyst&approvedBy=Ops.Analyst&reason=first pass");
 
             // Every run rebuilds the engine's queue and clears its acceptance list on purpose —
             // the gate refuses a carried-forward acceptance as ACCEPTANCE_WITHOUT_AN_EXCEPTION.
@@ -562,8 +562,8 @@ class ExceptionsModuleTest {
             // would close 06 § 6's only route past a queued exception for the life of the process.
             post("/api/run", "");
 
-            Response again = post("/api/exceptions/accept", "id=" + QUARANTINED_ID
-                + "&acceptedBy=ops.analyst&approvedBy=Ops.Analyst&reason=second pass");
+            Response again = post("/api/exceptions/" + QUARANTINED_ID + "/accept",
+                "acceptedBy=ops.analyst&approvedBy=Ops.Analyst&reason=second pass");
 
             assertThat(again.status()).isEqualTo(200);
             assertThat(again.body())
@@ -581,8 +581,8 @@ class ExceptionsModuleTest {
         @Test
         @DisplayName("an acceptance posted before any run says so on the engine's own answer")
         void anAcceptanceBeforeAnyRunSaysSo() throws IOException {
-            Response response = post("/api/exceptions/accept", "id=" + QUARANTINED_ID
-                + "&acceptedBy=ops.analyst&approvedBy=fin.controller&reason=too early");
+            Response response = post("/api/exceptions/" + QUARANTINED_ID + "/accept",
+                "acceptedBy=ops.analyst&approvedBy=fin.controller&reason=too early");
 
             assertThat(response.status()).isEqualTo(200);
             // The engine has nothing to accept until a run has been rolled forward, and it says so
@@ -600,19 +600,47 @@ class ExceptionsModuleTest {
     class TheEdge {
 
         @Test
-        @DisplayName("06 § 6's path-id shape answers a 400 that names the seam, not a 405")
-        void theSpecifiedPathShapeExplainsItself() throws IOException {
+        @DisplayName("06 § 6's path-id shape is served, and the id comes off the path")
+        void theSpecifiedPathShapeIsServed() throws IOException {
+            // This test used to assert the opposite -- a 400 explaining that Routes.post hands a
+            // handler the form body and not the exchange, so one prefix context could not tell
+            // resolve from accept and the action would have to be inferred from which fields the
+            // body carried. Routes.route now exists and the module dispatches on the path, so the
+            // shape 06 § 6 specifies is answered rather than explained away. Kept rather than
+            // deleted because the refusal it replaced is the reason the seam was built.
             Response response = post("/api/exceptions/" + QUARANTINED_ID + "/accept",
                 "acceptedBy=ops.analyst&approvedBy=ops.analyst&reason=x");
 
-            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
-                .as("Routes.post hands a handler the form body and not the exchange, so a POST"
-                    + " handler cannot read its own path and one prefix context cannot tell"
-                    + " resolve from accept. Guessing the action from the body's shape is the"
-                    + " defect FR-507 names in another guise")
-                .contains("Routes.post carries the form body and not the exchange")
-                .contains("/api/exceptions/accept");
+                .as("the id in the response must be the one from the path, not one read from a"
+                    + " body field that is no longer sent")
+                .contains("\"id\":\"" + QUARANTINED_ID + "\"");
+        }
+
+        @Test
+        @DisplayName("a mistyped action under the prefix is a 404, not the mutation next door")
+        void aMistypedActionIsDeclinedRatherThanSwallowed() throws IOException {
+            // The defect a prefix context has and a subtree dispatcher does not. A context
+            // registered on /api/exceptions/ matches by longest prefix, so every one of these
+            // reached the resolution handler, which could not see the path it arrived by and
+            // performed the mutation anyway. A caller who mistyped the action would be told the
+            // row was worked -- and it would have been, under an action nobody asked for.
+            for (String path : List.of(
+                "/api/exceptions/resolveXYZ",
+                "/api/exceptions/" + QUARANTINED_ID + "/resolve/anything",
+                "/api/exceptions/" + QUARANTINED_ID + "/approve")) {
+                Response response = post(path, "resolvedBy=dq.desk&note=mistyped");
+
+                assertThat(response.status())
+                    .as("%s must be declined, not routed to a mutation", path)
+                    .isEqualTo(404);
+            }
+
+            // And the row is untouched: a 404 that had already mutated would be the worst of both.
+            assertThat(get("/api/exceptions?status=RESOLVED").body())
+                .as("nothing was worked by any of the three declined paths")
+                .contains("\"returned\":0");
         }
 
         @Test
@@ -641,6 +669,7 @@ class ExceptionsModuleTest {
             private final Map<String, Function<HttpExchange, Json.Obj>> gets =
                 new LinkedHashMap<>();
             private final Map<String, Function<FormBody, Json.Obj>> posts = new LinkedHashMap<>();
+            private final Map<String, Routes.PathHandler> subtrees = new LinkedHashMap<>();
 
             @Override
             public void get(String path, Function<HttpExchange, Json.Obj> handler) {
@@ -652,8 +681,36 @@ class ExceptionsModuleTest {
                 posts.put(path, handler);
             }
 
-            Json.Obj post(String path, String form) {
-                return posts.get(path).apply(FormBody.parse(form));
+            @Override
+            public void route(String path, Routes.PathHandler handler) {
+                subtrees.put(path, handler);
+            }
+
+            /**
+             * Drives the registered subtree at {@code rawPath} the way {@link EirServer} would.
+             *
+             * <p>The path is what dispatches: the module reads the id and the action off it, so a
+             * test that handed the handler a form and no path would exercise none of that. Asserts
+             * that a handler was actually found, because {@code subtrees.get} returning null on a
+             * path the module was supposed to claim is exactly the failure this harness exists to
+             * notice, and a NullPointerException reports it as a test defect instead.
+             */
+            Json.Obj post(String rawPath, String form) {
+                Routes.PathHandler handler = subtrees.entrySet().stream()
+                    .filter(entry -> rawPath.startsWith(entry.getKey()))
+                    .map(Map.Entry::getValue)
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError(
+                        "no subtree registered covering " + rawPath + "; registered: "
+                            + subtrees.keySet()));
+                Routes.Answer answer = handler.handle(
+                    PathOnlyExchange.post(rawPath), FormBody.parse(form));
+                if (answer == null) {
+                    throw new AssertionError(
+                        "the module declined " + rawPath + " — a declined path is a 404 on the"
+                            + " running server, not an answer this assertion can read");
+                }
+                return answer.body();
             }
         }
 
@@ -679,8 +736,9 @@ class ExceptionsModuleTest {
                 "PAYLOAD-12"));
             RecordedRoutes routes = moduleOver(queue);
 
-            assertThatThrownBy(() -> routes.post(ExceptionsModule.RESOLVE_PATH,
-                "id=C-0007:UNMAPPED_FEE_CODE&resolvedBy=dq.desk&note=mapped"))
+            assertThatThrownBy(() -> routes.post(
+                ExceptionsModule.SUBTREE_PATH + "C-0007:UNMAPPED_FEE_CODE/resolve",
+                "resolvedBy=dq.desk&note=mapped"))
                 .as("answering with the first would have the note signed against whichever of the"
                     + " two the iteration order happened to reach")
                 .isInstanceOf(FormBody.BadRequest.class)
@@ -706,8 +764,9 @@ class ExceptionsModuleTest {
                 .acceptWithApproval("fin.controller", "immaterial for May"));
             RecordedRoutes routes = moduleOver(queue);
 
-            String refused = routes.post(ExceptionsModule.RESOLVE_PATH,
-                "id=C-0007:NO_SOLUTION&resolvedBy=ops.analyst&note=calling it fixed").toString();
+            String refused = routes.post(
+                ExceptionsModule.SUBTREE_PATH + "C-0007:NO_SOLUTION/resolve",
+                "resolvedBy=ops.analyst&note=calling it fixed").toString();
 
             assertThat(refused)
                 .contains("\"worked\":false")
@@ -718,8 +777,9 @@ class ExceptionsModuleTest {
                 .isEqualTo(ExceptionStatus.ACCEPTED_WITH_APPROVAL);
             assertThat(queue.records().get(0).resolvedBy()).isEqualTo("fin.controller");
 
-            String acknowledged = routes.post(ExceptionsModule.RESOLVE_PATH,
-                "id=C-0007:NO_SOLUTION&resolvedBy=ops.analyst&note=schedule corrected at source"
+            String acknowledged = routes.post(
+                ExceptionsModule.SUBTREE_PATH + "C-0007:NO_SOLUTION/resolve",
+                "resolvedBy=ops.analyst&note=schedule corrected at source"
                     + "&replacing=ACCEPTED_WITH_APPROVAL").toString();
 
             assertThat(acknowledged)
@@ -745,8 +805,9 @@ class ExceptionsModuleTest {
                 "PAYLOAD-22"));
             RecordedRoutes routes = moduleOver(queue);
 
-            String response = routes.post(ExceptionsModule.ACCEPT_PATH,
-                "id=C-0007:NO_SOLUTION&acceptedBy=ops.analyst&approvedBy=fin.controller"
+            String response = routes.post(
+                ExceptionsModule.SUBTREE_PATH + "C-0007:NO_SOLUTION/accept",
+                "acceptedBy=ops.analyst&approvedBy=fin.controller"
                     + "&reason=immaterial").toString();
 
             assertThat(response)

@@ -156,11 +156,9 @@ public final class EirService {
      * so the promise is enforced by the type rather than by this sentence.
      */
     public Optional<RunSnapshot> lastRunFor(int periodId) {
-        Completed completed = lastRun.get(periodId);
-        return completed == null
-            ? Optional.empty()
-            : Optional.of(new RunSnapshot(completed.runId(), periodId, completed.aggregate(),
-                completed.computations(), book.holdings()));
+        return finishedRun(periodId).map(completed -> new RunSnapshot(
+            completed.runId(), periodId, completed.aggregate(),
+            completed.computations(), book.holdings()));
     }
 
     /**
@@ -680,11 +678,7 @@ public final class EirService {
      * @param periodId the accounting period, {@code YYYYMM} per 04 § 2.13
      */
     public Optional<PublishedFigures> publishedRun(int periodId) {
-        Completed completed = lastRun.get(periodId);
-        if (completed == null) {
-            return Optional.empty();
-        }
-        return Optional.of(new PublishedFigures(
+        return finishedRun(periodId).map(completed -> new PublishedFigures(
             completed.runId(), request(completed.runId()), completed.aggregate(),
             completed.computations(), contractualLegLines(completed, periodId)));
     }
@@ -963,24 +957,49 @@ public final class EirService {
      * endpoint stops being usable as evidence.
      */
     public java.util.Optional<RunPapers> runPapers(int periodId) {
-        Completed completed = lastRun.get(periodId);
-        return completed == null
-            ? java.util.Optional.empty()
-            : java.util.Optional.of(new RunPapers(
-                completed.runId(), completed.aggregate(), completed.computations(),
-                completed.exceptions(), completed.policyStamps()));
+        return finishedRun(periodId).map(completed -> new RunPapers(
+            completed.runId(), completed.aggregate(), completed.computations(),
+            completed.exceptions(), completed.policyStamps()));
     }
 
     /**
-     * One contract's position and movements as the book carries them, or empty.
+     * The one place a period's finished run is looked up, and why there are three views of it.
      *
-     * <p>Narrower than handing out {@link Book} on purpose: the trace endpoint needs the inputs
-     * side of a figure — terms, opening balances, stage, the period's flow vector and the cash
-     * book's split — and nothing at the edge should be able to move the book while rendering an
-     * audit answer.
+     * <p>{@link #lastRunFor}, {@link #publishedRun} and {@link #runPapers} each hand a module a
+     * different subset of the same {@code Completed}, and they were written independently — a
+     * movement schedule needs the holdings for their product ids, a reconciliation report needs the
+     * run's own read ports so it resolves the GL and the CBS feed at the boundary the run used, and
+     * the trace endpoint needs the exception queue and the policy stamps. Collapsing them into one
+     * record would hand every reader the union, including the {@code RunRequest}: a reporting module
+     * holding the run's ports could resolve a figure at a boundary of its own and disagree with the
+     * run it is reporting on. So the views stay separate and narrow.
+     *
+     * <p>What they must never do is disagree about <em>which</em> run a period's figures come from.
+     * That is why all three go through here rather than reaching into {@code lastRun} themselves: a
+     * change to what "the run for this period" means — a second run in a period, a superseded one —
+     * moves all three together or none.
      */
-    public java.util.Optional<Book.Holding> holdingOnFile(String contractId) {
-        return book.holding(contractId);
+    private java.util.Optional<Completed> finishedRun(int periodId) {
+        return java.util.Optional.ofNullable(lastRun.get(periodId));
+    }
+
+    /**
+     * The periods this process has actually rolled forward, in order.
+     *
+     * <p>Read rather than assumed, and that is the whole point. The trace endpoint's
+     * NO_RUN_FOR_PERIOD refusal used to name the period the book was "positioned at" from
+     * {@code Seed.PERIOD_ID} — a compile-time constant from the demonstration seed, on a class that
+     * takes any {@link Book}. On any other book the audit endpoint stated a position nobody had
+     * read. This answers the question the caller actually has ("then which period can I ask
+     * about?") from the runs this process holds.
+     *
+     * <p>Empty before any run, which is a different answer from "the period you asked for is not
+     * among these" and reads as such on the wire.
+     */
+    public List<Integer> periodsRun() {
+        List<Integer> periods = new ArrayList<>(lastRun.keySet());
+        java.util.Collections.sort(periods);
+        return List.copyOf(periods);
     }
 
     /**
