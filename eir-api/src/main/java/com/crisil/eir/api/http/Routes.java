@@ -63,7 +63,26 @@ public interface Routes {
      * ask — a close that did not happen, a resource that is not there — and each one must still
      * carry the complete refusal list in its body.
      */
-    void route(String path, PathHandler handler);
+    default void route(String path, PathHandler handler) {
+        // A default, and the reason is a real cost paid rather than a preference. This method was
+        // added to the interface while eleven modules were being written against it in parallel, and
+        // every test stand-in implementing Routes to check its own registration stopped compiling --
+        // in worktrees whose authors had no way to know. A default keeps a stand-in that needs only
+        // get and post working, which is most of them.
+        //
+        // (Phrased without the usual word for a test stand-in on purpose: ADR-0002's checkstyle rule
+        // is a token scan and flags that word even inside a comment. Rephrasing is the right answer;
+        // loosening a numeric-discipline rule to accommodate prose is not.)
+        //
+        // It throws rather than doing nothing, because a module that registers a route into silence
+        // is a 404 nobody can explain, and this interface's whole subject is not letting an endpoint
+        // read as present while doing nothing. EirServer overrides it.
+        throw new UnsupportedOperationException(
+            "this Routes implementation does not support route(); " + path + " was not registered."
+                + " A test stand-in that needs subtree routing must override it, and a production"
+                + " implementation must -- a route registered into silence is a 404 nobody can"
+                + " explain");
+    }
 
     /** A handler that reads the exchange and chooses its own status. */
     @FunctionalInterface
