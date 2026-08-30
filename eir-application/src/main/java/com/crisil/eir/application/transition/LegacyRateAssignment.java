@@ -79,16 +79,35 @@ public record LegacyRateAssignment(
     }
 
     /**
-     * The assignment for a contract no cohort claims.
+     * The assignment for a contract <b>nobody has placed</b>: no cohort was asserted for it.
      *
      * <p>Constructed rather than skipped, and that is the point of it existing: a contract left out
      * of the assignment list would be absent from every count of what remains to migrate, and 04 § 6
      * gives the discount basis its own table precisely because a population reporting complete
      * coverage over the contracts it happened to see is the failure that matters here.
      */
-    public static LegacyRateAssignment unassigned(String contractId, Rate rateInForce) {
+    public static LegacyRateAssignment unplaced(String contractId, Rate rateInForce) {
         return new LegacyRateAssignment(contractId, null, null, LegacyRateBasis.UNASSIGNED,
             rateInForce, null);
+    }
+
+    /**
+     * The assignment for a contract placed into a cohort <b>the plan does not define</b>.
+     *
+     * <p><b>Why this is not {@link #unplaced}.</b> Both end at {@link LegacyRateBasis#UNASSIGNED} —
+     * neither contract has a migration method — and they are two different data conditions with two
+     * different remedies: place the contract, or fix the plan. Collapsing them was a real defect
+     * found in review: this branch discarded the asserted name, so a contract somebody <em>had</em>
+     * placed, into a cohort the plan was missing, reported as "in no asserted cohort" and sent
+     * whoever read it to the wrong system. {@link AssertedCohortMembership} states the principle it
+     * violated — "an absent mapping and a mapping to nothing are different claims" — so the name is
+     * kept and {@link #namesACohortThePlanDoesNotDefine()} distinguishes the two.
+     */
+    public static LegacyRateAssignment unknownCohort(
+        String contractId, String assertedCohortName, Rate rateInForce) {
+        return new LegacyRateAssignment(contractId,
+            Objects.requireNonNull(assertedCohortName, "assertedCohortName"), null,
+            LegacyRateBasis.UNASSIGNED, rateInForce, null);
     }
 
     /**
@@ -148,12 +167,30 @@ public record LegacyRateAssignment(
         return basis.isOutstanding();
     }
 
+    /**
+     * Whether this contract was placed into a cohort the plan carries no definition of.
+     *
+     * <p>The remedy is to fix the plan, not to place the contract — which is why it is asked
+     * separately from {@link #isUnplaced()}.
+     */
+    public boolean namesACohortThePlanDoesNotDefine() {
+        return basis == LegacyRateBasis.UNASSIGNED && assertedCohortName != null;
+    }
+
+    /** Whether no cohort was asserted for this contract at all. The remedy is to place it. */
+    public boolean isUnplaced() {
+        return basis == LegacyRateBasis.UNASSIGNED && assertedCohortName == null;
+    }
+
     /** A one-line audit sentence. Names the cohort as asserted, never as computed. */
     public String describe() {
         return "contract " + contractId
             + (assertedCohortName == null
                 ? " is in no asserted cohort"
-                : " asserted into cohort " + assertedCohortName + " (" + method + ")")
+                : namesACohortThePlanDoesNotDefine()
+                    ? " is asserted into cohort " + assertedCohortName
+                        + ", which the plan does not define"
+                    : " asserted into cohort " + assertedCohortName + " (" + method + ")")
             + ": " + basis
             + (rate == null ? ", no rate in force" : " at " + rate.periodic().toPlainString())
             + (derivation == null ? "" : " [" + derivation.describe() + "]");

@@ -243,9 +243,16 @@ public final class TransitionExercise {
      * <p>An asserted cohort name the plan does not define produces {@link LegacyRateBasis#UNASSIGNED}
      * rather than a throw, and the distinction matters. The contract's valuation succeeded and its
      * migration position is recorded — both are real figures — and isolating it would remove them
-     * from the totals over a defect in the plan's own bookkeeping. So the figures stand, the contract
-     * is reported as unplaced, and {@link TransitionRun#blockingReasons()} names it: nothing says how
-     * it comes onto the EIR by 31 March 2030.
+     * from the totals over a defect in the plan's own bookkeeping. So the figures stand and
+     * {@link TransitionRun#blockingReasons()} names it: nothing says how it comes onto the EIR by
+     * 31 March 2030.
+     *
+     * <p><b>The two ways of having no method are kept apart.</b> A contract nobody placed needs
+     * placing; a contract placed into a cohort the plan is missing needs the plan fixed. This method
+     * returns {@link LegacyRateAssignment#unplaced} for the first and
+     * {@link LegacyRateAssignment#unknownCohort} for the second, which keeps the asserted name — it
+     * was discarded here on the first cut, so a contract somebody had placed reported as "in no
+     * asserted cohort" and sent its reader to the wrong system.
      */
     private static LegacyRateAssignment assignment(
         String contractId,
@@ -255,13 +262,13 @@ public final class TransitionExercise {
 
         Optional<String> cohortName = membership.cohortOf(contractId);
         if (cohortName.isEmpty()) {
-            return LegacyRateAssignment.unassigned(contractId, rateInForce);
+            return LegacyRateAssignment.unplaced(contractId, rateInForce);
         }
         Optional<LegacyCohort> cohort = plan.cohorts().stream()
             .filter(candidate -> candidate.cohortName().equals(cohortName.get()))
             .findFirst();
         if (cohort.isEmpty()) {
-            return LegacyRateAssignment.unassigned(contractId, rateInForce);
+            return LegacyRateAssignment.unknownCohort(contractId, cohortName.get(), rateInForce);
         }
         return LegacyRateAssignment.under(contractId, cohort.get(), plan, rateInForce);
     }

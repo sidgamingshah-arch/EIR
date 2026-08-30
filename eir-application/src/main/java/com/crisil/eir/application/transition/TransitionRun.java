@@ -142,6 +142,32 @@ public record TransitionRun(
                     + " recorded positions, so a tracker built over another population would report"
                     + " a coverage this exercise did not measure");
         }
+        // The coverage report is checked against the same three facts as the tracker, and it was
+        // only null-checked on the first cut — while the class javadoc above promised the
+        // collaborators were verified to have been built over one population. A caller assembling a
+        // run by hand could hand it another exercise's coverage, or coverage stated at another date,
+        // and describe() would publish it verbatim as this run's. The as-at date is included
+        // because coverage is a position at a date: the same book is complete on one date and in
+        // breach on the next, so coverage carrying a different asOf than the boundary TM-1 was
+        // asserted at is two answers about two days presented as one.
+        if (coverage.contractsInPopulation() != population.size()
+            || coverage.contractsTracked() != tracker.trackedContracts()
+            || coverage.untrackedContracts() != tracker.untrackedContracts()) {
+            throw new IllegalArgumentException(
+                "the coverage report covers " + coverage.contractsTracked() + " tracked of "
+                    + coverage.contractsInPopulation() + " contracts ("
+                    + coverage.untrackedContracts() + " untracked) against a population of "
+                    + population.size() + " with " + tracker.trackedContracts()
+                    + " recorded positions; the coverage was measured over a different population"
+                    + " than the one this exercise accounts for");
+        }
+        if (!coverage.asOf().equals(boundary.businessAsOf())) {
+            throw new IllegalArgumentException(
+                "the coverage report is stated as at " + coverage.asOf() + " and the exercise's"
+                    + " boundary is " + boundary.businessAsOf() + "; both deadlines are judged"
+                    + " against the as-at date, so coverage from another date reports a different"
+                    + " day's position under this exercise's identity");
+        }
     }
 
     /**
@@ -173,7 +199,27 @@ public record TransitionRun(
                         + " exercise; a contract produced a valuation or it did not");
             }
         }
-        Set<String> inScope = new LinkedHashSet<>(population);
+        Set<String> inScope = new LinkedHashSet<>();
+        List<String> duplicated = new ArrayList<>();
+        for (String id : population) {
+            if (!inScope.add(id)) {
+                duplicated.add(id);
+            }
+        }
+        if (!duplicated.isEmpty()) {
+            // Found in review. The population was collapsed straight into a LinkedHashSet, so a
+            // duplicated id left `missing` and `extra` both empty and the partition passed — while
+            // populationSize() and the coverage report carried the inflated count. The run then
+            // either threw with a message about the tracker, which names the wrong thing, or
+            // reported a phantom untracked contract for the life of the pack. TransitionExercise
+            // guards its own call site; this record is public and its javadoc claims the accounting
+            // is airtight, so the claim is made good here rather than assumed of every caller.
+            throw new IllegalArgumentException(
+                duplicated.size() + " contract(s) appear more than once in the population: "
+                    + truncate(duplicated) + ". A duplicate inflates the population count while"
+                    + " every contract is still accounted for exactly once, so the difference"
+                    + " surfaces as an untracked contract that does not exist");
+        }
         List<String> missing = new ArrayList<>();
         for (String id : inScope) {
             if (!accountedFor.contains(id)) {
@@ -274,7 +320,11 @@ public record TransitionRun(
 
     /** The published results that failed. */
     public List<InvariantResult> breaches() {
-        return invariants().stream().filter(result -> !result.satisfied()).toList();
+        return breaches(invariants());
+    }
+
+    private static List<InvariantResult> breaches(List<InvariantResult> evidence) {
+        return evidence.stream().filter(result -> !result.satisfied()).toList();
     }
 
     /** Contracts with a rate assignment that still needs work, in population order. */
@@ -314,6 +364,17 @@ public record TransitionRun(
      * is a programme question, not an accounting one.
      */
     public List<String> blockingReasons() {
+        // The evidence is computed ONCE and passed down. It was previously rebuilt three times per
+        // call — blockingReasons, unassertedInvariants and breaches each re-ran
+        // paragraph19Evidenced() over every valuation, plan.invariants() and
+        // migrationTracked(...) — and describe() then called blockingReasons twice more. On the
+        // ten-million-contract book this module is written for that is around eight full passes
+        // over the population to render one line, and nothing in the recomputation could differ:
+        // every input is a final component of an immutable record.
+        return blockingReasons(invariants());
+    }
+
+    private List<String> blockingReasons(List<InvariantResult> evidence) {
         List<String> reasons = new ArrayList<>();
         if (population.isEmpty()) {
             // Stated first because it explains why everything below it is silent.
@@ -338,8 +399,11 @@ public record TransitionRun(
                 + " nothing states how the legacy book reaches the EIR by "
                 + LegacyCohort.ACPIR_50_DEADLINE);
         }
+        // Two reasons rather than one, because the remedies differ: place the contract, or fix the
+        // plan. They were one reason on the first cut and a contract somebody HAD placed reported as
+        // being in no cohort, which sends whoever reads it to the wrong system.
         List<String> unplaced = outcomes.stream()
-            .filter(outcome -> outcome.rateAssignment().basis() == LegacyRateBasis.UNASSIGNED)
+            .filter(outcome -> outcome.rateAssignment().isUnplaced())
             .map(ContractTransitionOutcome::contractId)
             .toList();
         if (!unplaced.isEmpty()) {
@@ -347,13 +411,24 @@ public record TransitionRun(
                 + " migration method applies to them and they are absent from every cohort's"
                 + " contract count: " + truncate(unplaced) + ". " + AssertedCohortMembership.BASIS);
         }
-        List<InvariantId> gaps = unassertedInvariants();
+        List<String> unknownCohort = outcomes.stream()
+            .filter(outcome -> outcome.rateAssignment().namesACohortThePlanDoesNotDefine())
+            .map(outcome -> outcome.contractId() + " -> "
+                + outcome.rateAssignment().assertedCohortName())
+            .toList();
+        if (!unknownCohort.isEmpty()) {
+            reasons.add(unknownCohort.size() + " valued contract(s) are asserted into a cohort the"
+                + " plan does not define, so no migration method applies to them and the plan and"
+                + " the membership disagree about which cohorts exist: " + truncate(unknownCohort));
+        }
+        List<InvariantId> gaps =
+            InvariantResult.idsWithoutEvidence(TRANSITION_INVARIANTS, evidence);
         if (!gaps.isEmpty()) {
             reasons.add("no evidence was produced for " + gaps + ", which this exercise is"
                 + " answerable for; an id absent from the report reads the same as an id that"
                 + " passed");
         }
-        for (InvariantResult result : breaches()) {
+        for (InvariantResult result : breaches(evidence)) {
             reasons.add(result.id() + " breached: " + result.detail());
         }
         return List.copyOf(reasons);
@@ -366,6 +441,7 @@ public record TransitionRun(
 
     /** The exercise's own summary: the counts, the coverage, and every reason it is not complete. */
     public String describe() {
+        List<String> reasons = blockingReasons();
         StringBuilder text = new StringBuilder("transition exercise ").append(runId)
             .append(" valuing at ").append(transitionDate)
             .append(", asserted as at ").append(boundary.businessAsOf())
@@ -379,11 +455,11 @@ public record TransitionRun(
             .append(" below-market origination(s) presented")
             .append(belowMarketCount() == 0 ? " — BM-1 not asserted, nothing to assert it over" : "")
             .append("\n  ").append(coverage.describe());
-        if (reportsCompleteExercise()) {
+        if (reasons.isEmpty()) {
             return text.append("\n  — complete").toString();
         }
         text.append("\n  — NOT complete:");
-        for (String reason : blockingReasons()) {
+        for (String reason : reasons) {
             text.append("\n    ").append(reason);
         }
         return text.toString();

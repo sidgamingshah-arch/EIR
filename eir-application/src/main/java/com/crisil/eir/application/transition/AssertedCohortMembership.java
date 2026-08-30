@@ -84,9 +84,22 @@ public record AssertedCohortMembership(Map<String, String> cohortByContract) {
         return new AssertedCohortMembership(Map.of());
     }
 
-    /** The cohort asserted for {@code contractId}, or empty where none was. */
+    /**
+     * The cohort asserted for {@code contractId}, or empty where none was.
+     *
+     * <p><b>The lookup key is stripped, because the stored key was.</b> Found in review: the
+     * constructor normalises on insert and this method used the raw argument, so a mapping supplied
+     * as {@code " C-1 "} was stored under {@code "C-1"} and a lookup with {@code " C-1 "} missed
+     * it. The consequence was not a missing cohort for one contract — {@code ContractSource} feeds
+     * these ids straight from the population, so a feed with padded ids would have returned
+     * {@code UNASSIGNED} for <em>every</em> contract and blocked the whole exercise with a reason
+     * about the plan. Normalised on both sides so the two cannot disagree.
+     */
     public Optional<String> cohortOf(String contractId) {
-        return Optional.ofNullable(cohortByContract.get(contractId));
+        if (contractId == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(cohortByContract.get(contractId.strip()));
     }
 
     /** How many contracts have a cohort asserted for them. */

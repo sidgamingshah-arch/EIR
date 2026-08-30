@@ -96,12 +96,19 @@ public record TransitionCoverage(
         Objects.requireNonNull(asOf, "asOf");
         Objects.requireNonNull(acpir21, "acpir21");
         Objects.requireNonNull(acpir50, "acpir50");
-        if (contractsInPopulation < 0 || contractsTracked < 0
+        if (contractsInPopulation < 0 || contractsTracked < 0 || untrackedContracts < 0
             || plannedContractsRequiringMigration < 0 || survivingCohortCount < 0) {
+            // untrackedContracts is in this list, and leaving it out was a real hole found in
+            // review. Without it a report of 8 tracked out of a population of 5 constructed: the
+            // untracked figure came out at -3, the difference check below was satisfied by the
+            // negative, and describe()'s `if (untrackedContracts > 0)` branch then suppressed the
+            // UNTRACKED warning entirely — producing "8 of 5 contracts carry a recorded ECL
+            // discount basis" with no warning at all. That is the most-found defect in this
+            // codebase wearing a clean report, reached through the one guard meant to stop it.
             throw new IllegalArgumentException(
                 "coverage figures must be non-negative: population " + contractsInPopulation
-                    + ", tracked " + contractsTracked + ", planned "
-                    + plannedContractsRequiringMigration + ", surviving cohorts "
+                    + ", tracked " + contractsTracked + ", untracked " + untrackedContracts
+                    + ", planned " + plannedContractsRequiringMigration + ", surviving cohorts "
                     + survivingCohortCount);
         }
         if (untrackedContracts != contractsInPopulation - contractsTracked) {
@@ -124,15 +131,27 @@ public record TransitionCoverage(
                     + " overall; both obligations are measured over the same recorded positions, so"
                     + " a difference means one of them was counted over a different population");
         }
-        if (underAcpir50Concession < 0 || underAcpir50Concession > contractsTracked) {
+        // Both sub-populations are bounded by the obligation they are a subset OF, not merely by
+        // the tracked count. The concession population is `satisfies 21 && !satisfies 50`, so it
+        // cannot exceed ACPIR 50's outstanding count; the reverse gap is `satisfies 50 &&
+        // !satisfies 21`, so it cannot exceed ACPIR 21's. Bounding both by contractsTracked instead
+        // let a report claim seven contracts under the ACPIR 50 concession while ACPIR 50 reported
+        // nil outstanding — a decomposition of a figure into more than the figure, which is how a
+        // remaining-work number comes to be disbelieved.
+        if (underAcpir50Concession < 0 || underAcpir50Concession > acpir50.contractsOutstanding()) {
             throw new IllegalArgumentException(
-                "the ACPIR 50 concession population is " + underAcpir50Concession + " of "
-                    + contractsTracked + " tracked contracts");
+                "the ACPIR 50 concession population is " + underAcpir50Concession
+                    + " against " + acpir50.contractsOutstanding() + " contracts outstanding on"
+                    + " ACPIR 50; a contract under the concession has not satisfied ACPIR 50, so"
+                    + " the concession population is part of the outstanding one and cannot exceed"
+                    + " it");
         }
-        if (eclAheadOfInterest < 0 || eclAheadOfInterest > contractsTracked) {
+        if (eclAheadOfInterest < 0 || eclAheadOfInterest > acpir21.contractsOutstanding()) {
             throw new IllegalArgumentException(
-                "the ECL-ahead-of-interest population is " + eclAheadOfInterest + " of "
-                    + contractsTracked + " tracked contracts");
+                "the ECL-ahead-of-interest population is " + eclAheadOfInterest + " against "
+                    + acpir21.contractsOutstanding() + " contracts outstanding on ACPIR 21; a"
+                    + " contract whose ECL is ahead of its interest recognition has not satisfied"
+                    + " ACPIR 21, so it is part of that obligation's outstanding population");
         }
     }
 

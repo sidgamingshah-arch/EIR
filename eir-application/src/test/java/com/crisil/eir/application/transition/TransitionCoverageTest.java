@@ -219,6 +219,59 @@ class TransitionCoverageTest {
                 .hasMessageContaining("silently dropped");
         }
 
+        /**
+         * The failing input, named: 8 tracked contracts against a population of 5, with the
+         * untracked figure supplied as the −3 that difference actually is. Found in review: the
+         * non-negativity guard omitted {@code untrackedContracts}, the difference check was
+         * satisfied by the negative, and {@code describe()}'s {@code untrackedContracts > 0} branch
+         * then suppressed the UNTRACKED warning — so the report read "8 of 5 contracts carry a
+         * recorded ECL discount basis" with no warning at all.
+         */
+        @Test
+        @DisplayName("more tracked contracts than the population is refused, not printed as 8 of 5")
+        void trackedCannotExceedThePopulation() {
+            assertThatThrownBy(() -> new TransitionCoverage(MID_MIGRATION, 5L, 8L, -3L,
+                new ObligationCoverage("ACPIR 21", "interest is recognised on the EIR",
+                    ACPIR_21_DEADLINE, 8L, 8L, 0L),
+                new ObligationCoverage("ACPIR 50", "the ECL is discounted at the EIR",
+                    LegacyCohort.ACPIR_50_DEADLINE, 8L, 8L, 0L),
+                0L, 0L, 0L, 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must be non-negative");
+        }
+
+        /**
+         * The failing input, named: seven contracts reported under the ACPIR 50 concession while
+         * ACPIR 50 reports nil outstanding. The concession population is
+         * {@code satisfies 21 && !satisfies 50}, so it is part of ACPIR 50's outstanding population
+         * and cannot exceed it — a decomposition of a figure into more than the figure.
+         */
+        @Test
+        @DisplayName("a sub-population larger than the obligation it decomposes is refused")
+        void theConcessionPopulationCannotExceedTheObligationItIsPartOf() {
+            assertThatThrownBy(() -> new TransitionCoverage(MID_MIGRATION, 10L, 10L, 0L,
+                new ObligationCoverage("ACPIR 21", "interest is recognised on the EIR",
+                    ACPIR_21_DEADLINE, 10L, 10L, 0L),
+                new ObligationCoverage("ACPIR 50", "the ECL is discounted at the EIR",
+                    LegacyCohort.ACPIR_50_DEADLINE, 10L, 10L, 0L),
+                7L, 0L, 0L, 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot exceed it");
+        }
+
+        @Test
+        @DisplayName("an ECL-ahead-of-interest count larger than ACPIR 21's outstanding is refused")
+        void theReverseGapCannotExceedAcpir21sOutstanding() {
+            assertThatThrownBy(() -> new TransitionCoverage(MID_MIGRATION, 10L, 10L, 0L,
+                new ObligationCoverage("ACPIR 21", "interest is recognised on the EIR",
+                    ACPIR_21_DEADLINE, 10L, 10L, 0L),
+                new ObligationCoverage("ACPIR 50", "the ECL is discounted at the EIR",
+                    LegacyCohort.ACPIR_50_DEADLINE, 10L, 10L, 0L),
+                0L, 4L, 0L, 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("part of that obligation's outstanding population");
+        }
+
         @Test
         @DisplayName("two obligations counted over different populations are refused")
         void bothObligationsAreMeasuredOverTheSamePositions() {

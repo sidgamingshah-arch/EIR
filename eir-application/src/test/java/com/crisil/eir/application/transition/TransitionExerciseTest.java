@@ -470,6 +470,59 @@ class TransitionExerciseTest {
             assertThat(run.reportsCompleteExercise()).isFalse();
         }
 
+        /**
+         * The failing input, named: a contract asserted into "RETAIL-HOME-2018" while the plan
+         * defines "RETAIL-HOME-2019". Somebody did place this contract; the plan is what is
+         * missing. Reported as "in no asserted cohort" — which is what happened before review —
+         * that sends whoever reads it to place a contract that is already placed.
+         */
+        @Test
+        @DisplayName("a cohort the plan does not define is reported as that, not as no cohort at all")
+        void anUnknownCohortIsDistinguishedFromAnUnplacedContract() {
+            Map<String, String> membership = new java.util.LinkedHashMap<>();
+            membership.put(QUOTED, SURVIVOR_COHORT);
+            membership.put(DCF, "RETAIL-HOME-2018");
+            membership.put(PRESUMED, RUNOFF_COHORT);
+
+            TransitionRun run = perform(cleanStates(), cleanSource(), cleanPlan(),
+                AssertedCohortMembership.asserted(membership), List.of(), new ExceptionQueue(),
+                List.of(QUOTED, DCF, PRESUMED));
+
+            LegacyRateAssignment dcf = run.outcomes().get(1).rateAssignment();
+            assertThat(dcf.basis()).isEqualTo(LegacyRateBasis.UNASSIGNED);
+            assertThat(dcf.assertedCohortName())
+                .as("the asserted name is kept: an absent mapping and a mapping to a cohort the plan"
+                    + " is missing are different claims with different remedies")
+                .isEqualTo("RETAIL-HOME-2018");
+            assertThat(dcf.namesACohortThePlanDoesNotDefine()).isTrue();
+            assertThat(dcf.isUnplaced()).isFalse();
+            assertThat(dcf.describe()).contains("the plan does not define");
+            assertThat(run.blockingReasons())
+                .anySatisfy(reason -> assertThat(reason)
+                    .contains("asserted into a cohort the plan does not define")
+                    .contains("RETAIL-HOME-2018"));
+            assertThat(run.blockingReasons())
+                .as("and it must NOT be reported as being in no asserted cohort")
+                .noneSatisfy(reason -> assertThat(reason).contains("in no asserted cohort"));
+        }
+
+        @Test
+        @DisplayName("a padded contract id in the membership still finds its cohort")
+        void theMembershipLookupIsNormalisedOnBothSides() {
+            TransitionRun run = perform(cleanStates(), cleanSource(), cleanPlan(),
+                AssertedCohortMembership.asserted(Map.of(
+                    " " + QUOTED + " ", SURVIVOR_COHORT, DCF, SURVIVOR_COHORT,
+                    PRESUMED, RUNOFF_COHORT)),
+                List.of(), new ExceptionQueue(), List.of(QUOTED, DCF, PRESUMED));
+
+            assertThat(run.outcomes().getFirst().rateAssignment().basis())
+                .as("the constructor strips on insert, so the lookup strips too; a feed with padded"
+                    + " ids would otherwise return UNASSIGNED for every contract and block the whole"
+                    + " exercise with a reason about the plan")
+                .isEqualTo(LegacyRateBasis.RECONSTRUCTED);
+            assertThat(run.reportsCompleteExercise()).isTrue();
+        }
+
         @Test
         @DisplayName("a contract in no asserted cohort has no method, and that blocks")
         void anUnplacedContractBlocks() {
@@ -713,6 +766,70 @@ class TransitionExerciseTest {
                 clean.valuationRun(), clean.tracker(), clean.plan(), List.of(), clean.coverage()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("unaccounted for");
+        }
+
+        /**
+         * The failing input, named: a population list carrying C-QUOTED twice. Found in review — the
+         * partition check collapsed the population into a set, so the duplicate left both the
+         * missing and the extra list empty while {@code populationSize()} carried the inflated
+         * count, and the difference surfaced later as an untracked contract that does not exist.
+         */
+        @Test
+        @DisplayName("a duplicated population id is refused by the run, not absorbed by a set")
+        void aDuplicatedPopulationIdIsRefused() {
+            TransitionRun clean = cleanRun(new ExceptionQueue());
+
+            assertThatThrownBy(() -> new TransitionRun(RUN_ID, TRANSITION_DATE, boundary(),
+                List.of(QUOTED, DCF, PRESUMED, QUOTED), clean.outcomes(), List.of(),
+                clean.valuationRun(), clean.tracker(), clean.plan(), List.of(), clean.coverage()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("appear more than once in the population");
+        }
+
+        /**
+         * The failing input, named: coverage measured over a different population than the run
+         * accounts for. The run's javadoc promises its collaborators were built over one population,
+         * and coverage was only null-checked — so another exercise's coverage could be published
+         * verbatim under this run's identity.
+         */
+        @Test
+        @DisplayName("coverage measured over another population is refused")
+        void coverageMustBeMeasuredOverThisRunsPopulation() {
+            TransitionRun clean = cleanRun(new ExceptionQueue());
+            TransitionCoverage elsewhere = new TransitionCoverage(ASSERTED_AS_OF, 99L, 99L, 0L,
+                new TransitionCoverage.ObligationCoverage("ACPIR 21",
+                    "interest is recognised on the EIR", TransitionCoverage.ACPIR_21_DEADLINE,
+                    99L, 99L, 0L),
+                new TransitionCoverage.ObligationCoverage("ACPIR 50",
+                    "the ECL is discounted at the EIR", LegacyCohort.ACPIR_50_DEADLINE,
+                    99L, 99L, 0L),
+                0L, 0L, 0L, 0);
+
+            assertThatThrownBy(() -> new TransitionRun(RUN_ID, TRANSITION_DATE, boundary(),
+                clean.population(), clean.outcomes(), clean.isolated(), clean.valuationRun(),
+                clean.tracker(), clean.plan(), List.of(), elsewhere))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("measured over a different population");
+        }
+
+        @Test
+        @DisplayName("coverage stated as at another date is refused")
+        void coverageMustBeStatedAtTheExercisesOwnBoundary() {
+            TransitionRun clean = cleanRun(new ExceptionQueue());
+            TransitionCoverage otherDay = new TransitionCoverage(LocalDate.of(2030, 4, 1),
+                3L, 3L, 0L, clean.coverage().acpir21(), clean.coverage().acpir50(),
+                clean.coverage().underAcpir50Concession(), clean.coverage().eclAheadOfInterest(),
+                clean.coverage().plannedContractsRequiringMigration(),
+                clean.coverage().survivingCohortCount());
+
+            assertThatThrownBy(() -> new TransitionRun(RUN_ID, TRANSITION_DATE, boundary(),
+                clean.population(), clean.outcomes(), clean.isolated(), clean.valuationRun(),
+                clean.tracker(), clean.plan(), List.of(), otherDay))
+                .as("both deadlines are judged against the as-at date, so the same book is complete"
+                    + " on one date and in breach on the next; coverage from another date under this"
+                    + " exercise's identity is two days' answers presented as one")
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("stated as at");
         }
     }
 
