@@ -11,21 +11,52 @@
   </parent>
 
   <artifactId>eir-persistence-jdbc</artifactId>
-  <name>EIR :: persistence-jdbc</name>
+  <name>EIR :: persistence :: jdbc</name>
   <description>
-    JDBC implementations of eir-application's seven ports, over the verified DDL in eir-persistence.
+    Real persistence behind the seven ports of eir-application, over the verified PostgreSQL DDL in
+    eir-persistence, plus the Flyway wiring that brings a fresh database up.
 
-    Declared inside the root pom's `jdbc` profile rather than in its modules, so that
-    `mvn -o install` still builds the whole engine with no network. See ADR-0011 for the reasoning
-    and for the cost that arrangement carries.
+    This module exists because eir-api implements the same seven ports over a java.util.Map, and a
+    map answers the same thing at every as-at boundary (ADR-0011). Every read here carries BOTH
+    temporal predicates of 04 section 5 — business time from valid_from/valid_to and decision time
+    from recorded_at/superseded_at — so a read as at an earlier recordedAsAt returns the version set
+    that was recorded then, which is the first time invariant DT-1 has anything real to check.
 
-    The property this module exists to deliver: a read as at an earlier recorded_at returns the
-    version set that was recorded then. The in-memory book eir-api ships answers the same thing at
-    every boundary, so replay currently reproduces and is not a fair test of bitemporality. This is
-    what makes DT-1 mean something.
+    Declared inside the root pom's `jdbc` profile, not in the default module list: the driver
+    and Flyway are not in the local repository and every other module must keep building with `mvn -o install`
+    (ADR-0011). Build this one with `mvn -Pjdbc install`.
   </description>
 
+  <properties>
+    <!-- Pinned. A floating driver version is a silent behaviour change in a module whose whole
+         job is to read NUMERIC(24,6) without losing a digit. -->
+    <postgresql.version>42.7.4</postgresql.version>
+    <flyway.version>10.20.1</flyway.version>
+    <!--
+      Surefire group exclusion, as a property so the live-cluster suite can be switched on without
+      editing the pom.
+
+      The default build excludes @Tag("live-db") because those tests need a PostgreSQL 16 cluster
+      and a build that cannot reach one must fail nothing and skip nothing. Excluding by group means
+      surefire never counts them, as against @Disabled or an assumption, which would report skips
+      and make "0 skipped" unachievable.
+
+      To run them:
+        mvn -Pjdbc -pl eir-persistence-jdbc test \
+            -Deir.surefire.excludedGroups=none \
+            -Deir.jdbc.url=jdbc:postgresql://localhost:5443/postgres \
+            -Deir.jdbc.user=postgres
+    -->
+    <eir.surefire.excludedGroups>live-db</eir.surefire.excludedGroups>
+    <!-- Blank defaults so that an unset -Deir.jdbc.url reaches the tests as an empty string
+         rather than as the literal text of an unresolved property. -->
+    <eir.jdbc.url></eir.jdbc.url>
+    <eir.jdbc.user></eir.jdbc.user>
+    <eir.jdbc.password></eir.jdbc.password>
+  </properties>
+
   <dependencies>
+    <!-- The ports. Six of the seven live here; ContractPeriodSource is in run/. -->
     <dependency>
       <groupId>com.crisil.eir</groupId>
       <artifactId>eir-application</artifactId>
@@ -38,6 +69,11 @@
     </dependency>
     <dependency>
       <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-calc</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
       <artifactId>eir-policy</artifactId>
       <version>${project.version}</version>
     </dependency>
@@ -46,21 +82,38 @@
       <artifactId>eir-gl</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <!--
+      For the migrations, not for code. eir-persistence carries V1 and V2 under
+      src/main/resources/db/migration, so depending on it puts them on this module's classpath and
+      Flyway's `classpath:db/migration` scan finds them alongside this module's own V3. Without this
+      dependency the wiring would have to name a filesystem path, which works on a developer's
+      machine and not in a deployed jar.
+    -->
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-persistence</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
     <dependency>
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
-      <version>42.7.4</version>
+      <version>${postgresql.version}</version>
     </dependency>
     <dependency>
       <groupId>org.flywaydb</groupId>
       <artifactId>flyway-core</artifactId>
-      <version>10.20.1</version>
+      <version>${flyway.version}</version>
     </dependency>
+    <!-- Flyway 10 moved per-database support out of flyway-core. Without this artefact Flyway
+         resolves no database type for a postgresql: URL and fails at migrate() rather than at
+         wiring time, which is a confusing way to learn about a missing dependency. -->
     <dependency>
       <groupId>org.flywaydb</groupId>
       <artifactId>flyway-database-postgresql</artifactId>
-      <version>10.20.1</version>
+      <version>${flyway.version}</version>
     </dependency>
+
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
@@ -84,17 +137,42 @@
               FRAMEWORK EXEMPTION: ADR-0011 (JDBC persistence behind a profile), permitted by
               ADR-0010.
 
-              Flyway is a migration runner and the PostgreSQL driver is a wire protocol; neither is
-              on the calculation path and neither computes a figure. eir-domain and eir-calc can
-              never take this exemption. What this module must not do is let a framework near the
-              arithmetic: money is read with ResultSet.getBigDecimal and never getDouble, because
-              the DDL is NUMERIC(24,6) for money and NUMERIC(20,12) for rates precisely so that no
-              precision is lost on the way in or out.
+              ADR-0011 states it outright — "the module takes ADR-0010's framework exemption for
+              Flyway, with the authority named in its pom" — and this is that naming. ADR-0010
+              makes the ban fail closed and inherit into every module, and provides exactly this
+              override for a module that genuinely needs a framework.
+
+              What actually needs the exemption, concretely: flyway-core 10.x reads its own
+              configuration through Jackson (jackson-dataformat-toml, and transitively
+              com.fasterxml.jackson.core), which the root's bannedDependencies excludes by
+              `com.fasterxml.jackson.core:*` with searchTransitive true. So the ban fires on a
+              transitive dependency of a migration tool, not on anything this module writes.
+
+              Why that is acceptable here and nowhere inward of here: schema migration is not
+              arithmetic. Nothing in this module is on the calculation path — eir-domain and
+              eir-calc can never take this exemption, and FrameworkBanTest in eir-domain asserts
+              that they carry no override of it. What crosses the boundary out of this module is
+              Money, Rate, ContractTerms and the port record types, all of which are computed by
+              eir-domain and eir-calc from BigDecimal read out of the driver with getBigDecimal.
+              Flyway does not touch a figure.
             -->
             <id>ban-frameworks-in-calculation-path</id>
             <phase>none</phase>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <excludedGroups>${eir.surefire.excludedGroups}</excludedGroups>
+          <!-- The live-cluster suite reads these; harmless when the group is excluded. -->
+          <systemPropertyVariables>
+            <eir.jdbc.url>${eir.jdbc.url}</eir.jdbc.url>
+            <eir.jdbc.user>${eir.jdbc.user}</eir.jdbc.user>
+            <eir.jdbc.password>${eir.jdbc.password}</eir.jdbc.password>
+          </systemPropertyVariables>
+        </configuration>
       </plugin>
     </plugins>
   </build>
