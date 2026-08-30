@@ -189,6 +189,14 @@ public final class JdbcContractStateSource extends JdbcAdapter implements Contra
                 staging.eclEngineVersion(),
                 billed));
 
+        } catch (ContractDataCondition e) {
+            // A row that is present and cannot be interpreted — an unmapped projection strategy, an
+            // unrecognised day count, a stage outside 1..3. FR-905's isolation covers this as much as
+            // it covers an absent row, and the class javadoc's promise ("never throws for a data
+            // condition") would otherwise have been true only of absence. See ContractDataCondition
+            // for why it is a distinct type: a dropped connection must NOT come out as an empty
+            // Optional, or an outage reads as ten million quarantined contracts.
+            return Optional.empty();
         } catch (SQLException e) {
             throw new PersistenceFailure(
                 "could not read opening state for contract " + contractId + " as at "
@@ -295,7 +303,7 @@ public final class JdbcContractStateSource extends JdbcAdapter implements Contra
             case 1 -> Stage.STAGE_1;
             case 2 -> Stage.STAGE_2;
             case 3 -> Stage.STAGE_3;
-            default -> throw new PersistenceFailure(
+            default -> throw new ContractDataCondition(
                 "stage " + value + " is outside 1..3, which V2's ck_stage_assignment_stage refuses."
                     + " There is no defensible default: Stage 1 would recognise income on an"
                     + " impaired contract against invariant S3-2, and Stage 3 would suppress it on"

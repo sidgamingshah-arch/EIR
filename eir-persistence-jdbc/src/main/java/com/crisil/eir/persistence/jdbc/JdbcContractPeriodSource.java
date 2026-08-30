@@ -63,11 +63,12 @@ import javax.sql.DataSource;
  * a tautology". So it is computed here from {@code first_due_date} and the compounding frequency, and
  * never handed down by the caller.
  *
- * <p>It is clamped at 1 rather than allowed to go to zero. A boundary period earlier than the first
- * due date is <em>inside</em> the contract's first period — the period running from disbursement to
- * the first instalment — so its ordinal is 1. {@code ContractPeriod} refuses 0 with the right reason
- * ("zero is the disbursement boundary, not a period"), and clamping states the mapping instead of
- * discovering it as a rejection.
+ * <p>{@link PeriodId#elapsedPeriods} counts the contract's own due dates rather than subtracting
+ * months, which is what makes the ordinal right for a contract whose instalments do not fall on the
+ * 1st, and it floors at 0 — a boundary before the first due date is <em>inside</em> the contract's
+ * first period, the one running from disbursement to the first instalment, so the ordinal is 1.
+ * {@code ContractPeriod} refuses 0 with the right reason ("zero is the disbursement boundary, not a
+ * period").
  */
 public final class JdbcContractPeriodSource extends JdbcAdapter implements ContractPeriodSource {
 
@@ -118,16 +119,28 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
      * an event has no revised cash flow vector to carry. {@code PeriodEvent} would refuse it: "an
      * event that changes no future cash flow has nothing for the routing table to route".
      *
-     * <p>Lowest {@code sequence_within_date} on the earliest date wins, and V2 makes that ordering
-     * total: {@code uq_lifecycle_event_ordering} is unique on
+     * <p>Ordered by {@code event_date} then {@code sequence_within_date}, which V2 makes a total
+     * order: {@code uq_lifecycle_event_ordering} is unique on
      * {@code (contract_id, event_date, sequence_within_date)}, and its comment gives the reason —
      * "two events on one date must amortise in a fixed order or the run is not reproducible
      * (FR-903)".
+     *
+     * <p><b>Not {@code LIMIT 1}, deliberately.</b> {@code ContractPeriod} carries one
+     * {@code PeriodEvent}, and V2 permits a contract to carry two routed events inside one
+     * accounting period — a negotiated modification on the 15th and an ESG-linked reset on the 25th,
+     * both with {@code routed_mechanism <> 'NONE'}. Taking the first and discarding the rest would
+     * leave the second with no modification test and no re-solve, and nothing would report it: the
+     * same silent-drop failure {@link #readEvent} refuses for an event whose revised vector is
+     * empty. Worse, the revised vector handed to the first event is the boundary-resolved version's
+     * schedule, which already reflects the second amendment — so the first event would be routed
+     * against the second's cash flows. The rows are counted instead, and more than one is refused by
+     * name.
      */
     static final String SELECT_EVENT = """
         SELECT le.driver,
                le.event_date,
-               le.substantiality_conclusion
+               le.substantiality_conclusion,
+               le.sequence_within_date
           FROM lifecycle_event le
          WHERE le.contract_id = ?
            AND le.event_date >= ?
@@ -135,7 +148,6 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
            AND le.routed_mechanism <> 'NONE'
            AND %s
          ORDER BY le.event_date, le.sequence_within_date
-         LIMIT 1
         """.formatted(TemporalReads.systemTime("le"));
 
     /** Binds: contract id, {@code recordedAsAt}, {@code recordedAsAt}, {@code businessAsOf}. */
@@ -183,7 +195,7 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
             }
             Currency currency = terms.currency();
 
-            PeriodDates dates = readPeriodDates(connection, periodId);
+            PeriodDates dates = readPeriodDates(connection, periodId, boundary.businessAsOf());
             String scheduleId = FlowVectorReader.selectSchedule(connection,
                 terms.contractVersionId());
             if (scheduleId == null) {
@@ -247,18 +259,37 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
     /**
      * The period's own start and end dates, from the ledger's calendar.
      *
-     * <p>Read rather than computed from the {@code YYYYMM} encoding. A bank's accounting calendar is
-     * not required to be the Gregorian month — V2 constrains {@code period_start_date} to agree with
-     * the encoded year and month ({@code ck_accounting_period_id_matches_dates}) and leaves
-     * {@code period_end_date} to the calendar, so a 4-4-5 or 52/53-week period end is expressible.
-     * Deriving {@code endOf(periodId)} would place the accrual boundary on the last calendar day of
-     * the month regardless, moving one day of interest between two periods on every such contract.
+     * <p>Read rather than computed from the {@code YYYYMM} encoding. V2 constrains
+     * {@code period_start_date} to agree with the encoded year and month
+     * ({@code ck_accounting_period_id_matches_dates}) and leaves {@code period_end_date} free, so a
+     * period ending on the 2nd of the following month is representable. Deriving
+     * {@code PeriodId.endOf(periodId)} instead would place the accrual boundary on the last calendar
+     * day of the month regardless, moving a day of interest between two periods.
      *
-     * @throws PersistenceFailure where the ledger has no such period, which is a defect: every
+     * <h3>The Gregorian assumption, made explicit rather than left implied</h3>
+     *
+     * <p>Every adapter in this module derives its {@code period_id} as
+     * {@code PeriodId.of(boundary.businessAsOf())} — the calendar year and month of the business
+     * date. <b>That is load-bearing and it is an assumption</b>: under a 4-4-5 or 52/53-week calendar
+     * a period end falls in the following month, so a business date of 2 May 2027 closing period
+     * {@code 202704} would be read as {@code 202705}. The run would then read the wrong period's
+     * dates, the wrong flow window, the wrong prior period for the opening balance and suspense, and
+     * would write against the wrong partition — every figure internally consistent and every one for
+     * the wrong month.
+     *
+     * <p>So the assumption is checked here rather than documented away: the business date must fall
+     * inside the period the encoding named. That converts a whole run of misfiled figures into one
+     * named refusal on the first contract, and it is the cheapest possible place to catch it because
+     * this is the only adapter that reads the calendar at all.
+     *
+     * @throws PersistenceFailure where the ledger has no such period, which is a defect (every
      *     {@code period_balance} and {@code journal_entry} row has a foreign key to this table, so a
-     *     run over an unknown period could not write its output even if it computed it
+     *     run over an unknown period could not write its output even if it computed it), or where the
+     *     business date falls outside the period the {@code YYYYMM} encoding selected
      */
-    private PeriodDates readPeriodDates(Connection connection, int periodId) throws SQLException {
+    private PeriodDates readPeriodDates(Connection connection, int periodId, LocalDate businessAsOf)
+        throws SQLException {
+
         try (PreparedStatement statement = connection.prepareStatement(SELECT_PERIOD_DATES)) {
             new Params(statement).integer(periodId);
             try (ResultSet rs = statement.executeQuery()) {
@@ -270,8 +301,19 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
                             + " partitions the close sets read-only are created per period by"
                             + " ledger_create_period_partitions");
                 }
-                return new PeriodDates(
+                PeriodDates dates = new PeriodDates(
                     Rows.date(rs, "period_start_date"), Rows.date(rs, "period_end_date"));
+                if (businessAsOf.isBefore(dates.start()) || businessAsOf.isAfter(dates.end())) {
+                    throw new PersistenceFailure(
+                        "business date " + businessAsOf + " encodes period " + periodId + ", whose"
+                            + " ledger calendar runs " + dates.start() + " to " + dates.end()
+                            + " and does not contain it. Every adapter here derives the period id"
+                            + " from the calendar year and month of the business date, which assumes"
+                            + " the accounting period IS the Gregorian month; under a 4-4-5 or"
+                            + " 52/53-week calendar it is not, and the run would read one period's"
+                            + " movements while writing against another's partition");
+                }
+                return dates;
             }
         }
     }
@@ -369,6 +411,8 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
         LocalDate eventDate;
         RateDriver driver;
         String conclusionText;
+        int routedEvents = 0;
+        StringBuilder found = new StringBuilder();
         try (PreparedStatement statement = connection.prepareStatement(SELECT_EVENT)) {
             new Params(statement)
                 .contractId(contractId)
@@ -382,14 +426,41 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
                 driver = driver(Rows.text(rs, "driver"));
                 eventDate = Rows.date(rs, "event_date");
                 conclusionText = Rows.textOrNull(rs, "substantiality_conclusion");
+                routedEvents = 1;
+                found.append(eventDate).append('#')
+                    .append(Rows.integer(rs, "sequence_within_date")).append(' ').append(driver);
+                while (rs.next()) {
+                    routedEvents++;
+                    found.append(", ").append(Rows.date(rs, "event_date")).append('#')
+                        .append(Rows.integer(rs, "sequence_within_date")).append(' ')
+                        .append(Rows.text(rs, "driver"));
+                }
             }
         }
+        if (routedEvents > 1) {
+            // ContractPeriod carries one event and this adapter will not choose between two. See
+            // SELECT_EVENT: taking the earliest would route it against the LATER amendment's cash
+            // flows, because the revised vector below comes from the version the boundary resolved
+            // to — which already reflects both. Refused by name so the contract can be quarantined
+            // rather than published on a routing nobody chose.
+            throw new PersistenceFailure(
+                "contract " + contractId + " carries " + routedEvents + " routed lifecycle events"
+                    + " inside period " + dates.start() + ".." + dates.end() + " (" + found + ")."
+                    + " ContractPeriod carries one, and the revised vector available here is the"
+                    + " boundary-resolved schedule — which already reflects every one of them, so"
+                    + " routing the earliest against it would measure the first event using the"
+                    + " last one's cash flows. Two events in one period need the intra-period"
+                    + " ordering of 05 § 3.2 applied by the pipeline, which this seam cannot do");
+        }
 
-        // The remaining vector, not merely this period's: a re-solve after a modification discounts
-        // every remaining flow, so bounding it at the period end would solve the rate against one
-        // month of a twenty-year contract.
-        FlowVector revised = FlowVectorReader.read(connection, scheduleId, currency, eventDate,
-            terms.terms().maturityDate());
+        // Every remaining flow, not merely this period's, and with no upper bound at all: a re-solve
+        // after a modification discounts the whole remaining vector, so bounding it at the period end
+        // would solve the rate against one month of a twenty-year contract. The bound is left off
+        // rather than set to the maturity date, because ContractTerms.maturityDate() needs
+        // period-anniversary arithmetic that WEEKLY and FORTNIGHTLY schedules do not have — and a
+        // weekly-collection loan must not abort the run on its way past this line.
+        FlowVector revised = FlowVectorReader.readRemaining(
+            connection, scheduleId, currency, eventDate);
         if (revised.future().isEmpty()) {
             throw new PersistenceFailure(
                 "lifecycle event on " + eventDate + " for contract " + contractId + " is routed to"
@@ -449,16 +520,20 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
                 + " has a solved rate");
     }
 
-    /** 1-based ordinal of this period in the contract's own schedule. */
+    /**
+     * 1-based ordinal of this period in the contract's own schedule.
+     *
+     * <p>Periods closed by the business date, plus one. {@link PeriodId#elapsedPeriods} counts the
+     * contract's due dates rather than subtracting months, which is what makes the ordinal right for
+     * a contract whose instalments do not fall on the 1st — see its javadoc for what an off-by-one
+     * here does to invariant ST-2.
+     */
     private static int periodOrdinal(ContractTermsReader.Row terms, LocalDate businessAsOf) {
-        int monthsPerPeriod = CompoundingBasis.monthsInPeriod(terms.compoundingBasis());
-        long elapsed = PeriodId.periodsBetween(
-            terms.terms().firstDueDate(), businessAsOf, monthsPerPeriod);
-        long ordinal = elapsed + 1;
-        // Clamped, never zero or negative. See the class javadoc: a boundary before the first due
-        // date is inside period 1, and ContractPeriod refuses 0 because "zero is the disbursement
-        // boundary, not a period".
-        return (int) Math.max(1L, ordinal);
+        long elapsed = PeriodId.elapsedPeriods(
+            terms.terms().firstDueDate(),
+            businessAsOf,
+            CompoundingBasis.stepOf(terms.compoundingBasis()));
+        return (int) (elapsed + 1);
     }
 
     private static RateDriver driver(String value) {

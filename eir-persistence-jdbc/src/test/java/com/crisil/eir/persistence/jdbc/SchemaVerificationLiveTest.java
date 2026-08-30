@@ -43,6 +43,10 @@ class SchemaVerificationLiveTest {
     @BeforeAll
     static void migrate() {
         dataSource = LiveDatabase.dataSource();
+        // Seeded because the constraint exercises below need a product and a contract to point at.
+        // A foreign key firing before the CHECK a test names would make that test pass without
+        // having exercised the constraint at all.
+        Fixtures.seed(dataSource);
     }
 
     @Nested
@@ -276,7 +280,13 @@ class SchemaVerificationLiveTest {
             // ck_contract_version_schedule_anchor_first_due, mirroring ContractTerms' own refusal.
             // A first due date at t = 0 would put an instalment on the anchor, where FlowVector
             // treats it as part of the inception net amount rather than as a discounted flow.
-            assertThatThrownBy(() -> attempt("""
+            // The fixture anchors every version, so the existing row is removed first inside the
+            // same rolled-back transaction. Without that the primary key would fire before the
+            // CHECK and the test would pass without exercising the constraint it names.
+            assertThatThrownBy(() -> attempt(
+                "DELETE FROM contract_version_schedule_anchor WHERE contract_version_id = '"
+                    + Fixtures.FVTPL_VERSION_ID + "'",
+                """
                 INSERT INTO contract_version_schedule_anchor (contract_version_id,
                     disbursement_date, first_due_date, term_periods)
                 VALUES ('%s', DATE '2026-04-01', DATE '2026-04-01', 24)

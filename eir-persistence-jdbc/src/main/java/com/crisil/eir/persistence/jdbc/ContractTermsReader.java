@@ -50,6 +50,28 @@ final class ContractTermsReader {
      *
      * <p>Binds, in order: the contract id, then {@link Params#businessTime}, then
      * {@link Params#systemTime}.
+     *
+     * <h3>Why this query is ordered and limited, and why the order is that one</h3>
+     *
+     * <p><b>The two predicates do not guarantee one row.</b> V1's
+     * {@code contract_version_no_overlap_ck} is an exclusion constraint {@code WHERE (superseded_at
+     * IS NULL)} — it keeps the engine's <em>current</em> belief unambiguous and says nothing about
+     * superseded rows. Nothing in the schema forces one version's {@code superseded_at} to equal its
+     * successor's {@code recorded_at}, so a version superseded on 1 July and its replacement
+     * recorded on 1 June are both visible to a boundary of 15 June, both valid from the same
+     * business date. {@code JdbcContractSource.SELECT_POPULATION} already carries {@code DISTINCT}
+     * for exactly this reason.
+     *
+     * <p>Without an {@code ORDER BY} the three callers all do {@code rs.next() ? read(rs) : null},
+     * so the principal, the rate and the schedule would come from whichever row the planner returned
+     * first — "a figure that depends on which row the planner returned first", which is the failure
+     * {@link TemporalReads} is written to prevent and would have reintroduced one level down.
+     *
+     * <p><b>Latest belief wins</b>, which is the same rule {@code PolicyVersionRegistry.inForceOn}
+     * applies on its own axis: among the versions visible as at the boundary, the one the engine
+     * believed <em>most recently</em> by then is the one in force then. {@code version_no} and then
+     * {@code contract_version_id} break the remaining ties, so the order is total and the answer is
+     * reproducible across executions and across servers (FR-903).
      */
     static final String SELECT_BY_CONTRACT_ID = """
         SELECT c.contract_id,
@@ -93,6 +115,8 @@ final class ContractTermsReader {
          WHERE c.contract_id = ?
            AND %s
            AND %s
+         ORDER BY cv.recorded_at DESC, cv.version_no DESC, cv.contract_version_id DESC
+         LIMIT 1
         """.formatted(TemporalReads.businessTime("cv"), TemporalReads.systemTime("cv"));
 
     private ContractTermsReader() {
@@ -168,7 +192,7 @@ final class ContractTermsReader {
             ProjectionStrategies.shapeFor(Rows.text(rs, "projection_strategy"), stepFactor),
             rateType,
             currency,
-            moratoriumPeriods(rs, compoundingBasis, termPeriods),
+            moratoriumPeriods(rs, compoundingBasis, termPeriods, disbursementDate, firstDueDate),
             rs.getBoolean("capitalises_interest"),
             balloon,
             stepFactor,
@@ -204,20 +228,33 @@ final class ContractTermsReader {
      * two periods and not six. Six would exceed the term on a short facility and
      * {@code ContractTerms} would refuse the contract outright, which is a confusing way to learn
      * about a units mismatch.
+     *
+     * <p>Converted by <b>counting the contract's own periods across the moratorium window</b> rather
+     * than by dividing months by a months-per-period figure. That is the only conversion available
+     * for a weekly or fortnightly schedule, where there is no whole number of months in a period —
+     * and it is the more accurate one everywhere else, because it is anchored on real dates: the
+     * moratorium runs from the disbursement date, and how many due dates fall inside it is a fact
+     * about the calendar rather than a ratio.
      */
-    private static int moratoriumPeriods(ResultSet rs, String compoundingBasis, int termPeriods)
-        throws SQLException {
+    private static int moratoriumPeriods(ResultSet rs, String compoundingBasis, int termPeriods,
+        LocalDate disbursementDate, LocalDate firstDueDate) throws SQLException {
 
         Integer months = Rows.integerOrNull(rs, "moratorium_months");
         if (months == null) {
             return 0;
         }
-        int periods = months / CompoundingBasis.monthsInPeriod(compoundingBasis);
+        // Due dates strictly inside (disbursement, disbursement + months]. elapsedPeriods counts
+        // those strictly before its second argument, so the window end is taken one day later.
+        long counted = PeriodId.elapsedPeriods(
+            firstDueDate,
+            disbursementDate.plusMonths(months).plusDays(1),
+            CompoundingBasis.stepOf(compoundingBasis));
+        int periods = (int) counted;
         if (periods >= termPeriods) {
             // ContractTerms refuses moratoriumPeriods >= termPeriods, and would do so with a
             // message about a range rather than about the contract. Refused here so the message
             // names both figures and the unit they are in.
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "moratorium of " + months + " months is " + periods + " periods of a "
                     + termPeriods + "-period schedule; a moratorium covering the whole term leaves"
                     + " no period in which principal is repaid, so the projector has no schedule to"
@@ -230,7 +267,7 @@ final class ContractTermsReader {
         try {
             return DayCountConvention.valueOf(value.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "day count convention '" + value + "' is not one of the six V1's"
                     + " contract_version_day_count_ck admits. A day count cannot be defaulted: it"
                     + " decides the year fraction every actual-date discount exponent is built"
@@ -242,7 +279,7 @@ final class ContractTermsReader {
         try {
             return RateType.valueOf(value.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "rate type '" + value + "' is neither FIXED nor FLOATING. FR-507 routes an event on"
                     + " this column together with the event's driver tag and never on an observed"
                     + " rate movement, so an unrecognised value would route a renegotiated fixed"

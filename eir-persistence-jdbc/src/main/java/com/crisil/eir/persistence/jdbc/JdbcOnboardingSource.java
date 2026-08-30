@@ -135,6 +135,12 @@ public final class JdbcOnboardingSource extends JdbcAdapter implements Onboardin
                 attributes.features(),
                 attributes.exposure()));
 
+        } catch (ContractDataCondition e) {
+            // Same treatment as ContractStateSource.openingState, and for the same reason: an
+            // unreadable classification attribute is a data condition InitialRecognition quarantines
+            // under MISSING_MANDATORY_FIELD, not a reason to abandon the batch. A genuine
+            // PersistenceFailure still propagates.
+            return Optional.empty();
         } catch (SQLException e) {
             throw new PersistenceFailure(
                 "could not read the onboarding request for contract " + contractId + " as at "
@@ -232,7 +238,7 @@ public final class JdbcOnboardingSource extends JdbcAdapter implements Onboardin
             try {
                 features.add(TierAssignmentFeature.valueOf(name));
             } catch (IllegalArgumentException e) {
-                throw new PersistenceFailure(
+                throw new ContractDataCondition(
                     "tier feature '" + name + "' is not a TierAssignmentFeature. Dropping it would"
                         + " remove a rule the contract should have matched — losing"
                         + " CARD_OR_KCC_REVOLVER, for instance, routes a revolver to a tenor tier"
@@ -247,7 +253,7 @@ public final class JdbcOnboardingSource extends JdbcAdapter implements Onboardin
         try {
             return TierAssignmentSegment.valueOf(value.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "counterparty segment '" + value + "' is not a TierAssignmentSegment; V3's"
                     + " ck_contract_onboarding_attribute_segment admits the three the enum names."
                     + " The segment decides which tier a contract is measured under, and the tier"
@@ -259,7 +265,7 @@ public final class JdbcOnboardingSource extends JdbcAdapter implements Onboardin
         try {
             return InstrumentClass.valueOf(value.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "instrument class '" + value + "' is not an InstrumentClass; V1's"
                     + " contract_instrument_class_ck admits the four the enum names. FR-104 puts the"
                     + " SPPI test on the asset side only, so the class decides whether the gate runs"
@@ -271,7 +277,7 @@ public final class JdbcOnboardingSource extends JdbcAdapter implements Onboardin
         try {
             return MeasurementCategory.valueOf(value.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "measurement category '" + value + "' is not a MeasurementCategory; V1's"
                     + " contract_measurement_category_ck admits the three the enum names, and FR-103"
                     + " turns entirely on which of the three a contract is in");
@@ -292,7 +298,7 @@ public final class JdbcOnboardingSource extends JdbcAdapter implements Onboardin
             return null;
         }
         if (terms.sppiAssessedOn() == null || terms.sppiApprover() == null) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "contract " + terms.contractId() + " carries an SPPI outcome of "
                     + terms.sppiOutcome() + " with no assessment date or approver. V1's"
                     + " contract_sppi_complete_ck refuses that row: 'an outcome without a date and"
@@ -302,7 +308,7 @@ public final class JdbcOnboardingSource extends JdbcAdapter implements Onboardin
         try {
             outcome = SppiOutcome.valueOf(terms.sppiOutcome().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "SPPI outcome '" + terms.sppiOutcome() + "' is neither PASS nor FAIL; FR-104 sends"
                     + " a failure to FVTPL with no bifurcation, so an unreadable outcome cannot be"
                     + " treated as either");

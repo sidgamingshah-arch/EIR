@@ -51,8 +51,19 @@ final class Fixtures {
     static final String SCHEDULE_2_ID = "bbbbbbbb-0002-4000-8000-000000000002";
 
     static final String RULE_SET_ID = "FEE-RULES-2027.04.1";
-    static final String ROUTING_EFFECTIVE_ID = "ROUTING-2027.04.1";
-    static final String ROUTING_LATER_ID = "ROUTING-2027.05.1";
+    /**
+     * The routing table the April close resolved against; today it is SUPERSEDED.
+     *
+     * <p><b>A limitation worth naming.</b> {@code policy_version.status} has no temporal axis: the
+     * column holds today's status, not the status as at a boundary. As at 2 May this version was
+     * EFFECTIVE and as at 2 June it is SUPERSEDED, and only the second is representable. It does not
+     * change what resolves — {@code PolicyVersionStatus.isOperative()} covers EFFECTIVE and
+     * SUPERSEDED together, precisely so "a closed period still resolves against a superseded
+     * version (invariant DT-1)" — but a report of the status a run saw cannot be reconstructed.
+     */
+    static final String ROUTING_APRIL_ID = "ROUTING-2027.04.1";
+    /** Approved 1 June, so invisible to a boundary of 2 May. */
+    static final String ROUTING_MAY_ID = "ROUTING-2027.05.1";
 
     static final String RUN_ID = "cccccccc-0001-4000-8000-000000000001";
     static final String GCA_ACCOUNT = "1301-LOANS-GCA";
@@ -104,10 +115,20 @@ final class Fixtures {
         if (seeded) {
             return;
         }
-        try (Connection connection = dataSource.getConnection();
-             Statement s = connection.createStatement()) {
-            for (String sql : statements()) {
-                s.execute(sql);
+        try (Connection connection = dataSource.getConnection()) {
+            // One transaction for the whole seed. Under autocommit a statement failing half way
+            // through leaves the earlier inserts committed, and the next test class to call seed()
+            // then fails on a duplicate key instead of on the statement that was actually wrong —
+            // which is a slow way to find a typo.
+            connection.setAutoCommit(false);
+            try (Statement s = connection.createStatement()) {
+                for (String sql : statements()) {
+                    s.execute(sql);
+                }
+                connection.commit();
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
             }
             seeded = true;
         } catch (SQLException e) {
@@ -184,8 +205,7 @@ final class Fixtures {
             INSERT INTO period_balance (balance_id, contract_id, period_id, book_id, run_id,
                 product_id, opening_gca, closing_gca, opening_contractual, closing_contractual,
                 eir_interest, contractual_interest, cash_received, catch_up_amount, stage,
-                allowance, recognised_interest_income, suspense_movement,
-                basis_adjustment_amortised, rate_periodic_used)
+                allowance, recognised_interest_income, suspense_movement, rate_periodic_used)
             VALUES ('eeeeeeee-0001-4000-8000-000000000001', '%s', %d, '%s', '%s', '%s',
                 '570000.000000', '%s', '572000.000000', '%s',
                 '5504.070000', '5284.070000', '47073.470000', '0.000000', 1,
@@ -216,15 +236,23 @@ final class Fixtures {
                 DATE '2026-04-01', 'BORROWER', 'PROCESSING', 'INTEGRAL', '%s')
             """.formatted(CONTRACT_ID, RULE_SET_ID),
 
-            // ---- policy: one in force, one approved only after the original instant ------------
+            // ---- policy: one resolvable at both instants, one only at the later ---------------
             //
-            // The first carries effective_to = 1 May because V2's ex_policy_version_no_overlap
-            // refuses two open-ended versions of one kind — "the engine then recognises income
-            // under whichever the planner returned first".
-            policyVersion(ROUTING_EFFECTIVE_ID, "ROUTING_TABLE", "2027.04.1", "2027-04-01",
-                "2027-05-01", "EFFECTIVE", RECORDED_ORIGINAL),
-            policyVersion(ROUTING_LATER_ID, "ROUTING_TABLE", "2027.05.1", "2027-05-01", null,
-                "APPROVED", RECORDED_CORRECTION),
+            // The May version is inserted first because superseded_by is a self-referencing foreign
+            // key and the April version points forward at it. The April version carries
+            // effective_to = 1 May because V2's ex_policy_version_no_overlap refuses two
+            // open-ended versions of one kind — "the engine then recognises income under whichever
+            // the planner returned first".
+            //
+            // Both statuses are OPERATIVE in eir-policy's sense (isOperative covers EFFECTIVE and
+            // SUPERSEDED), which is what makes the April version still resolvable for a replay.
+            // APPROVED would not be: it is signed off and not yet in force, so a version left in
+            // that state would be invisible to inForceOn at BOTH boundaries and this fixture would
+            // be testing the status vocabulary rather than the decision-time bound.
+            policyVersion(ROUTING_MAY_ID, "ROUTING_TABLE", "2027.05.1", "2027-05-01", null,
+                "EFFECTIVE", RECORDED_CORRECTION, null),
+            policyVersion(ROUTING_APRIL_ID, "ROUTING_TABLE", "2027.04.1", "2027-04-01",
+                "2027-05-01", "SUPERSEDED", RECORDED_ORIGINAL, ROUTING_MAY_ID),
 
             // ---- two solves, chained through superseded_by ------------------------------------
             //
@@ -354,22 +382,23 @@ final class Fixtures {
                 'PERIODIC_INDEX', 'SATISFIED', '985000.000000', 'NEWTON', 4, '0.000001',
                 'SOLVED', 'FV-%s', '%s', '%s', %s)
             """.formatted(computationId, CONTRACT_ID, PRIOR_PERIOD_ID, timestamp(recordedAt),
-            periodicRate, computationId, ROUTING_EFFECTIVE_ID, RULE_SET_ID,
+            periodicRate, computationId, ROUTING_APRIL_ID, RULE_SET_ID,
             supersededBy == null ? "NULL" : "'" + supersededBy + "'");
     }
 
     private static String policyVersion(String id, String kind, String label, String effectiveFrom,
-        String effectiveTo, String status, Instant approvedAt) {
+        String effectiveTo, String status, Instant approvedAt, String supersededBy) {
 
         return """
             INSERT INTO policy_version (policy_version_id, policy_kind, version_label, description,
                 effective_from, effective_to, status, maker, checker, approved_at,
-                impact_preview_ref)
+                impact_preview_ref, superseded_by)
             VALUES ('%s', '%s', '%s', 'Driver-to-mechanism routing, %s', DATE '%s', %s, '%s',
-                'policy.maker', 'policy.checker', TIMESTAMPTZ '%s', 'IMPACT-%s')
+                'policy.maker', 'policy.checker', TIMESTAMPTZ '%s', 'IMPACT-%s', %s)
             """.formatted(id, kind, label, label, effectiveFrom,
             effectiveTo == null ? "NULL" : "DATE '" + effectiveTo + "'", status,
-            timestamp(approvedAt), label);
+            timestamp(approvedAt), label,
+            supersededBy == null ? "NULL" : "'" + supersededBy + "'");
     }
 
     private static String billed(String lineId, String amount, String feedRef, Instant recordedAt,

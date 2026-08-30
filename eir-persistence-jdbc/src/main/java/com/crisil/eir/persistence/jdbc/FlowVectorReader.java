@@ -83,6 +83,34 @@ final class FlowVectorReader {
          ORDER BY l.flow_date, l.sequence_no
         """;
 
+    /**
+     * Every flow after the anchor, with no upper bound. Binds: schedule id, lower period id,
+     * anchor date.
+     *
+     * <p>Used for the vector a re-solve discounts. There is no upper date, and no maturity date is
+     * consulted to invent one: {@code ContractTerms.maturityDate()} needs period-anniversary
+     * arithmetic, which {@code WEEKLY} and {@code FORTNIGHTLY} schedules do not have, and a bound
+     * derived from {@code contractual_maturity_date} would silently truncate the vector of any
+     * contract whose expected life runs past its contractual maturity — which is most of the
+     * behavioural book.
+     *
+     * <p>The {@code period_id} lower bound still prunes every partition before the anchor's period,
+     * which is the pruning that matters: the flows before the anchor are the ones already amortised
+     * and they are the bulk of a seasoned contract's schedule.
+     */
+    static final String SELECT_REMAINING_LINES = """
+        SELECT l.flow_date,
+               l.amount,
+               l.kind,
+               l.is_contingent,
+               l.sequence_no
+          FROM cashflow_line l
+         WHERE l.schedule_id = ?
+           AND l.period_id >= ?
+           AND l.flow_date > ?
+         ORDER BY l.flow_date, l.sequence_no
+        """;
+
     private FlowVectorReader() {
     }
 
@@ -121,19 +149,47 @@ final class FlowVectorReader {
             statement.setObject(5, upperInclusive, java.sql.Types.DATE);
 
             try (ResultSet rs = statement.executeQuery()) {
-                int index = 0;
-                while (rs.next()) {
-                    index++;
-                    LocalDate flowDate = Rows.date(rs, "flow_date");
-                    Money amount = Rows.money(rs, "amount", currency);
-                    FlowKind kind = flowKind(Rows.text(rs, "kind"));
-                    flows.add(rs.getBoolean("is_contingent")
-                        ? CashFlow.contingent(flowDate, index, amount, kind)
-                        : CashFlow.of(flowDate, index, amount, kind));
-                }
+                collect(rs, currency, flows);
             }
         }
         return FlowVector.of(anchor, currency, flows);
+    }
+
+    /**
+     * Every flow strictly after {@code anchor}, indexed from 1 in date order.
+     *
+     * <p>The vector a re-solve discounts. See {@link #SELECT_REMAINING_LINES} for why there is no
+     * upper bound and why no maturity date is consulted to supply one.
+     */
+    static FlowVector readRemaining(Connection connection, String scheduleId, Currency currency,
+        LocalDate anchor) throws SQLException {
+
+        List<CashFlow> flows = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(SELECT_REMAINING_LINES)) {
+            statement.setObject(1, java.util.UUID.fromString(scheduleId));
+            statement.setInt(2, PeriodId.of(anchor));
+            statement.setObject(3, anchor, java.sql.Types.DATE);
+
+            try (ResultSet rs = statement.executeQuery()) {
+                collect(rs, currency, flows);
+            }
+        }
+        return FlowVector.of(anchor, currency, flows);
+    }
+
+    private static void collect(ResultSet rs, Currency currency, List<CashFlow> flows)
+        throws SQLException {
+
+        int index = 0;
+        while (rs.next()) {
+            index++;
+            LocalDate flowDate = Rows.date(rs, "flow_date");
+            Money amount = Rows.money(rs, "amount", currency);
+            FlowKind kind = flowKind(Rows.text(rs, "kind"));
+            flows.add(rs.getBoolean("is_contingent")
+                ? CashFlow.contingent(flowDate, index, amount, kind)
+                : CashFlow.of(flowDate, index, amount, kind));
+        }
     }
 
     /**
@@ -159,7 +215,7 @@ final class FlowVectorReader {
         try {
             return FlowKind.valueOf(value.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "cash flow kind '" + value + "' is not a FlowKind. V1's cashflow_line_kind_ck admits"
                     + " ten values and mirrors the enum exactly; a value outside both means the row"
                     + " cannot be placed on a leg, and dropping it would remove cash from the"

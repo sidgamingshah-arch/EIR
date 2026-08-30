@@ -164,7 +164,7 @@ final class Rows {
         try {
             return Currency.getInstance(code);
         } catch (IllegalArgumentException e) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "currency code '" + code + "' in column " + column + " is not ISO 4217; the"
                     + " presentation scale of every figure on this contract is derived from it"
                     + " (04 § 2.1), so an unknown code cannot be defaulted");

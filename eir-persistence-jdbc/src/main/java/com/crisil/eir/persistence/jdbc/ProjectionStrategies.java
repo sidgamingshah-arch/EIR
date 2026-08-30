@@ -69,13 +69,13 @@ public final class ProjectionStrategies {
             case "TRANCHED" -> ScheduleShape.TRANCHED;
             case "EXTERNAL_SCHEDULE" -> ScheduleShape.STRUCTURED;
             case "STEP_SCHEDULE" -> ladder(stepFactor);
-            case "REPRICING_SHORTCUT" -> throw new PersistenceFailure(
+            case "REPRICING_SHORTCUT" -> throw new ContractDataCondition(
                 "product strategy REPRICING_SHORTCUT selects the B5.4.4 amortisation horizon"
                     + " (FR-508), not a repayment profile, and eir-calc has no projector for it."
                     + " Mapping it to ANNUITY_EMI would amortise fees to maturity on the products"
                     + " that elected not to, which V1 records as the failure that 'overstates"
                     + " year-1 income and reconciles against nothing'");
-            default -> throw new PersistenceFailure(
+            default -> throw new ContractDataCondition(
                 "projection strategy '" + projectionStrategy + "' is not one of the eleven values"
                     + " V1's product_projection_strategy_ck admits; V1 states the intent — 'the"
                     + " value list matches the projectors that exist, so an unroutable product"
@@ -85,7 +85,7 @@ public final class ProjectionStrategies {
 
     private static ScheduleShape ladder(BigDecimal stepFactor) {
         if (stepFactor == null) {
-            throw new PersistenceFailure(
+            throw new ContractDataCondition(
                 "a STEP_SCHEDULE product needs contract_version_schedule_anchor.step_factor to"
                     + " choose between ScheduleShape.STEP_UP and STEP_DOWN. There is no safe"
                     + " default: a step-down contract projected as a step-up has the wrong present"

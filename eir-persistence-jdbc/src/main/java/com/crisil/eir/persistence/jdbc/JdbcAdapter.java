@@ -45,13 +45,40 @@ abstract class JdbcAdapter {
         this.bookId = requireBook(bookId);
     }
 
+    /**
+     * A connection that cannot write, and that reads one consistent snapshot.
+     *
+     * <h2>{@code setReadOnly(true)} alone does nothing, which is why autocommit goes off first</h2>
+     *
+     * <p>The pinned driver's {@code PgConnection.setReadOnly} only sends anything to the server when
+     * its {@code readOnlyMode} property is {@code always}; the default is {@code transaction}, whose
+     * own description in the driver reads "setting readOnly to 'true' will cause transactions to
+     * BEGIN READ ONLY <b>if autocommit is 'false'</b>". Under the default autocommit the call is
+     * therefore a Java-side flag and the session stays read-write — so the guarantee this method
+     * exists to give would have been a comment rather than a control, and a write issued through one
+     * of these connections (a future adapter method, a {@code WITH ... INSERT} CTE, a
+     * {@code SELECT ... FOR UPDATE}) would have committed.
+     * {@code ReadOnlyConnectionLiveTest} exercises it against the live cluster, because a claim of
+     * this shape is not worth making untested.
+     *
+     * <p>Why it matters beyond tidiness: every one of the seven ports is a read, and a source that
+     * could write would let a run mutate the version set it is reading as at — the one thing a replay
+     * must be unable to do.
+     *
+     * <h2>The transaction is a second benefit, not a cost</h2>
+     *
+     * <p>{@code openingState} issues five queries. Under autocommit each sees its own snapshot, so a
+     * correction committing between the second and the third would hand one contract a mixture of two
+     * version sets: internally consistent, unreproducible, and invisible. One transaction across the
+     * five removes that. Nothing commits — the caller closes the connection and the read-only
+     * transaction is discarded.
+     */
     final Connection open() {
         try {
             Connection connection = dataSource.getConnection();
-            // Read-only, and not as an optimisation. Every one of the seven ports is a read; a
-            // source that could write would let a run mutate the version set it is reading as at,
-            // which is the one thing a replay must be unable to do. PostgreSQL enforces this at the
-            // transaction level, so an accidental INSERT fails here rather than in a review.
+            // Order matters: autocommit must be off BEFORE setReadOnly, so the flag reaches the
+            // server on the transaction the next statement begins.
+            connection.setAutoCommit(false);
             connection.setReadOnly(true);
             return connection;
         } catch (SQLException e) {

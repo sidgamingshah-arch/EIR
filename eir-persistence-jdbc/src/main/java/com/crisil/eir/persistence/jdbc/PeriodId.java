@@ -1,7 +1,9 @@
 package com.crisil.eir.persistence.jdbc;
 
 import java.time.LocalDate;
+import java.time.Period;
 import java.time.YearMonth;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 
 /**
@@ -24,6 +26,15 @@ import java.util.Objects;
  * with the cause twelve months away from where anyone would look.
  */
 public final class PeriodId {
+
+    /**
+     * How far {@link #elapsedPeriods} may walk past its closed-form estimate.
+     *
+     * <p>Four, because the estimate can only under-count and only by the day-of-month clamping
+     * described there — one step in practice. A larger allowance would hide a real error; a smaller
+     * one would refuse a correct schedule.
+     */
+    private static final int MAX_WALK = 4;
 
     private PeriodId() {
     }
@@ -55,24 +66,73 @@ public final class PeriodId {
     }
 
     /**
-     * How many whole periods separate two dates at a given compounding frequency.
+     * How many of the contract's due dates fall strictly before {@code businessAsOf}.
      *
-     * <p>Used to place a business date in the contract's own schedule. Truncating division, so a
-     * part period counts as not yet elapsed — which is right for an ordinal: the period that
-     * <em>contains</em> a date is the one whose boundary the date has not yet reached.
+     * <p>The count is the number of periods that have <em>closed</em> by the business date, so the
+     * ordinal of the period the date sits in is this plus one. Due date <i>n</i> is
+     * {@code firstDueDate + (n − 1) × step}, and the date {@code d} sits in period <i>n</i> where
+     * {@code dueDate(n − 1) < d <= dueDate(n)}.
      *
-     * @param monthsPerPeriod calendar months in one compounding period, from
-     *                        {@link CompoundingBasis#monthsInPeriod}
+     * <p><b>Day-of-month is respected, and that is the whole reason this is not a month subtraction.</b>
+     * An earlier version truncated both dates to {@link YearMonth} and divided. That counts a
+     * one-day step across a month boundary as a whole month — 30 April to 1 May came out as one — and
+     * it counts a due date already passed within the month as not passed. Concretely: a monthly
+     * contract with instalments on the 20th, read at a period end of the 30th, came out one period
+     * short. {@code ContractPipeline} then derives the accrual length from
+     * {@code ContractTerms.dueDate(n−1) → dueDate(n)} while the roll-forward derives it from the
+     * supplied vector's dates, and those two independent derivations are what makes invariant ST-2 a
+     * control rather than a tautology — so an ordinal off by one makes them disagree for every
+     * contract whose due day is not the 1st, on every period, for ever.
+     *
+     * <p>A date at or before the first due date gives 0 — it sits inside the contract's first period,
+     * the one running from disbursement to the first instalment — so the ordinal derived from it is 1
+     * and never 0. {@code ContractPeriod} refuses 0 with the right reason ("zero is the disbursement
+     * boundary, not a period"), and returning it here would only move the refusal.
+     *
+     * @param firstDueDate  the contract's first scheduled repayment
+     * @param businessAsOf  the date to place in the schedule
+     * @param step          one period's calendar step, from {@link CompoundingBasis#stepOf}
      */
-    public static long periodsBetween(LocalDate from, LocalDate to, int monthsPerPeriod) {
-        Objects.requireNonNull(from, "from");
-        Objects.requireNonNull(to, "to");
-        if (monthsPerPeriod < 1) {
+    public static long elapsedPeriods(LocalDate firstDueDate, LocalDate businessAsOf, Period step) {
+        Objects.requireNonNull(firstDueDate, "firstDueDate");
+        Objects.requireNonNull(businessAsOf, "businessAsOf");
+        Objects.requireNonNull(step, "step");
+
+        long perPeriod = step.toTotalMonths() > 0 ? step.toTotalMonths() : step.getDays();
+        if (perPeriod < 1) {
             throw new IllegalArgumentException(
-                "monthsPerPeriod must be >= 1, got " + monthsPerPeriod);
+                "a period step must be at least one month or one day, got " + step);
         }
-        long months = YearMonth.from(from).until(YearMonth.from(to), java.time.temporal.ChronoUnit.MONTHS);
-        return months / monthsPerPeriod;
+        long between = step.toTotalMonths() > 0
+            ? ChronoUnit.MONTHS.between(firstDueDate, businessAsOf)
+            : ChronoUnit.DAYS.between(firstDueDate, businessAsOf);
+
+        // The closed form, then a forward walk to the first due date not before the business date.
+        //
+        // The walk is needed and it is short. It can only ever go forward, because month arithmetic
+        // clamps a day-of-month the target month does not have — 31 January plus one month is
+        // 28 February, and ChronoUnit.MONTHS.between then reports the gap as under a month — so the
+        // closed form can under-count and never over-counts. In practice it corrects by at most one.
+        long count = Math.max(0L, Math.floorDiv(between, perPeriod));
+        long walked = 0;
+        while (dueDate(firstDueDate, step, count).isBefore(businessAsOf)) {
+            count++;
+            if (++walked > MAX_WALK) {
+                // Unreachable by the argument above. Present so that a future addition to the step
+                // vocabulary turns a wrong answer into a named failure rather than a hung close.
+                throw new IllegalStateException(
+                    "could not place " + businessAsOf + " in a schedule from " + firstDueDate
+                        + " stepping " + step + " after " + MAX_WALK + " steps");
+            }
+        }
+        return count;
+    }
+
+    /** Due date {@code n + 1} of a schedule: {@code firstDueDate + n × step}. */
+    private static LocalDate dueDate(LocalDate firstDueDate, Period step, long stepsElapsed) {
+        return step.toTotalMonths() > 0
+            ? firstDueDate.plusMonths(step.toTotalMonths() * stepsElapsed)
+            : firstDueDate.plusDays((long) step.getDays() * stepsElapsed);
     }
 
     private static YearMonth yearMonth(int periodId) {

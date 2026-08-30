@@ -25,7 +25,7 @@ import java.sql.SQLException;
  * a persistence detail. Wrapping is the only way to honour those signatures, and the SQLException is
  * kept as the cause so that the SQLSTATE survives to the log.
  */
-public final class PersistenceFailure extends RuntimeException {
+public class PersistenceFailure extends RuntimeException {
 
     private static final long serialVersionUID = 1L;
 
