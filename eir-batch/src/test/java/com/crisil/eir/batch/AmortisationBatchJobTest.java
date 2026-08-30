@@ -7,6 +7,7 @@ import com.crisil.eir.application.ContractResult;
 import com.crisil.eir.application.RunRequest;
 import com.crisil.eir.application.replay.ShadowRun;
 import com.crisil.eir.domain.Money;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -140,7 +141,12 @@ class AmortisationBatchJobTest {
                 .as("the malformed contract is a result, not an absence")
                 .isZero();
             assertThat(completed.aggregate().quarantinedContracts()).containsExactly(malformed);
-            assertThat(harness.queue().quarantinedContracts()).contains(malformed);
+            // The run's queue holds exactly one record for it — filed once, by the aggregate step.
+            assertThat(harness.queues().forRun(RUN_ID).quarantinedContracts())
+                .containsExactly(malformed);
+            assertThat(harness.queues().forRun(RUN_ID).size())
+                .as("one record per quarantined contract per run")
+                .isEqualTo(1);
             // FR-905: "one malformed contract must not fail a ten-million-contract run". The run
             // completed — the assertion is that this line was reached without an exception — and it
             // is the CLOSE that refuses, because the exception is unresolved (04 § 3).
@@ -306,7 +312,85 @@ class AmortisationBatchJobTest {
             assertThat(thrown.getSuppressed())
                 .as("the verify-plan step's own refusal travels out with the failed job")
                 .anySatisfy(cause -> assertThat(cause)
-                    .hasMessageContaining("the population moved between the two executions"));
+                    .hasMessageContaining(
+                        "the population or the knowledge boundary moved between the two"
+                            + " executions"));
+        }
+
+        @Test
+        @DisplayName("a restart over a population that SWAPPED a contract for another in the same"
+            + " grain is refused, though every count is unchanged")
+        void aSwapThatPreservesEveryCountIsRefused() {
+            // The ordinary overnight churn, and the reason the plan fingerprint carries a checksum
+            // of each partition's membership rather than only its name and size. One retail Mumbai
+            // contract closes and one is onboarded, in the SAME grain: population size 25 -> 25,
+            // grains 3 -> 3, partition names unchanged, shard sizes 10/2/5/8 unchanged.
+            //
+            // With names and sizes only, the two plans stamp identically and the restart skips the
+            // completed shard that used to hold the departed contract — so the newly onboarded one
+            // is computed by nobody, the departed one's stale result stands in for it, and the
+            // population NETS: one missing, one extraneous, difference nil.
+            BatchFixtures.Harness harness = BatchFixtures.harness();
+            List<String> population = BatchFixtures.standardPopulation();
+            String departed = BatchFixtures.contractId(BatchFixtures.RETAIL, BatchFixtures.MUM, 12);
+            String onboarded = BatchFixtures.contractId(BatchFixtures.RETAIL, BatchFixtures.MUM, 99);
+            assertThat(population).contains(departed).doesNotContain(onboarded);
+
+            harness.pipelines().killIn(KILLED_PARTITION, KILL_AFTER);
+            assertThatThrownBy(() -> harness.runner().run(
+                BatchFixtures.request(RUN_ID, population, Set.of())))
+                .isInstanceOf(IllegalStateException.class);
+            harness.pipelines().disarm();
+
+            List<String> swapped = new ArrayList<>(population);
+            swapped.set(swapped.indexOf(departed), onboarded);
+            assertThat(swapped)
+                .as("every count a name-and-size fingerprint can see is identical")
+                .hasSameSizeAs(population);
+
+            Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(
+                () -> harness.runner().run(
+                    BatchFixtures.request(RUN_ID, swapped, Set.of())));
+
+            assertThat(thrown).isInstanceOf(IllegalStateException.class);
+            assertThat(thrown.getSuppressed())
+                .as("the membership checksum is what notices")
+                .anySatisfy(cause -> assertThat(cause).hasMessageContaining(
+                    "the population or the knowledge boundary moved between the two executions"));
+            assertThat(harness.pipelines().attemptsFor(onboarded))
+                .as("and the onboarded contract was never quietly left uncomputed")
+                .isZero();
+        }
+
+        @Test
+        @DisplayName("a restart at a moved knowledge boundary is refused")
+        void aRestartAtAMovedBoundaryIsRefused() {
+            // A partitioned run spread across two knowledge cuts. ADR-0007 rejected streaming
+            // because it "would impose eventual consistency on a close that requires a consistent
+            // cut", and a resume at a moved recordedAsAt is that eventual consistency arriving
+            // through the restart path: the partitions that completed read the world as at 1 June
+            // and the ones the restart runs read it as at 9 June, and the run reported a clean
+            // close over the pair.
+            BatchFixtures.Harness harness = BatchFixtures.harness();
+            List<String> population = BatchFixtures.standardPopulation();
+
+            harness.pipelines().killIn(KILLED_PARTITION, KILL_AFTER);
+            assertThatThrownBy(() -> harness.runner().run(
+                BatchFixtures.request(RUN_ID, population, Set.of())))
+                .isInstanceOf(IllegalStateException.class);
+            harness.pipelines().disarm();
+
+            RunRequest laterCut = BatchFixtures.requestAsAt(
+                RUN_ID, population, Set.of(), Instant.parse("2028-06-09T00:00:00Z"));
+
+            Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(
+                () -> harness.runner().run(laterCut));
+
+            assertThat(thrown).isInstanceOf(IllegalStateException.class);
+            assertThat(thrown.getSuppressed())
+                .anySatisfy(cause -> assertThat(cause)
+                    .hasMessageContaining("knowledge boundary moved")
+                    .hasMessageContaining("2028-06-09T00:00:00Z"));
         }
 
         @Test
@@ -374,6 +458,89 @@ class AmortisationBatchJobTest {
                         assertThat(reason).contains("neither figures nor an exception record"));
                 });
         }
+
+        @Test
+        @DisplayName("a missing contract and a stranger do not cancel: the gate compares identities")
+        void aMissingContractAndAStrangerDoNotCancel() {
+            // The gate used to be `unaccountedFor() != 0`, which is
+            // `populationSize - results.size()` — and RunAggregate.of APPENDS a stranger to results.
+            // So one contract with no result plus one result naming a contract outside the
+            // population cancels to exactly nil, and the run completed reporting
+            // "population 25, computed 25, unaccounted 0" over a book missing a contract.
+            //
+            // Constructed here at the store rather than through a population change, so that the
+            // gate is tested even when the plan fingerprint would have caught the cause upstream.
+            String swappedOut = BatchFixtures.contractId(BatchFixtures.CORP, BatchFixtures.MUM, 3);
+            BatchFixtures.Harness harness = BatchFixtures.harness(
+                new SyncTaskExecutor(), BatchFixtures.SHARD_SIZE,
+                new RelabellingStore(new InMemoryRunProgressStore(), swappedOut, "LN-NOT-IN-SCOPE"));
+            RunRequest request = BatchFixtures.request(
+                "RUN-202805-SWAP", BatchFixtures.standardPopulation(), Set.of());
+
+            Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(
+                () -> harness.runner().run(request));
+
+            assertThat(thrown).isInstanceOf(IllegalStateException.class);
+            assertThat(thrown.getSuppressed())
+                .anySatisfy(cause -> assertThat(cause)
+                    .hasMessageContaining("does not account for its population")
+                    .hasMessageContaining("Compared by identity and not by total"));
+
+            // The netting is real: the two totals agree while the identities do not.
+            assertThat(harness.store().completion("RUN-202805-SWAP"))
+                .isPresent()
+                .get()
+                .satisfies(completed -> assertThat(completed.aggregate().unaccountedFor())
+                    .as("one missing, one extraneous — the difference of the totals is nil")
+                    .isZero());
+        }
+    }
+
+    /** A store that relabels one contract's result, so the population nets without tying. */
+    private record RelabellingStore(
+        RunProgressStore delegate, String from, String to) implements RunProgressStore {
+
+        @Override
+        public void recordSlice(String runId, SliceOutcome outcome) {
+            List<ContractResult> relabelled = outcome.results().stream()
+                .map(result -> result.contractId().equals(from)
+                    ? ContractResult.computed(
+                        to, result.closingGca(), result.journal(), result.invariants())
+                    : result)
+                .toList();
+            delegate.recordSlice(runId, new SliceOutcome(
+                outcome.key(), relabelled, outcome.policyVersionIds()));
+        }
+
+        @Override
+        public List<ContractResult> results(String runId) {
+            return delegate.results(runId);
+        }
+
+        @Override
+        public Set<String> contractsAccountedFor(String runId) {
+            return delegate.contractsAccountedFor(runId);
+        }
+
+        @Override
+        public List<PartitionKey> recordedSlices(String runId) {
+            return delegate.recordedSlices(runId);
+        }
+
+        @Override
+        public List<List<String>> policyStampsByPartition(String runId) {
+            return delegate.policyStampsByPartition(runId);
+        }
+
+        @Override
+        public void recordCompletion(String runId, CompletedRun completion) {
+            delegate.recordCompletion(runId, completion);
+        }
+
+        @Override
+        public java.util.Optional<CompletedRun> completion(String runId) {
+            return delegate.completion(runId);
+        }
     }
 
     /** A store that accepts one named partition's commit and keeps nothing of it. */
@@ -416,6 +583,75 @@ class AmortisationBatchJobTest {
         @Override
         public java.util.Optional<CompletedRun> completion(String runId) {
             return delegate.completion(runId);
+        }
+    }
+
+    @Nested
+    @DisplayName("Exception queue discipline (04 s 2.13, 04 s 3)")
+    class ExceptionQueueDiscipline {
+
+        @Test
+        @DisplayName("a restart files one record per quarantined contract, not one per attempt")
+        void aRestartFilesOneRecordPerQuarantinedContract() {
+            // RunProgressStore.recordSlice was made a per-contract PUT so that a re-run partition's
+            // RESULTS are idempotent across a resume. The ExceptionQueue had no such semantics, and
+            // the partitions used to file into the run's queue directly - so a partition killed
+            // after it had quarantined a contract, then re-run, filed twice.
+            //
+            // The two records are not equals (their captured causes are different throwables), so
+            // ExceptionQueue.resolve matches only one and the close stays blocked on a duplicate
+            // nobody was told existed; the run record's exceptions_raised double-counts too.
+            BatchFixtures.Harness harness = BatchFixtures.harness();
+            List<String> population = BatchFixtures.standardPopulation();
+            // Quarantine the FIRST contract of the partition that gets killed, so the kill lands
+            // after the record has been filed and the resume re-quarantines it.
+            String malformed = BatchFixtures.contractId(BatchFixtures.RETAIL, BatchFixtures.DEL, 1);
+            RunRequest request = BatchFixtures.request(
+                "RUN-202805-REQ", population, Set.of(malformed));
+
+            harness.pipelines().killIn(
+                BatchFixtures.partition(BatchFixtures.RETAIL, BatchFixtures.DEL, 0), 2);
+            assertThatThrownBy(() -> harness.runner().run(request))
+                .isInstanceOf(IllegalStateException.class);
+            harness.pipelines().disarm();
+            CompletedRun resumed = harness.runner().run(request);
+
+            assertThat(resumed.aggregate().quarantinedCount()).isEqualTo(1);
+            assertThat(resumed.aggregate().unaccountedFor()).isZero();
+            assertThat(resumed.aggregate().computedCount()).isEqualTo(24);
+
+            var queue = harness.queues().forRun("RUN-202805-REQ");
+            assertThat(queue.size())
+                .as("one record per quarantined contract per run, across a kill and a resume")
+                .isEqualTo(1);
+            assertThat(queue.closeBlockers())
+                .as("so the operator is asked to work one exception, not two")
+                .hasSize(1);
+            assertThat(queue.forContract(malformed)).hasSize(1);
+        }
+
+        @Test
+        @DisplayName("one run's queue does not hold another run's records")
+        void eachRunHasItsOwnQueue() {
+            // A single ExceptionQueue on the job accumulated every close's records, and
+            // ExceptionQueue's reporting surface has no run-id filter - so period N's close gate
+            // refused on period N-1's unresolved blockers, and exceptions_raised was cumulative.
+            BatchFixtures.Harness harness = BatchFixtures.harness();
+            List<String> population = BatchFixtures.standardPopulation();
+            String malformed = BatchFixtures.contractId(BatchFixtures.CORP, BatchFixtures.MUM, 3);
+
+            harness.runner().run(
+                BatchFixtures.request("RUN-202805-FIRST", population, Set.of(malformed)));
+            harness.runner().run(
+                BatchFixtures.request("RUN-202806-SECOND", population, Set.of()));
+
+            assertThat(harness.queues().forRun("RUN-202805-FIRST").size())
+                .as("the first close's one exception")
+                .isEqualTo(1);
+            assertThat(harness.queues().forRun("RUN-202806-SECOND").isEmpty())
+                .as("and the second close, which had none, is not blocked by it")
+                .isTrue();
+            assertThat(harness.queues().forRun("RUN-202806-SECOND").blocksClose()).isFalse();
         }
     }
 

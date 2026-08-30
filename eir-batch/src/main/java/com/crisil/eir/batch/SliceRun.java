@@ -53,8 +53,10 @@ import java.util.Objects;
  * All five are read-only queries against an as-at boundary, so a correct implementation is naturally
  * safe; an implementation that caches into a plain {@code HashMap} on first read is not, and that is
  * a requirement on the adapter rather than something this class can defend against.
- * {@code ExceptionQueue} is safe — its own javadoc names ADR-0007 and "several partitions raise into
- * one queue at once" as the reason every method is synchronized.
+ * {@code ExceptionQueue} is safe for concurrent use — its own javadoc names ADR-0007 and "several
+ * partitions raise into one queue at once" as the reason every method is synchronized — but each
+ * partition is nonetheless given a queue of its own here, for a reason that is about restarts rather
+ * than about threads. See the {@code queue} parameter.
  */
 public final class SliceRun {
 
@@ -68,7 +70,16 @@ public final class SliceRun {
      * @param slice      the partition's contracts
      * @param pipelines  where this partition's pipeline comes from; see
      *                   {@link ContractPipelineFactory} for why it is per-partition
-     * @param queue      the run's exception queue, shared across partitions
+     * @param queue      a queue for <b>this attempt</b>, not the run's. {@code MonthEndRun} needs one
+     *                   to file into and to recover a quarantined contract's record from, and both
+     *                   uses are complete by the time this method returns — the record travels out on
+     *                   the {@code ContractResult}. It must not be the run's queue: a restart re-runs
+     *                   the partition that did not finish, the barrier files again, and
+     *                   {@code ExceptionQueue} de-duplicates nothing, so the run's queue would end up
+     *                   holding two non-{@code equals} records for one quarantined contract —
+     *                   {@code resolve} then matches one of them and the close stays blocked on a
+     *                   duplicate nobody was told existed. {@code AmortisationBatchJob.fileExceptions}
+     *                   files the run's queue once, from the surviving results
      * @return the partition's committed outcome: one {@code ContractResult} per contract in
      *         {@code slice}, in slice order, and the policy reading this partition worked under
      * @throws IllegalStateException where the slice's own run did not account for the slice — see

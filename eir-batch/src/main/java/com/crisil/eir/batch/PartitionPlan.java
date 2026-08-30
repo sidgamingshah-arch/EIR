@@ -243,14 +243,37 @@ public final class PartitionPlan {
      * internally consistent.
      *
      * <p>So the plan's identity is stamped into the job's execution context on the first execution
-     * and compared on every subsequent one ({@link AmortisationBatchJob}). The stamp is the
-     * population size, the shard size, and the partition names in order — not a hash of the contract
-     * ids, because the point of the check is to be able to say <em>what</em> moved in the failure
-     * message, and "48 partitions became 52" is actionable where a differing hex digest is not.
+     * and compared on every subsequent one ({@link AmortisationBatchJob}).
      *
-     * <p>The size is in the stamp as well as the names because two populations can produce the same
-     * partition names and different contents: one contract added to a grain that already has
-     * several shards' worth changes a shard's contents and no shard's name.
+     * <h4>What is in the stamp, and why each part had to be</h4>
+     *
+     * <p>The population size, the shard size, and per partition its name, its size <em>and a
+     * checksum of its membership</em>. The first three are the readable part: "48 partitions became
+     * 52" is a sentence an operator can act on, which a bare digest of the whole population is not.
+     * The per-partition checksum is there because the readable part alone is <b>blind to a swap</b>,
+     * and a swap is the ordinary overnight case rather than an exotic one:
+     *
+     * <pre>
+     *   run dies 02:00 --- one contract closes, one is onboarded, in the SAME grain ---&gt; restart
+     * </pre>
+     *
+     * <p>Every count survives that: same population size, same grains, same shard names, same shard
+     * sizes. With names and sizes only, the two plans stamp identically, {@code verify-plan} passes,
+     * and the restart skips the completed shard that <em>used to</em> contain the departed contract —
+     * so the newly onboarded one is never computed by anybody, while the departed one's stale result
+     * stands in for it. The population then nets: one contract missing, one result extraneous, and
+     * any check on the difference of the two totals comes out at nil. That is the
+     * "processed 9,999,998" shortfall in its most invisible form, and it is why the membership is in
+     * here and why {@link AmortisationBatchJob} gates on identities rather than on a net.
+     *
+     * <p>A CRC32 of the ids rather than a cryptographic digest: this is a corruption check between
+     * two executions of one run, not a defence against a forged plan, and the failure message keeps
+     * the partition name so the digest never has to be the actionable part.
+     *
+     * <p><b>The boundary is deliberately not here.</b> A plan is a statement about how the work is
+     * divided, and the knowledge cut a run reads at is a property of the run —
+     * {@link AmortisationBatchJob#runFingerprint} composes the two, so that a restart at a moved
+     * {@code recordedAsAt} is refused without this class acquiring an opinion about system time.
      */
     public String fingerprint() {
         StringBuilder stamp = new StringBuilder()
@@ -258,9 +281,31 @@ public final class PartitionPlan {
             .append(";maxShardSize=").append(maxShardSize)
             .append(";partitions=").append(slices.size());
         for (PopulationSlice slice : slices) {
-            stamp.append(';').append(slice.key().name()).append('=').append(slice.size());
+            stamp.append(';').append(slice.key().name())
+                .append('=').append(slice.size())
+                .append('@').append(membershipChecksum(slice));
         }
         return stamp.toString();
+    }
+
+    /**
+     * A checksum of one partition's membership, in order.
+     *
+     * <p>Order-sensitive on purpose. The slice's contract order is the order
+     * {@code FailureIsolation.runBatch} computes in and therefore the order the results come back in,
+     * so two plans that assign one partition the same contracts in a different order are not the
+     * same plan for FR-903's purposes.
+     *
+     * <p>The separator is fed into the checksum along with the ids, so that {@code ["AB", "C"]} and
+     * {@code ["A", "BC"]} cannot collide.
+     */
+    private static String membershipChecksum(PopulationSlice slice) {
+        java.util.zip.CRC32 checksum = new java.util.zip.CRC32();
+        for (String contractId : slice.contractIds()) {
+            checksum.update(contractId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            checksum.update('\n');
+        }
+        return Long.toHexString(checksum.getValue());
     }
 
     /** A one-line description for a run report. */

@@ -1,9 +1,12 @@
 package com.crisil.eir.batch;
 
+import com.crisil.eir.application.ContractResult;
 import com.crisil.eir.application.RunRequest;
+import com.crisil.eir.application.replay.PopulationAccount;
 import com.crisil.eir.application.run.RunAggregate;
 import com.crisil.eir.policy.PolicyKind;
 import com.crisil.eir.policy.exception.ExceptionQueue;
+import com.crisil.eir.policy.exception.ExceptionRecord;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -120,7 +123,7 @@ public final class AmortisationBatchJob {
     private final PartitionGrainSource grains;
     private final ContractPipelineFactory pipelines;
     private final RunProgressStore store;
-    private final ExceptionQueue queue;
+    private final RunExceptionQueues queues;
     private final int maxShardSize;
 
     /**
@@ -137,7 +140,9 @@ public final class AmortisationBatchJob {
      * @param grains             the {@code product × entity} grain per contract
      * @param pipelines          one pipeline per partition — see {@link ContractPipelineFactory}
      * @param store              where a partition commits, and where the restart reads back from
-     * @param queue              the run's exception queue; shared across partitions and safe for it
+     * @param queues             where each run's exception queue comes from — one per run, see
+     *                           {@link RunExceptionQueues} for why a single shared queue blocks the
+     *                           next period's close on this one's records
      * @param maxShardSize       the skew control and the restart granularity
      */
     public AmortisationBatchJob(
@@ -147,7 +152,7 @@ public final class AmortisationBatchJob {
         PartitionGrainSource grains,
         ContractPipelineFactory pipelines,
         RunProgressStore store,
-        ExceptionQueue queue,
+        RunExceptionQueues queues,
         int maxShardSize) {
         this.jobRepository = Objects.requireNonNull(jobRepository, "jobRepository");
         this.transactionManager = Objects.requireNonNull(transactionManager, "transactionManager");
@@ -156,7 +161,7 @@ public final class AmortisationBatchJob {
         this.grains = Objects.requireNonNull(grains, "grains");
         this.pipelines = Objects.requireNonNull(pipelines, "pipelines");
         this.store = Objects.requireNonNull(store, "store");
-        this.queue = Objects.requireNonNull(queue, "queue");
+        this.queues = Objects.requireNonNull(queues, "queues");
         if (maxShardSize < 1) {
             throw new IllegalArgumentException(
                 "maxShardSize must be at least 1, got " + maxShardSize);
@@ -192,7 +197,7 @@ public final class AmortisationBatchJob {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(plan, "plan");
         return new JobBuilder(JOB_NAME, jobRepository)
-            .start(verifyPlanStep(plan))
+            .start(verifyPlanStep(request, plan))
             .next(partitionedStep(request, plan))
             .next(aggregateStep(request, plan))
             .build();
@@ -226,6 +231,37 @@ public final class AmortisationBatchJob {
     }
 
     /**
+     * The identity of one execution's view of the world: the partition plan, and the boundary every
+     * port answered as at.
+     *
+     * <p><b>Why the boundary is in here and not only on the job parameters.</b>
+     * {@link #parametersFor} carries {@code recordedAsAt} as a <em>non</em>-identifying parameter,
+     * deliberately — making it identifying would turn a re-run at a moved knowledge cut into a
+     * different job instance, which is silently starting a new run rather than refusing a mistake.
+     * But non-identifying meant nothing checked it at all, and the result was worse than either:
+     * a run killed at a boundary of 1 June and resumed at a boundary of 9 June <em>completed</em>,
+     * with twenty contracts carrying figures read at the first knowledge cut and five at the second,
+     * and reported a clean close.
+     *
+     * <p>That contradicts the claim {@link SliceRun} rests on — "every partition reads the world as
+     * at the same instant, which is what makes a partitioned run one consistent cut rather than
+     * forty-eight of them" — and ADR-0007 rejected streaming precisely to avoid it: "streaming would
+     * impose eventual consistency on a close that requires a consistent cut." A partitioned run
+     * spread across two boundaries is that eventual consistency, arriving through the restart path.
+     *
+     * <p>So the boundary is stamped, the resume is refused, and the operator is told which of the two
+     * things moved. Both halves of the boundary are in the stamp: {@code recordedAsAt} because it is
+     * the knowledge cut, and {@code businessAsOf} because a resume at the same instant about a
+     * different period end would be a different run wearing this one's id.
+     */
+    String runFingerprint(RunRequest request, PartitionPlan plan) {
+        return plan.fingerprint()
+            + ";businessAsOf=" + request.boundary().businessAsOf()
+            + ";recordedAsAt=" + request.boundary().recordedAsAt()
+            + ";replayOf=" + request.boundary().replayOf();
+    }
+
+    /**
      * Stamps the plan on the first execution and refuses a changed one on every later execution.
      *
      * <p>See {@link PartitionPlan#fingerprint()} for the defect. The write goes through
@@ -233,12 +269,12 @@ public final class AmortisationBatchJob {
      * handler to flush it, because the value has to survive <em>this</em> execution failing: the
      * whole point is to compare against a run that died.
      */
-    private Step verifyPlanStep(PartitionPlan plan) {
+    private Step verifyPlanStep(RunRequest request, PartitionPlan plan) {
         Tasklet tasklet = (StepContribution contribution, ChunkContext chunkContext) -> {
             JobExecution jobExecution =
                 chunkContext.getStepContext().getStepExecution().getJobExecution();
             ExecutionContext context = jobExecution.getExecutionContext();
-            String fingerprint = plan.fingerprint();
+            String fingerprint = runFingerprint(request, plan);
             String stamped = context.getString(PLAN_FINGERPRINT_KEY, null);
             if (stamped == null) {
                 context.putString(PLAN_FINGERPRINT_KEY, fingerprint);
@@ -246,10 +282,11 @@ public final class AmortisationBatchJob {
             } else if (!stamped.equals(fingerprint)) {
                 throw new IllegalStateException(
                     "this run was planned as [" + stamped + "] and is being resumed over ["
-                        + fingerprint + "]; the population moved between the two executions, so"
-                        + " the partitions the restart skips as complete belong to one population"
-                        + " and the ones it runs belong to another — and the aggregation over the"
-                        + " union would tie against a population that never existed as a set");
+                        + fingerprint + "]; the population or the knowledge boundary moved between"
+                        + " the two executions, so the partitions the restart skips as complete"
+                        + " belong to one cut of the world and the ones it runs belong to another —"
+                        + " and the aggregation over the union would tie against a set that never"
+                        + " existed");
             }
             return RepeatStatus.FINISHED;
         };
@@ -313,7 +350,12 @@ public final class AmortisationBatchJob {
                         + "); a partition the plan does not contain is a partition whose contracts"
                         + " nothing else will run, and its step completing would report success"
                         + " for work nobody did"));
-            SliceOutcome outcome = SliceRun.execute(request, slice, pipelines, queue);
+            // A queue of this attempt's own, not the run's. SliceRun.execute explains why: a
+            // re-run partition re-raises, and the run's queue has no way to tell a retry's record
+            // from a first attempt's. The records that matter travel on the ContractResults and are
+            // filed into the run's queue once, by the aggregate step.
+            SliceOutcome outcome =
+                SliceRun.execute(request, slice, pipelines, new ExceptionQueue());
             // Committed as the partition's last act. Nothing between here and the step's completion
             // record does any work, which is what makes "the step completed" and "the results are
             // in the store" the same fact for the purposes of a restart.
@@ -327,17 +369,79 @@ public final class AmortisationBatchJob {
     }
 
     /**
+     * Files one {@code ExceptionRecord} into the run's queue per quarantined contract — once.
+     *
+     * <h4>Why the partitions do not file directly</h4>
+     *
+     * <p>Because a restart re-runs the partition that did not finish, and the barrier inside it files
+     * again. {@link RunProgressStore#recordSlice} was made a per-contract <em>put</em> for exactly
+     * this reason, so the <em>results</em> are idempotent across a resume — but the
+     * {@code ExceptionQueue} the partitions were handed had no such semantics, and the observed
+     * outcome was {@code queue.size() = 2} and {@code closeBlockers() = 2} for
+     * {@code quarantinedCount() = 1}. The two records are not {@code equals} (their captured causes
+     * are different throwables), so {@code ExceptionQueue.resolve} matches only one of them and the
+     * close stays blocked on a duplicate nobody was told existed; 04 § 2.13's
+     * {@code exceptions_raised} double-counts alongside it.
+     *
+     * <p>Nothing is lost by filing late. {@code ContractResult.isolated} carries the record for the
+     * contract the barrier quarantined, the store keeps one result per contract, and
+     * {@code MonthEndRun} has already used its own attempt's queue to attribute the record. So the
+     * run's queue is derived from the surviving results, which is the same de-duplication the results
+     * already have, applied to the queue.
+     *
+     * <h4>And why it is guarded rather than assumed to run once</h4>
+     *
+     * <p>The aggregate step itself can run more than once: it fails the run on a population that does
+     * not add up, and a relaunch re-runs it. So a record is filed only where the queue holds none for
+     * this contract <em>in this run</em> — the same {@code raisedByRunId} filter
+     * {@code MonthEndRun.filedFor} uses, and for the same reason: a queue outlives a run.
+     */
+    private void fileExceptions(String runId, RunAggregate aggregate) {
+        ExceptionQueue runQueue = queues.forRun(runId);
+        Objects.requireNonNull(runQueue, "no exception queue for run " + runId);
+        for (ContractResult result : aggregate.results()) {
+            if (result.isComputed() || alreadyFiled(runQueue, runId, result.contractId())) {
+                continue;
+            }
+            runQueue.raise(result.exception());
+        }
+    }
+
+    /** Whether this run has already filed against this contract. */
+    private static boolean alreadyFiled(ExceptionQueue queue, String runId, String contractId) {
+        for (ExceptionRecord record : queue.forContract(contractId)) {
+            if (record.raisedByRunId().equals(runId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * The completion barrier: one {@code RunAggregate} over the whole population, and the run-level
      * refusal.
      *
      * <h4>What fails the run here</h4>
      *
-     * <p>Exactly one condition: {@code unaccountedFor() != 0}. It is the whole of the accounting —
-     * a contract with no result makes it positive, a result naming a contract the population does
-     * not makes it negative, and two results for one contract make it positive because
-     * {@code RunAggregate.of} keeps one and reports the other as a reason. A run in any of those
-     * states has published nothing anybody can rely on, because the set the figures describe is not
-     * the set the run was asked about.
+     * <p>One condition, and it is a comparison of <b>identities</b> rather than of totals:
+     * {@code PopulationAccount.of(population, results).addsUp()}, which is true only when no contract
+     * in the population is missing a result <em>and</em> no result names a contract outside it.
+     *
+     * <p><b>It was a check on {@code unaccountedFor() != 0} and that was wrong.</b>
+     * {@code RunAggregate.unaccountedFor()} is {@code populationSize − results.size()} and
+     * {@code RunAggregate.of} <em>appends</em> a stranger to {@code results}, so one missing contract
+     * and one stranger cancel to exactly nil. The input that reaches it is the overnight swap of
+     * {@link PartitionPlan#fingerprint()}'s javadoc — one contract leaves scope, one enters, in the
+     * same grain — and under the netting check the run completed and reported
+     * "population 25, computed 25, quarantined 0, unaccounted 0" while a contract that entered scope
+     * was never computed by anybody and a departed contract's stale result stood in for it. A gate
+     * whose two failure modes cancel is a gate that reports a clean close over the exact defect it
+     * was written to catch.
+     *
+     * <p>{@code PopulationAccount} is reused rather than reimplemented here: it already keeps
+     * {@code unaccounted} and {@code extraneous} as separate lists of ids for
+     * {@code ReplayUseCase}'s identical refusal, and its {@code addsUp()} requires both to be empty.
+     * Two mechanisms for one question is this codebase's recurring defect.
      *
      * <h4>What deliberately does not fail the run</h4>
      *
@@ -373,14 +477,21 @@ public final class AmortisationBatchJob {
             Map<PolicyKind, String> stamps = RunPolicyStamps.consultedBy(request);
             List<String> runRecord = RunPolicyStamps.asRunRecord(stamps);
             RunPolicyStamps.refuseUnlessTheRunAgreesWithItself(
-                runId, runRecord, store.policyStampsByPartition(runId));
+                runId, runRecord, store.recordedSlices(runId),
+                store.policyStampsByPartition(runId));
 
             // plan.population(), not the store's contracts: the denominator is the population the
             // run STARTED with. Taking it from the results would make the subtraction tie by
             // construction, which is the "processed 9,999,998" defect written as an aggregation.
+            List<ContractResult> results = store.results(runId);
             RunAggregate aggregate = RunAggregate.of(
-                runId, request.periodId(), plan.population(), store.results(runId), runRecord);
+                runId, request.periodId(), plan.population(), results, runRecord);
             CompletedRun completed = new CompletedRun(aggregate, stamps);
+            PopulationAccount account = PopulationAccount.of(plan.population(), results);
+
+            // The run's exception queue, filled here and exactly once per quarantined contract.
+            // See fileExceptions for why the partitions do not write to it directly.
+            fileExceptions(runId, aggregate);
 
             // Written BEFORE the refusal below, so that a run which failed its own accounting still
             // leaves the report that says by how much and which contracts. An operator triaging a
@@ -389,13 +500,15 @@ public final class AmortisationBatchJob {
             store.recordCompletion(runId, completed);
             contribution.incrementWriteCount(aggregate.results().size());
 
-            if (aggregate.unaccountedFor() != 0) {
+            if (!account.addsUp()) {
                 throw new IllegalStateException(
-                    "run " + runId + " does not account for its population: " + aggregate.describe()
-                        + ". Every contract in the population is computed or quarantined and never"
-                        + " absent (FR-905), so a non-nil residual means the run published figures"
-                        + " over a different set from the one it was asked about — and every total"
-                        + " it produced ties without the difference");
+                    "run " + runId + " does not account for its population: " + account.describe()
+                        + ". " + aggregate.describe()
+                        + " — every contract in the population is computed or quarantined and never"
+                        + " absent (FR-905), so a missing contract or a result naming a contract the"
+                        + " population does not means the run published figures over a different set"
+                        + " from the one it was asked about. Compared by identity and not by total,"
+                        + " because one of each cancels");
             }
             return RepeatStatus.FINISHED;
         };

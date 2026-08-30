@@ -27,7 +27,6 @@ import com.crisil.eir.domain.TimeConvention;
 import com.crisil.eir.policy.PolicyKind;
 import com.crisil.eir.policy.PolicyVersion;
 import com.crisil.eir.policy.PolicyVersionStatus;
-import com.crisil.eir.policy.exception.ExceptionQueue;
 import com.crisil.eir.policy.registry.PolicyVersionRegistry;
 import com.crisil.eir.policy.routing.RoutingTableRegistry;
 import java.math.BigDecimal;
@@ -279,8 +278,20 @@ final class BatchFixtures {
     }
 
     static RunRequest request(String runId, List<String> population, Set<String> withoutState) {
+        return requestAsAt(runId, population, withoutState, KNOWN_AT);
+    }
+
+    /**
+     * As {@link #request}, at a chosen knowledge boundary.
+     *
+     * <p>For one test: a run resumed at a <em>moved</em> {@code recordedAsAt}, which
+     * {@code AmortisationBatchJob.runFingerprint} refuses. A partitioned run spread across two
+     * knowledge cuts is the eventual consistency ADR-0007 rejected streaming to avoid.
+     */
+    static RunRequest requestAsAt(
+        String runId, List<String> population, Set<String> withoutState, Instant knownAt) {
         return new RunRequest(
-            runId, PERIOD_ID, BOOK_ID, boundary(),
+            runId, PERIOD_ID, BOOK_ID, AsAtBoundary.live(PERIOD_END, knownAt),
             new FakeContracts(population), new FakeState(withoutState),
             new FakeCoreBanking(), new FakeGeneralLedger(), new FakePolicy(POLICY));
     }
@@ -470,7 +481,7 @@ final class BatchFixtures {
     /** A wired-up runner, so a test can assert on the store and the counters as well as the run. */
     record Harness(
         RunProgressStore store,
-        ExceptionQueue queue,
+        RunExceptionQueues queues,
         RecordingPipelines pipelines,
         AmortisationBatchJob jobs,
         AmortisationJobRun runner,
@@ -496,14 +507,16 @@ final class BatchFixtures {
      * input the completion barrier of ADR-0007 exists to refuse.
      */
     static Harness harness(TaskExecutor executor, int maxShardSize, RunProgressStore store) {
-        ExceptionQueue queue = new ExceptionQueue();
+        // One queue per run, not one per job: a shared queue makes period N's close gate refuse on
+        // period N-1's unresolved blockers. See RunExceptionQueues.
+        RunExceptionQueues queues = RunExceptionQueues.perRun();
         RecordingPipelines pipelines = new RecordingPipelines();
         JobRepository jobRepository = InMemoryJobRepository.create();
         AmortisationBatchJob jobs = new AmortisationBatchJob(
             jobRepository, new ResourcelessTransactionManager(), executor,
-            new PrefixGrains(), pipelines, store, queue, maxShardSize);
+            new PrefixGrains(), pipelines, store, queues, maxShardSize);
         return new Harness(
-            store, queue, pipelines, jobs,
+            store, queues, pipelines, jobs,
             new AmortisationJobRun(jobs, launcher(jobRepository), store), jobRepository);
     }
 

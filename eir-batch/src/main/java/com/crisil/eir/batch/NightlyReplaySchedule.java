@@ -116,6 +116,23 @@ public final class NightlyReplaySchedule {
         return NightlyReplayOutcome.of(nightOf, report);
     }
 
+    /**
+     * The night a firing right now belongs to.
+     *
+     * <p>Exposed so that a caller which needs the night for more than one purpose — a job and its
+     * identifying parameters, say — reads it <b>once</b>. Two reads straddling the 20:00 cutover
+     * would give a job's step and the job's own {@code nightOf} parameter different nights, which is
+     * the off-by-a-night {@link NightlyReplayWindow} exists to prevent, reintroduced one layer up.
+     *
+     * <p>This and {@link #runNow()} are the only methods here that read the clock, and they read the
+     * same one — the injected {@link Clock}, never {@code Clock.systemUTC()}. A schedule wired with a
+     * fixed clock, or with an operator's offset for re-running an earlier night, has to be obeyed by
+     * everything that derives a night from it.
+     */
+    public LocalDate tonight() {
+        return window.nightOf(clock);
+    }
+
     /** The window this schedule derives its nights from — for a control report's own header. */
     public NightlyReplayWindow window() {
         return window;

@@ -122,20 +122,41 @@ public final class RunPolicyStamps {
      * came from — each partition may have used either. A reported breach would leave the close to
      * decide whether to publish, and there is nothing to decide with.
      *
-     * @param runRecord    the run's own resolution, from {@link #asRunRecord}
-     * @param perPartition each partition's stamps, as its {@code RunAggregate} reported them
+     * <p><b>And it refuses a run that presented no stamps to compare.</b> The loop below passes
+     * vacuously over an empty list, which would make this a control that cannot fail — in a module
+     * whose stated purpose includes not shipping any more of those. The input that produces it is
+     * real: a durable {@link RunProgressStore} that persists results and forgets stamps disables the
+     * whole check silently, and the run then publishes under whatever the last resolution happened
+     * to be. So the number of stamp lists has to match the number of partitions that committed.
+     *
+     * @param runId      the run
+     * @param runRecord  the run's own resolution, from {@link #asRunRecord}
+     * @param committed  the partitions that committed, in the store's own order
+     * @param perPartition each partition's stamps, positionally aligned with {@code committed}
      */
     public static void refuseUnlessTheRunAgreesWithItself(
-        String runId, List<String> runRecord, List<List<String>> perPartition) {
+        String runId,
+        List<String> runRecord,
+        List<PartitionKey> committed,
+        List<List<String>> perPartition) {
         Objects.requireNonNull(runId, "runId");
         Objects.requireNonNull(runRecord, "runRecord");
+        Objects.requireNonNull(committed, "committed");
         Objects.requireNonNull(perPartition, "perPartition");
+        if (perPartition.size() != committed.size()) {
+            throw new IllegalStateException(
+                "run " + runId + " committed " + committed.size() + " partition(s) and reported "
+                    + perPartition.size() + " set(s) of policy stamps; a partition whose reading was"
+                    + " not retained cannot be compared against the run record, and a comparison"
+                    + " over the partitions that happen to have kept theirs is a control that"
+                    + " passes by having looked at less");
+        }
         for (int i = 0; i < perPartition.size(); i++) {
             List<String> partition = perPartition.get(i);
             if (!runRecord.equals(partition)) {
                 throw new IllegalStateException(
                     "run " + runId + " stamped " + runRecord + " on its run record and partition "
-                        + i + " of " + perPartition.size() + " worked under " + partition
+                        + committed.get(i).describe() + " worked under " + partition
                         + "; the two readings resolve the same registry at the same boundary, so a"
                         + " disagreement is a PolicySource that does not honour the boundary it is"
                         + " handed — and figures published under a rule the run record denies"

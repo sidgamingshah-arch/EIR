@@ -100,6 +100,11 @@ class RunPolicyStampsTest {
     @DisplayName("The run has to agree with itself")
     class SelfAgreement {
 
+        private static final List<PartitionKey> THREE_PARTITIONS = List.of(
+            new PartitionKey(BatchFixtures.RETAIL, BatchFixtures.MUM, 0),
+            new PartitionKey(BatchFixtures.RETAIL, BatchFixtures.MUM, 1),
+            new PartitionKey(BatchFixtures.CORP, BatchFixtures.MUM, 0));
+
         @Test
         @DisplayName("identical stamps across every partition are accepted")
         void agreementIsAccepted() {
@@ -107,21 +112,42 @@ class RunPolicyStampsTest {
 
             // No exception is the assertion.
             RunPolicyStamps.refuseUnlessTheRunAgreesWithItself(
-                "RUN-202805-01", runRecord, List.of(runRecord, runRecord, runRecord));
+                "RUN-202805-01", runRecord, THREE_PARTITIONS,
+                List.of(runRecord, runRecord, runRecord));
         }
 
         @Test
-        @DisplayName("a partition that worked under a different version is refused")
+        @DisplayName("a partition that worked under a different version is refused, and is named")
         void aDisagreeingPartitionIsRefused() {
             assertThatThrownBy(() -> RunPolicyStamps.refuseUnlessTheRunAgreesWithItself(
                 "RUN-202805-01",
                 List.of("ROUTING_TABLE=POL-RT-2029.1"),
+                THREE_PARTITIONS.subList(0, 2),
                 List.of(
                     List.of("ROUTING_TABLE=POL-RT-2028.1"),
                     List.of("ROUTING_TABLE=POL-RT-2029.1"))))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("does not honour the boundary")
-                .hasMessageContaining("the right number from the wrong rule");
+                .hasMessageContaining("the right number from the wrong rule")
+                // Named in the units a controller thinks in, not as "partition 0 of 2".
+                .hasMessageContaining("product RETAIL-EMI, entity IN-MUM, shard 0");
+        }
+
+        @Test
+        @DisplayName("a run that committed partitions and retained no stamps is refused")
+        void stampsThatWereNotRetainedAreRefused() {
+            // The control's own could-not-fail case. The loop compares pairwise, so an empty stamp
+            // list passes vacuously — and a durable RunProgressStore that persists results and
+            // forgets stamps produces exactly that, silently disabling the whole policy-agreement
+            // check for every close after the migration.
+            assertThatThrownBy(() -> RunPolicyStamps.refuseUnlessTheRunAgreesWithItself(
+                "RUN-202805-01",
+                List.of("ROUTING_TABLE=POL-RT-2028.1"),
+                THREE_PARTITIONS,
+                List.of()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("committed 3 partition(s) and reported 0 set(s)")
+                .hasMessageContaining("passes by having looked at less");
         }
 
         @Test

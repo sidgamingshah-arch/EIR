@@ -91,9 +91,28 @@ public final class NightlyReplayBatchJob {
             .build();
     }
 
-    /** The job for the night the scheduler's firing belongs to. */
-    public Job jobForTonight() {
-        return jobFor(schedule.window().nightOf(java.time.Clock.systemUTC()));
+    /**
+     * The night a firing right now belongs to, read from the schedule's own clock.
+     *
+     * <p>This replaced a {@code jobForTonight()} that read {@code Clock.systemUTC()} directly. That
+     * method had two defects and the second was the worse one. It ignored the {@link Clock} injected
+     * into {@link NightlyReplaySchedule} — the only reason that field exists, and a violation of the
+     * package's own claim that exactly one type reads a clock — so a schedule wired with a fixed or
+     * offset clock got a job for a different night than {@code runNow()} would have run. And because
+     * there was no matching {@code parametersForTonight()}, a caller had to derive the night a
+     * <em>second</em> time for {@link #parametersFor}: two clock reads straddling the 20:00 cutover
+     * give the job's step and the job's identifying parameter different nights, which is exactly what
+     * {@link #jobFor}'s javadoc says it prevents.
+     *
+     * <p>So the night is read once, here, and the caller passes it to both:
+     *
+     * <pre>
+     *   LocalDate night = jobs.tonight();
+     *   launcher.run(jobs.jobFor(night), jobs.parametersFor(night));
+     * </pre>
+     */
+    public LocalDate tonight() {
+        return schedule.tonight();
     }
 
     /**
