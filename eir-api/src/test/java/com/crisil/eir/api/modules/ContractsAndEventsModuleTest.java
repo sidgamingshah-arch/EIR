@@ -27,6 +27,7 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -172,6 +173,23 @@ class ContractsAndEventsModuleTest {
         Matcher matcher = Pattern.compile("\"" + key + "\":\"([^\"]*)\"").matcher(body);
         assertThat(matcher.find()).as("the response carries a '%s' field", key).isTrue();
         return new BigDecimal(matcher.group(1));
+    }
+
+    /**
+     * Every value of a repeated JSON key, in document order, with {@code "null"} for a JSON null.
+     *
+     * <p>Needed because the version chain's whole claim is about ORDER: that {@code validFrom} is
+     * non-decreasing down the rows and each {@code validTo} equals the next {@code validFrom}. A
+     * substring match cannot see order, and it was a substring match that let a chain with a
+     * backwards interval pass.
+     */
+    private static List<String> allOf(String body, String key) {
+        Matcher matcher = Pattern.compile("\"" + key + "\":(?:\"([^\"]*)\"|(null))").matcher(body);
+        List<String> found = new ArrayList<>();
+        while (matcher.find()) {
+            found.add(matcher.group(1) == null ? "null" : matcher.group(1));
+        }
+        return found;
     }
 
     /** The event form for a contract, minus whatever the test is proving the absence of. */
@@ -668,16 +686,29 @@ class ContractsAndEventsModuleTest {
     class Versions {
 
         @Test
-        @DisplayName("initial recognition alone is one version, from the disbursement date")
+        @DisplayName("the sole version is the opening position on file, and does not claim to be"
+            + " the position at initial recognition")
         void aContractWithNoEventsHasOneVersion() throws IOException {
             Response response = get("/api/contract/C-0001/versions");
 
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
                 .contains("\"versionCount\":1")
-                .contains("\"basis\":\"INITIAL_RECOGNITION\"")
-                .contains("\"validFrom\":\"2027-04-30\"")
                 .contains("\"validTo\":null");
+            // This row used to be labelled INITIAL_RECOGNITION and dated 2027-04-30, the
+            // disbursement date, while carrying figures read from holding.state() — which is the
+            // opening position of the CURRENT period. It therefore told a reader the balance on the
+            // disbursement date was 528,407.32, month 13's figure, when the position at recognition
+            // was a GCA0 of 990,000.00 (the onboarding response's own IC-1 states it). The row now
+            // says what it is and dates itself where the book strikes it.
+            assertThat(response.body())
+                .as("the label and the date must describe the figures the row actually carries")
+                .contains("\"basis\":\"OPENING_POSITION_ON_FILE\"")
+                .contains("\"validFrom\":\"2028-04-30\"")
+                .contains("\"carryingAmount\":\"528407.32\"")
+                .doesNotContain("INITIAL_RECOGNITION");
+            // The recognition date is still reported — as a date, not as a claim about the figures.
+            assertThat(response.body()).contains("\"initialRecognitionDate\":\"2027-04-30\"");
         }
 
         @Test
@@ -757,6 +788,18 @@ class ContractsAndEventsModuleTest {
         }
 
         @Test
+        @DisplayName("a path below the two views this module serves is refused, not ignored")
+        void aPathBelowTheViewsIsRefused() throws IOException {
+            // The view guard inspected only the second segment, so anything past it was silently
+            // dropped and this URL answered the full versions payload. A module that refuses
+            // /api/contract/{id}/foo by name must not accept a longer path it does not implement.
+            Response response = get("/api/contract/C-0001/versions/anything-at-all");
+
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body()).contains("no route").contains("anything-at-all");
+        }
+
+        @Test
         @DisplayName("the events path is served, and the trailing segment is accepted and ignored")
         void theEventsPathIsServedByPrefix() throws IOException {
             // Any suffix under /api/contracts reaches the POST handler, which is why the refusal in
@@ -769,6 +812,251 @@ class ContractsAndEventsModuleTest {
             assertThat(response.body())
                 .as("the contract acted on is the form field, not the path segment")
                 .contains("\"contractId\":\"C-0001\"");
+        }
+    }
+
+    @Nested
+    @DisplayName("a contract the master carries no balance for has nothing to read or route")
+    class NoOpeningStateOnFile {
+
+        @Test
+        @DisplayName("the read is refused rather than answered from the placeholder state")
+        void theReadIsRefused() throws IOException {
+            // Seed.CONTRACT_WITHOUT_STATE is FR-905's data condition: the population names C-0003,
+            // the contract master does not carry it, and Book.Holding.movementsOnly parks a
+            // PLACEHOLDER state alongside its movements purely so they have somewhere to live. That
+            // placeholder is a COPY OF C-0001's performing state, so a read that trusted it served
+            // C-0001's EIR, principal and 528,407.32 balance under C-0003's id — with one boolean
+            // among twenty fields to say so.
+            Response response = get("/api/contract/" + Seed.CONTRACT_WITHOUT_STATE);
+
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body())
+                .contains(Seed.CONTRACT_WITHOUT_STATE)
+                .contains("no opening balance")
+                .contains("FR-905");
+            assertThat(response.body())
+                .as("not one figure from the placeholder may reach the wire")
+                .doesNotContain("528407.32")
+                .doesNotContain("0.010421491800");
+        }
+
+        @Test
+        @DisplayName("an event against it publishes no restatement and no clean invariant")
+        void anEventIsRefused() throws IOException {
+            Response response = post(eventsPath(Seed.CONTRACT_WITHOUT_STATE),
+                event(Seed.CONTRACT_WITHOUT_STATE, "STEP_UP_PREDETERMINED",
+                    "revisedFlows=2028-06-30:500000.00"));
+
+            assertThat(response.status()).isEqualTo(400);
+            // The worst version of this defect: a restated balance and a satisfied CU-1 for a
+            // contract with no balance on file — a wrong number wearing a green control result.
+            assertThat(response.body())
+                .doesNotContain("restatedCarryingAmount")
+                .doesNotContain("invariantsClean")
+                .doesNotContain("CU-1");
+        }
+    }
+
+    @Nested
+    @DisplayName("the version chain is coherent whatever order events arrive in")
+    class TheVersionChain {
+
+        @Test
+        @DisplayName("out-of-order submissions still produce intervals that run forwards")
+        void outOfOrderSubmissionsAreChainedByEventDate() throws IOException {
+            // Submitted late first, then early. Chained on the append order this produced a validTo
+            // two months BEFORE its own validFrom on version 2, and left version 1 closing at
+            // 2028-07-31 while version 3 opened at 2028-05-31 — two overlapping versions. An
+            // interval that runs backwards is not a caveat, it is a wrong answer.
+            post(eventsPath("C-0002"), "contractId=C-0002&eventDate=2028-07-31"
+                + "&driver=STEP_UP_PREDETERMINED&revisedFlows=2028-08-31:500000.00");
+            post(eventsPath("C-0002"), "contractId=C-0002&eventDate=2028-05-31"
+                + "&driver=ESG_LINKED&revisedFlows=2028-06-30:500000.00");
+
+            Response response = get("/api/contract/C-0002/versions");
+            assertThat(response.status()).isEqualTo(200);
+            assertThat(response.body()).contains("\"versionCount\":3");
+
+            // Version 1 opens at the period start and closes at the EARLIER event; version 2 runs
+            // from that event to the later one; version 3 runs open-ended from the later one.
+            List<String> from = allOf(response.body(), "validFrom");
+            List<String> to = allOf(response.body(), "validTo");
+            assertThat(from)
+                .as("validFrom, in row order, must be non-decreasing")
+                .containsExactly("2028-04-30", "2028-05-31", "2028-07-31");
+            assertThat(to)
+                .as("each version closes where the next one opens, and the last stays open")
+                .containsExactly("2028-05-31", "2028-07-31", "null");
+            assertThat(response.body())
+                .contains("\"chainedInEventDateOrder\":true")
+                .contains("orderCaveat");
+        }
+
+        @Test
+        @DisplayName("two events on one contract do not compose, and the response says so")
+        void successiveEventsDoNotCompose() throws IOException {
+            post(eventsPath("C-0001"), event("C-0001", "ESG_LINKED",
+                "revisedFlows=2028-06-30:500000.00"));
+            Response second = post(eventsPath("C-0001"),
+                "contractId=C-0001&eventDate=2028-06-30&driver=STEP_UP_PREDETERMINED"
+                    + "&revisedFlows=2028-07-31:500000.00");
+
+            assertThat(second.status()).isEqualTo(200);
+            // Nothing here moves the book, so BOTH events are measured from the same 528,407.32
+            // opening position — the second is not measured from the 494,843.00 the first restated
+            // to. A validFrom/validTo series whose figures did not compose and did not say so would
+            // be read as one that did.
+            assertThat(second.body())
+                .contains("\"carryingAmountBefore\":\"528407.32\"")
+                .contains("\"carryingAmountBasis\":\"OPENING_POSITION_ON_FILE\"")
+                .contains("compositionCaveat");
+            assertThat(get("/api/contract/C-0001/versions").body())
+                .contains("\"figuresCompose\":false")
+                .contains("compositionCaveat");
+        }
+
+        @Test
+        @DisplayName("resubmitting one event is refused, not appended under a duplicate id")
+        void aResubmissionIsRefused() throws IOException {
+            String form = event("C-0001", "CREDIT_RATCHET_PREDETERMINED",
+                "revisedFlows=2028-06-30:500000.00");
+            assertThat(post(eventsPath("C-0001"), form).status()).isEqualTo(200);
+
+            // RecordedEvent.idFor is deterministic, so a retry is the same event. Appended, it gave
+            // two versions one eventId and made the first of them zero-length — its validTo equal
+            // to its own validFrom — and anything resolving a figure by event id would get
+            // whichever row came first.
+            Response again = post(eventsPath("C-0001"), form);
+            assertThat(again.status()).isEqualTo(400);
+            assertThat(again.body())
+                .contains("EV-C-0001-2028-05-31-CREDIT_RATCHET_PREDETERMINED")
+                .contains("already on record");
+            assertThat(get("/api/contract/C-0001/versions").body())
+                .as("the log still holds one event, so the chain still has two versions")
+                .contains("\"versionCount\":2");
+        }
+    }
+
+    @Nested
+    @DisplayName("nothing is published that the engine did not produce")
+    class NothingUnproduced {
+
+        @Test
+        @DisplayName("a triggers value naming no trigger is refused, NONE alone asserts the assessment")
+        void aTriggersValueOfSeparatorsIsRefused() throws IOException {
+            // 'triggers=,' passed the has() check and parsed to an empty list, so the response came
+            // back with qualitativeAssessmentPerformed true and an empty trigger list — the exact
+            // state the class javadoc says must be inexpressible, because it reports a clean
+            // qualitative result nobody produced.
+            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+                "originalFlows=2028-06-30:500000.00&revisedFlows=2028-06-30:452500.00"
+                    + "&side=ASSET&triggers=,"));
+
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body())
+                .contains("names no trigger")
+                .contains("NONE");
+            assertThat(response.body()).doesNotContain("qualitativeAssessmentPerformed");
+        }
+
+        @Test
+        @DisplayName("a DECIDED modification test still publishes no post-event balance")
+        void aDecidedAssessmentPublishesNoBalance() throws IOException {
+            // |440,000 - 500,000| / 500,000 = 0.12 on a liability: B3.3.6's bright line is reached
+            // and the engine concludes SUBSTANTIAL, whose implied mechanism is DERECOGNITION — the
+            // asset leaving the book. Publishing the pre-event balance as carryingAmountAfter said
+            // the carrying amount was unchanged for exactly that event, and disagreed with the
+            // RecordedEvent for the same event, which stores null.
+            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+                "originalFlows=2028-06-30:500000.00&revisedFlows=2028-06-30:440000.00"
+                    + "&side=LIABILITY&triggers=NONE"));
+
+            assertThat(response.status()).isEqualTo(200);
+            assertThat(response.body())
+                .contains("\"substantialityConclusion\":\"SUBSTANTIAL\"")
+                .contains("\"engineDecided\":true")
+                .contains("\"carryingAmountAfter\":null")
+                .contains("carryingAmountAfterNote")
+                // The balance the assessment measured FROM is still reported, under its own name.
+                .contains("\"carryingAmountBefore\":\"528407.32\"");
+        }
+
+        @Test
+        @DisplayName("a reset whose re-solve found no rate records nothing and opens no version")
+        void aRefusedResetIsNotAccepted() throws IOException {
+            // A revised leg the lender PAYS: every present value is negative, the target balance is
+            // +528,407.32, so f(r) never changes sign at any rate on the ladder or off it. That is
+            // NO_SOLUTION, and 03 § 4.3 names a defaulted rate here the most damaging failure
+            // available to this engine, because it publishes a plausible figure and leaves no trace.
+            Response response = post(eventsPath(FLOATING),
+                event(FLOATING, "TIME_VALUE_OF_MONEY", "revisedFlows=2028-06-30:-500000.00"));
+
+            assertThat(response.status())
+                .as("a solver refusal is an engine answer, so it comes back on a 200")
+                .isEqualTo(200);
+            assertThat(response.body())
+                .contains("\"routedMechanism\":\"RESET\"")
+                .contains("\"solveStatus\":\"NO_SOLUTION\"")
+                .contains("\"solved\":false")
+                .contains("\"newEir\":null")
+                // Recorded, it put a boundary in the history carrying a null rate and a null balance
+                // with pendingApproval false — the "assessed event that changed nothing" shape
+                // RecordedEvent's constructor refuses for the pending case, reached through the one
+                // branch that bypasses that guard.
+                .contains("\"accepted\":false")
+                .contains("\"eventsOnRecord\":0");
+            assertThat(get("/api/contract/" + FLOATING + "/versions").body())
+                .as("a refused reset changed nothing, so the history says nothing")
+                .contains("\"versionCount\":1");
+        }
+
+        @Test
+        @DisplayName("a re-solve the solver flagged is a candidate rate, never the contract's EIR")
+        void aFlaggedResolveIsNotPublishedAsTheNewEir() throws IOException {
+            // A single revised flow of 1.00 against a 528,407.32 balance. There IS a root — about
+            // -99.9998% periodic — and the solver finds it, but only by escalating the ladder, and
+            // it lands outside the plausible band, so the status is REQUIRES_REVIEW: computed and
+            // usable, flagged rather than published (03 § 4.4(2)).
+            //
+            // This test exists because the module got this wrong. It keyed off hasRate(), which is
+            // true for REQUIRES_REVIEW, and published -0.999998107521 as the new EIR of a performing
+            // housing loan on a 200 — with nothing but a prose diagnostic to say it had been
+            // flagged. Revert the requiresApproval() branch in EventRouting.reset to a plain
+            // hasRate() check and this test fails on newEir being a figure.
+            Response response = post(eventsPath(FLOATING),
+                event(FLOATING, "TIME_VALUE_OF_MONEY", "revisedFlows=2028-06-30:1.00"));
+
+            assertThat(response.status()).isEqualTo(200);
+            assertThat(response.body())
+                .contains("\"solveStatus\":\"REQUIRES_REVIEW\"")
+                .contains("\"requiresApproval\":true")
+                .contains("\"solved\":false")
+                .as("a flagged rate is reported under its own name and is not the contract's EIR")
+                .contains("\"newEir\":null")
+                .contains("\"candidateEir\":\"-0.999998107521\"");
+            // The version the event opens carries no position, because none was approved.
+            assertThat(get("/api/contract/" + FLOATING + "/versions").body())
+                .contains("\"versionCount\":2")
+                .contains("\"pendingApproval\":true")
+                .contains("\"eir\":null")
+                .contains("\"carryingAmount\":null");
+        }
+
+        @Test
+        @DisplayName("rupee figures on the reads are at presentation scale, like every other figure")
+        void figuresAreAtPresentationScale() throws IOException {
+            Response response = get("/api/contract/C-0001");
+
+            assertThat(response.status()).isEqualTo(200);
+            // A nil allowance used to reach the wire as "0" beside a "528407.32" balance in the same
+            // object. Json's own argument is that the stated scale is information, so a control
+            // report reading one field at two paise and its neighbour at none is reading two
+            // different statements about one book.
+            assertThat(response.body())
+                .contains("\"allowance\":\"0.00\"")
+                .contains("\"carryingAmount\":\"528407.32\"")
+                .contains("\"contractualInterestBilled\":\"5298.16\"");
         }
     }
 }

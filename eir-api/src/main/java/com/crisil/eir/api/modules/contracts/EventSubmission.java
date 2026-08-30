@@ -311,6 +311,20 @@ public final class EventSubmission {
                         + triggerNames() + ", got '" + name + "'");
             }
         }
+        if (fired.isEmpty()) {
+            // 'NONE' is the only way to reach an empty list, and the check is the whole point of
+            // this method. A value of separators alone — 'triggers=,' — parsed to no tokens and
+            // came back as an empty list with the assessment recorded as performed, which is
+            // exactly the state this class's javadoc says must be inexpressible: the response then
+            // reports a clean qualitative result nobody produced. Only the literal NONE asserts
+            // that the assessment ran and found nothing.
+            throw new FormBody.BadRequest(
+                "'triggers' was sent as '" + raw + "', which names no trigger and is not the literal "
+                    + NO_TRIGGERS + ". An empty list is a positive statement — the qualitative"
+                    + " assessment was performed and nothing fired — and only " + NO_TRIGGERS
+                    + " makes it. A value that parses to nothing would record an assessment nobody"
+                    + " performed.");
+        }
         return List.copyOf(fired);
     }
 

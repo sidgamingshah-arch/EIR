@@ -9,11 +9,13 @@ import com.crisil.eir.api.modules.contracts.EventRouting;
 import com.crisil.eir.api.modules.contracts.EventSubmission;
 import com.crisil.eir.api.modules.contracts.RecordedEvent;
 import com.crisil.eir.api.store.Book;
+import com.crisil.eir.api.store.Seed;
 import com.crisil.eir.application.port.ContractStateSource;
 import com.crisil.eir.calc.projection.ContractTerms;
 import com.sun.net.httpserver.HttpExchange;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -95,6 +97,18 @@ public final class ContractsAndEventsModule implements ApiModule {
 
     private static final String VERSIONS = "versions";
 
+    /**
+     * The date the opening position every holding carries is struck at.
+     *
+     * <p>The book is positioned at the opening of one period and holds one row per contract, so this
+     * is the {@code validFrom} of version 1 for every contract — both the seeded ones, whose row is
+     * month 13's opening position, and one recognised in this session, whose inception position
+     * {@code EirService.onboard} also strikes here. Taken from {@code Seed} rather than restated,
+     * for the reason {@code Seed.policies()} gives about the routing version: two places stating one
+     * date is two places that can disagree while every figure stays identical.
+     */
+    private static final LocalDate POSITION_STRUCK_AT = Seed.PERIOD_START;
+
     private final EirService service;
 
     /**
@@ -167,6 +181,7 @@ public final class ContractsAndEventsModule implements ApiModule {
     private Json.Obj submitEvent(FormBody body) {
         EventSubmission submission = EventSubmission.parse(body);
         Book.Holding holding = require(submission.contractId());
+        requireNotAlreadyRecorded(holding.contractId(), submission);
 
         EventRouting.Routed routed =
             EventRouting.route(holding, service.routingTables(), submission);
@@ -174,13 +189,59 @@ public final class ContractsAndEventsModule implements ApiModule {
         if (recorded != null) {
             events.computeIfAbsent(holding.contractId(), id -> new ArrayList<>()).add(recorded);
         }
-        return routed.response()
+        List<RecordedEvent> onRecord = eventsFor(holding.contractId());
+        Json.Obj response = routed.response()
             .bool("accepted", recorded != null)
-            .count("eventsOnRecord", eventsFor(holding.contractId()).size())
+            .count("eventsOnRecord", onRecord.size())
             .str("versions", CONTRACT + "/" + holding.contractId() + "/" + VERSIONS)
+            .str("carryingAmountBasis", "OPENING_POSITION_ON_FILE")
             .str("appliedToBook", "no — routing and evidence only. The balance moves in the"
                 + " month-end roll-forward, which is the only place the roll-forward invariants are"
                 + " asserted over the result.");
+        if (onRecord.size() > 1) {
+            // Said once, plainly, rather than left for a reader to infer from two responses that
+            // both start at 528,407.32. Because nothing here moves the book, every event is
+            // measured from the same opening position — so two events on one contract are two
+            // independent readings of the same starting balance, not a chain. A version series
+            // whose figures did not compose and did not say so would be read as one that did.
+            response.str("compositionCaveat", "this is event " + onRecord.size() + " on "
+                + holding.contractId() + " and its figures are measured from the OPENING position on"
+                + " file, not from the balance the previous event restated — nothing here is applied"
+                + " to the book. The events do not compose into a running balance; the month-end run"
+                + " is what applies them in order.");
+        }
+        return response;
+    }
+
+    /**
+     * Refuses a second submission of an event already on record.
+     *
+     * <p>{@link RecordedEvent#idFor} is deterministic — the same contract, date and driver is the
+     * same event — and its javadoc claims a retry is "recognisably the same event rather than a
+     * second event with the same effect". It was not: the log appended unconditionally, so a retry
+     * produced two versions carrying one {@code eventId}, the first of them zero-length because its
+     * {@code validTo} equalled its own {@code validFrom}. A duplicate identifier in a version series
+     * makes anything resolving a figure by event id get whichever row comes first.
+     *
+     * <p>Refused rather than answered idempotently from the stored result, because this module keeps
+     * no stored response and replaying the computation could differ if the revised flows differ —
+     * which is exactly what the caller has done wrong. docs/06 § 1's {@code Idempotency-Key} is the
+     * proper mechanism and belongs in the seam.
+     */
+    private void requireNotAlreadyRecorded(String contractId, EventSubmission submission) {
+        String candidate = RecordedEvent.idFor(
+            contractId, submission.eventDate(), submission.driver());
+        for (RecordedEvent prior : events.getOrDefault(contractId, List.of())) {
+            if (prior.eventId().equals(candidate)) {
+                throw new FormBody.BadRequest(
+                    "event " + candidate + " is already on record for " + contractId
+                        + ": one contract, one date, one driver is one event. Accepting it again"
+                        + " would open a second version under the same event id, and the first of"
+                        + " the two would be a zero-length version whose validTo equals its own"
+                        + " validFrom. Change the event date or the driver if this is a different"
+                        + " event.");
+            }
+        }
     }
 
     // ================================================================ GET /api/contract/…
@@ -204,6 +265,15 @@ public final class ContractsAndEventsModule implements ApiModule {
                     + "/{id}/versions. It is not defaulted to the first contract on the book — a"
                     + " read that answers about some other contract than the one asked about is"
                     + " worse than one that refuses.");
+        }
+        if (segments.size() > 2) {
+            // The guard below only inspected segments.get(1), so anything past it was silently
+            // ignored and GET /api/contract/{id}/versions/whatever answered the full payload. A
+            // module that refuses /api/contract/{id}/foo by name must not accept a longer path it
+            // does not implement.
+            throw new FormBody.BadRequest(
+                "no route " + path + "; this module serves " + CONTRACT + "/{id} and " + CONTRACT
+                    + "/{id}/" + VERSIONS + ", and nothing below them.");
         }
         if (segments.size() > 1 && !VERSIONS.equals(segments.get(1))) {
             throw new FormBody.BadRequest(
@@ -233,14 +303,21 @@ public final class ContractsAndEventsModule implements ApiModule {
             .str("instrumentCurrency", terms.currency().getCurrencyCode())
             // Every figure a string, never a JSON number: 0.010421491800 through a double loses the
             // trailing zeros that say the rate is stated to twelve places (see Json's javadoc).
+            // Rupee figures go out at presentation scale, as every figure EventRouting publishes
+            // does: a nil allowance reached the wire as "0" beside a "528407.32" balance in the same
+            // object, and Json's own argument is that the stated scale is information — a control
+            // report reading one field at two paise and its neighbour at none is reading two
+            // different statements about the same book.
             .figure("eir", state.eir().periodic())
             .figure("eirEffectiveAnnual", state.eir().effectiveAnnual())
-            .figure("carryingAmount", state.openingGca().amount())
-            .figure("contractualCarryingAmount", state.openingContractual().amount())
-            .figure("allowance", state.allowance().amount())
-            .figure("contractualInterestBilled", state.contractualInterestBilled().amount())
+            .figure("carryingAmount", state.openingGca().atPresentationScale().amount())
+            .figure("contractualCarryingAmount",
+                state.openingContractual().atPresentationScale().amount())
+            .figure("allowance", state.allowance().atPresentationScale().amount())
+            .figure("contractualInterestBilled",
+                state.contractualInterestBilled().atPresentationScale().amount())
             .str("eclModel", state.eclEngineVersion())
-            .figure("principal", terms.principal().amount())
+            .figure("principal", terms.principal().atPresentationScale().amount())
             .figure("contractualRate", terms.contractualRate().periodic())
             .count("termPeriods", terms.termPeriods())
             .count("periodsPerYear", terms.periodsPerYear())
@@ -264,31 +341,53 @@ public final class ContractsAndEventsModule implements ApiModule {
      *
      * <p>06 § 2 asks for "full bitemporal version history with validFrom/validTo and
      * recordedAt/supersededAt". Two of those four are real here and two are not, and saying which
-     * is the point. {@code validFrom} and {@code validTo} are genuine: initial recognition runs from
-     * the disbursement date, and each routed event opens a new version on its own event date.
-     * {@code recordedAt} and {@code supersededAt} are <b>null</b>, because {@code Book} holds one
-     * row per contract and has no {@code recorded_at} series to report — its own javadoc says so:
-     * "a map holds one version of each row … that is enough to make a replay reproduce and not
-     * enough to make it a fair test of bitemporality". A response that filled those two fields with
-     * plausible instants would be the worst available answer, because an auditor cannot tell an
+     * is the point. {@code validFrom} and {@code validTo} are genuine: the position the book holds
+     * runs from the period it was struck at, and each routed event opens a new version on its own
+     * event date. {@code recordedAt} and {@code supersededAt} are <b>null</b>, because {@code Book}
+     * holds one row per contract and has no {@code recorded_at} series to report — its own javadoc
+     * says so: "a map holds one version of each row … that is enough to make a replay reproduce and
+     * not enough to make it a fair test of bitemporality". A response that filled those two fields
+     * with plausible instants would be the worst available answer, because an auditor cannot tell an
      * invented {@code recorded_at} from a recorded one.
+     *
+     * <p><b>Row 1 is not labelled {@code INITIAL_RECOGNITION}, and that correction matters.</b> It
+     * was, and it dated itself from the disbursement date while taking its figures from
+     * {@code holding.state()} — which is the opening position of the <em>current</em> period. On
+     * reference case 1 that told a reader the balance on 2027-04-30 was 528,407.32, the month-13
+     * figure, when the position at recognition was GCA0 of 990,000.00. The book carries one row and
+     * that row is the period's opening position, so the row says exactly that and carries the
+     * recognition date as {@code initialRecognitionDate} — a date, not a claim about these figures.
+     *
+     * <p><b>Rows are chained in event-date order, not submission order.</b> Chaining on the append
+     * order let a back-dated event produce {@code validTo} two months before its own
+     * {@code validFrom}, and left the row before it overlapping the row after. A validity interval
+     * that runs backwards is not a caveat, it is a wrong answer, and the sort is what makes the
+     * series monotonic whatever order the events arrived in.
      */
     private Json.Obj versions(Book.Holding holding) {
-        List<RecordedEvent> recorded = eventsFor(holding.contractId());
-        List<Json.Obj> rows = new ArrayList<>(recorded.size() + 1);
+        List<RecordedEvent> submitted = eventsFor(holding.contractId());
+        // Stable sort on the event date, so events submitted out of order still produce a monotonic
+        // series and two events on one date keep the order they arrived in.
+        List<RecordedEvent> recorded = new ArrayList<>(submitted);
+        recorded.sort(Comparator.comparing(RecordedEvent::eventDate));
+        boolean submittedOutOfOrder = !recorded.equals(submitted);
 
+        List<Json.Obj> rows = new ArrayList<>(recorded.size() + 1);
         LocalDate firstEvent = recorded.isEmpty() ? null : recorded.get(0).eventDate();
         rows.add(Json.object()
             .count("versionNo", 1)
-            .str("validFrom", holding.state().terms().disbursementDate().toString())
+            // The date these figures are the position AT, which is the period the book is opened
+            // at — not the disbursement date, which is a different date and a different balance.
+            .str("validFrom", POSITION_STRUCK_AT.toString())
             .str("validTo", firstEvent == null ? null : firstEvent.toString())
-            .str("basis", "INITIAL_RECOGNITION")
+            .str("basis", "OPENING_POSITION_ON_FILE")
+            .str("initialRecognitionDate", holding.state().terms().disbursementDate().toString())
             .str("eventId", null)
             .str("driver", null)
             .str("routedMechanism", null)
             .str("routingTableVersionId", null)
             .figure("eir", holding.state().eir().periodic())
-            .figure("carryingAmount", holding.state().openingGca().amount())
+            .figure("carryingAmount", holding.state().openingGca().atPresentationScale().amount())
             .bool("pendingApproval", false));
 
         for (int index = 0; index < recorded.size(); index++) {
@@ -297,19 +396,37 @@ public final class ContractsAndEventsModule implements ApiModule {
             rows.add(recorded.get(index).asVersionRow(index + 2, validTo));
         }
 
-        return Json.object()
+        Json.Obj response = Json.object()
             .str("contractId", holding.contractId())
             .count("versionCount", rows.size())
             .array("versions", rows)
             .bool("bitemporalityDemonstrated", false)
             .str("recordedAtSeries", "NOT_CARRIED")
-            .str("caveat", "validFrom and validTo are real: version 1 runs from the disbursement"
-                + " date and each routed event opens a version on its own event date. recordedAt and"
-                + " supersededAt are null because this book holds one row per contract and carries"
-                + " no recorded_at series (see Book's javadoc). A JDBC ContractStateSource answers"
-                + " as at a recorded point and can populate them; filling them here with plausible"
-                + " instants would be indistinguishable from having recorded them.")
+            .bool("chainedInEventDateOrder", true)
+            .bool("figuresCompose", recorded.size() < 2)
+            .str("caveat", "validFrom and validTo are real: version 1 is the opening position the"
+                + " book carries, struck at " + POSITION_STRUCK_AT + ", and each routed event opens a"
+                + " version on its own event date — chained in event-date order, not submission"
+                + " order. Version 1 is NOT the position at initial recognition: this book holds one"
+                + " row per contract and that row is the current period's opening position, so"
+                + " initialRecognitionDate is reported as a date and not as a claim about these"
+                + " figures. recordedAt and supersededAt are null for the same reason (see Book's"
+                + " javadoc); a JDBC ContractStateSource answers as at a recorded point and can"
+                + " populate them, and filling them here with plausible instants would be"
+                + " indistinguishable from having recorded them.")
             .strings("routingTableVersionIds", service.routingTables().versionIds());
+        if (recorded.size() > 1) {
+            response.str("compositionCaveat", "each event's figures are measured from version 1's"
+                + " balance, because nothing here is applied to the book. The rows are a series of"
+                + " independent readings of the same opening position, not a running balance, and"
+                + " the month-end run is what applies events in order.");
+        }
+        if (submittedOutOfOrder) {
+            response.str("orderCaveat", "at least one event was submitted out of event-date order;"
+                + " the rows below are sorted by event date so the validity intervals do not run"
+                + " backwards, which means row order is not submission order.");
+        }
+        return response;
     }
 
     // ================================================================ shared
@@ -326,10 +443,32 @@ public final class ContractsAndEventsModule implements ApiModule {
      * line, and integration clients read the status line.
      */
     private Book.Holding require(String contractId) {
-        return service.holding(contractId).orElseThrow(() -> new FormBody.BadRequest(
+        Book.Holding holding = service.holding(contractId).orElseThrow(() -> new FormBody.BadRequest(
             "no contract " + contractId + " on the book. Onboard it with POST " + CONTRACTS
                 + " first; an event or a read against a contract the master does not carry has no"
                 + " instrument to route against, and this layer will not invent one."));
+        if (!holding.stateOnFile()) {
+            // FR-905's data condition, refused rather than read. Book.Holding.movementsOnly carries
+            // a PLACEHOLDER state so that the period movements have somewhere to live, and its own
+            // javadoc says that state "is never read" — the contractState() port filters on
+            // stateOnFile and answers Optional.empty(), which is what a real master does for a row
+            // it does not carry. EirService.holding() returns the raw holding, so this module has to
+            // apply the same filter or it reads the placeholder.
+            //
+            // Reading it is not a cosmetic defect. In the seeded book C-0003's placeholder is a COPY
+            // OF C-0001's performing state, so the read served C-0001's EIR, principal and
+            // 528,407.32 balance as C-0003's, and an event against C-0003 published a restated
+            // balance and a clean CU-1 for a contract the master carries no balance for. That is the
+            // precise failure this contract exists to expose, wearing a green control result.
+            throw new FormBody.BadRequest(
+                "contract " + contractId + " has period movements on file and no opening balance"
+                    + " recorded, so there is no position to read and nothing to route an event"
+                    + " against. The contract master does not carry the row (FR-905); the run"
+                    + " isolates it into the exception queue and the close gates on the count."
+                    + " Answering from the placeholder state the book parks alongside the movements"
+                    + " would publish another contract's figures under this id.");
+        }
+        return holding;
     }
 
     private List<RecordedEvent> eventsFor(String contractId) {

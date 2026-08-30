@@ -196,27 +196,65 @@ public final class EventRouting {
                     + " and no rate was published. Falling back to the rate in force would restate"
                     + " nothing and report a plausible EIR with nothing recording that the reset"
                     + " did not happen (03 § 4.3).");
-            return new Routed(response, new RecordedEvent(
-                RecordedEvent.idFor(holding.contractId(), submission.eventDate(),
-                    submission.driver()),
-                holding.contractId(), submission.eventDate(), submission.driver(),
-                decision.mechanism(), decision.routingTableVersionId(), null, null, false,
-                "B5.4.5 reset, driver " + submission.driver() + ": the re-solve returned "
-                    + solved.status() + " and no rate was published"));
+            // No version is opened, so the response reads accepted:false. A RecordedEvent here
+            // would put a boundary in the version history carrying a null rate and a null balance
+            // with pendingApproval false — the "assessed event that changed nothing" shape
+            // RecordedEvent's own constructor refuses for the pending case, arriving through the
+            // one branch that does not go through that guard. A refused reset changed nothing and
+            // the history must say nothing.
+            return new Routed(response, null);
         }
 
-        Rate eirAfter = solved.rate();
+        Rate candidate = solved.rate();
         response
-            .bool("solved", true)
-            .figure("newEir", eirAfter.periodic())
-            .figure("newEirEffectiveAnnual", eirAfter.effectiveAnnual())
             .figure("residualAtStoredRate", solved.residualAtStoredRate())
             // A reset re-prices the rate and leaves the balance where it is. Both figures are
             // published so that "the carrying amount did not move" is a statement a reader can
             // check rather than a claim the response makes about itself.
             .figure("carryingAmountAfter", gcaBefore.atPresentationScale().amount())
             .figure("catchUpAmount", Money.zero(gcaBefore.currency()).atPresentationScale().amount())
-            .bool("eirUnchanged", false)
+            .bool("eirUnchanged", false);
+
+        if (solved.status().requiresApproval()) {
+            // A rate the solver flagged is NOT the contract's new EIR, and publishing it as one is
+            // the quiet half of 03 § 4.4(2). REQUIRES_REVIEW carries a usable figure and says it is
+            // "flagged rather than published": the root sits outside the plausible band, or was
+            // reached only by escalating the ladder, which the solver's own diagnostic reads as
+            // either a very short tenor carrying a fee it cannot amortise or a recovery so far
+            // below the advance that the answer is impairment and not interest. Both are approval
+            // questions, and an engine that writes such a rate into newEir has answered one.
+            //
+            // Found by a test that meant to provoke NO_SOLUTION and got this instead — the module
+            // published -0.999998107521 as the new EIR of a performing housing loan, on a 200, with
+            // nothing in the response but a diagnostic to say it had been flagged.
+            response
+                .bool("solved", false)
+                .bool("requiresApproval", true)
+                .figure("newEir", null)
+                .figure("candidateEir", candidate.periodic())
+                .figure("candidateEirEffectiveAnnual", candidate.effectiveAnnual())
+                .str("refusal", "the reset re-solve returned " + solved.status()
+                    + ": the rate is computed and usable but flagged for approval, so it is reported"
+                    + " as candidateEir and is not the contract's EIR. Writing a flagged rate into"
+                    + " newEir would settle an approval question by publishing the figure"
+                    + " (03 § 4.4(2)).")
+                .str("basis", "IFRS 9 B5.4.5: the re-solve produced one root and the solver flagged"
+                    + " it. No rate is published and no position is recorded until it is approved.");
+            return new Routed(response, new RecordedEvent(
+                RecordedEvent.idFor(holding.contractId(), submission.eventDate(),
+                    submission.driver()),
+                holding.contractId(), submission.eventDate(), submission.driver(),
+                decision.mechanism(), decision.routingTableVersionId(), null, null, true,
+                "B5.4.5 reset, driver " + submission.driver() + ": the re-solve returned "
+                    + solved.status() + " and the candidate rate "
+                    + candidate.periodic().toPlainString() + " awaits approval"));
+        }
+
+        response
+            .bool("solved", true)
+            .bool("requiresApproval", false)
+            .figure("newEir", candidate.periodic())
+            .figure("newEirEffectiveAnnual", candidate.effectiveAnnual())
             .str("basis", "IFRS 9 B5.4.5: re-solved over the revised remaining flows from the"
                 + " carrying amount in force. The rate moves, the balance does not, and there is no"
                 + " catch-up.");
@@ -224,7 +262,7 @@ public final class EventRouting {
         return new Routed(response, new RecordedEvent(
             RecordedEvent.idFor(holding.contractId(), submission.eventDate(), submission.driver()),
             holding.contractId(), submission.eventDate(), submission.driver(),
-            decision.mechanism(), decision.routingTableVersionId(), eirAfter, gcaBefore, false,
+            decision.mechanism(), decision.routingTableVersionId(), candidate, gcaBefore, false,
             "B5.4.5 reset, driver " + submission.driver() + ", routing table version "
                 + decision.routingTableVersionId()));
     }
@@ -351,8 +389,16 @@ public final class EventRouting {
             .bool("catchUpApplied", false)
             .figure("catchUpAmount", null)
             .figure("newEir", null)
-            .figure("carryingAmountAfter", pending
-                ? null : gcaBefore.atPresentationScale().amount())
+            // Null whatever the conclusion, because nothing is applied here. Publishing the
+            // pre-event balance on a SUBSTANTIAL conclusion said the carrying amount was unchanged
+            // for an assessment whose implied mechanism is derecognition — the asset leaving the
+            // book — and on NOT_SUBSTANTIAL it said the same for a catch-up that will move it. It
+            // also disagreed with the RecordedEvent for the identical event, which stores null.
+            .figure("carryingAmountAfter", null)
+            .str("carryingAmountAfterNote", "null because no mechanism is applied here: the"
+                + " conclusion's mechanism runs in the month-end roll-forward, which is the only"
+                + " place the roll-forward invariants are asserted over it. carryingAmountBefore is"
+                + " the balance the assessment measured from.")
             .str("basis", pending
                 ? "IFRS 9 5.4.3: the 10% test and the qualitative triggers are recorded as EVIDENCE"
                     + " and the engine declines to conclude (FR-511). No rate and no restated"
