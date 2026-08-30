@@ -2,6 +2,7 @@ package com.crisil.eir.api.modules.approximations;
 
 import com.crisil.eir.api.http.Json;
 import com.crisil.eir.domain.InvariantResult;
+import com.crisil.eir.domain.MaterialityTier;
 import com.crisil.eir.domain.Precision;
 import com.crisil.eir.policy.exception.ExceptionCategory;
 import com.crisil.eir.policy.pool.PoolDefinition;
@@ -132,6 +133,11 @@ public final class ApproximationRegister {
             return categories.stream().mapToLong(CategoryReturn::inForceCount).sum();
         }
 
+        /** Shortcuts proposed across every category with a source, refused ones included. */
+        public long shortcutsSought() {
+            return categories.stream().mapToLong(CategoryReturn::soughtCount).sum();
+        }
+
         /**
          * Shortcuts applied with nothing on file to defend them.
          *
@@ -222,6 +228,13 @@ public final class ApproximationRegister {
             // — counting it as evidence would turn a failed test into a permission.
             boolean permitted =
                 outcome.ground() == EquivalenceTestOutcome.Ground.TIER_3_PERMITTED;
+            // Sought, not in force, is what the FR-809 count keys off. The gate demotes an
+            // unevidenced population to Tier 2, so by the time the register sees it the shortcut
+            // is no longer in force — and a count over shortcuts in force could never see the
+            // population FR-411 exists to catch. See ApproximationRow.undocumented().
+            boolean sought = subject.proposedTier() == MaterialityTier.TIER_3;
+            boolean correctlyRefused = outcome.ground()
+                == EquivalenceTestOutcome.Ground.FORBIDDEN_APPROXIMATION;
             rows.add(new ApproximationRow(
                 ApproximationCategory.TIER_3_APPROXIMATION,
                 subject.populationId(),
@@ -232,6 +245,8 @@ public final class ApproximationRegister {
                         .toPlainString(),
                 outcome.tier3Permitted(),
                 permitted,
+                sought,
+                correctlyRefused,
                 outcome.basis() + " — measured at " + outcome.effectiveTier(),
                 governing == null ? null : governing.performedOn(),
                 governing == null ? null : governing.expiresOn(),
@@ -311,9 +326,14 @@ public final class ApproximationRegister {
                 ApproximationCategory.CONTRACTUAL_LIFE_FALLBACK,
                 fallback.contractId(),
                 ApproximationCategory.CONTRACTUAL_LIFE_FALLBACK.shortcut()
-                    + ", being " + fallback.contractualTermMonths() + " months",
+                    + ", being " + fallback.contractualTermDescription(),
                 true,
                 fallback.isJustified(),
+                // The fallback was taken — ContractualLifeFallback's constructor refuses a
+                // contract that stated a life — and no rule refuses it, so an unjustified one is
+                // an undocumented shortcut with nothing to subtract.
+                true,
+                false,
                 fallback.describe(),
                 fallback.electedOn(),
                 null,
@@ -352,12 +372,18 @@ public final class ApproximationRegister {
         ApproximationSources.PoolSubmission submission = answer.value();
         List<PoolDefinition> inForce = submission.pools().inForceOn(asOf);
         List<ApproximationRow> rows = new ArrayList<>(inForce.size());
-        Set<String> matched = new LinkedHashSet<>();
+        // Every pool id in force, so the orphan loop below can tell a back-test that joins no
+        // pool from one that joins a pool perfectly well and was simply performed too late. The
+        // first is a broken join key; the second is a test attributed to the wrong period, and
+        // offering the first diagnosis for the second sends an operator to correct a reference
+        // table that is already right. EquivalenceTestGate separates the same two cases with
+        // Ground.TEST_POSTDATED; the pool path had no equivalent and asserted the wrong one.
+        Set<String> poolsInForce = new LinkedHashSet<>();
+        for (PoolDefinition pool : inForce) {
+            poolsInForce.add(pool.poolId());
+        }
         for (PoolDefinition pool : inForce) {
             PoolBackTest governing = governingBackTest(submission.backTests(), pool.poolId(), asOf);
-            if (governing != null) {
-                matched.add(pool.poolId());
-            }
             boolean defended = governing != null && governing.defendsPoolMeasurementOn(asOf);
             rows.add(new ApproximationRow(
                 ApproximationCategory.POOL_LEVEL_MEASUREMENT,
@@ -367,6 +393,11 @@ public final class ApproximationRegister {
                     + pool.memberExposureIds().size() + " members",
                 true,
                 defended,
+                // A pool in force is collective measurement being applied, so the shortcut is
+                // always sought here, and no rule refuses it outright the way FR-412 refuses
+                // Tier 3 — a pool with no in-date back-test is an undocumented shortcut.
+                true,
+                false,
                 poolBasis(pool, governing, asOf),
                 governing == null ? null : governing.performedOn(),
                 governing == null ? null : governing.expiresOn(),
@@ -376,14 +407,28 @@ public final class ApproximationRegister {
                 defended ? null : ExceptionCategory.POOL_BACKTEST_BREACH.name()));
         }
         List<String> notes = new ArrayList<>();
-        for (PoolBackTest orphan : submission.backTests()) {
-            if (!matched.contains(orphan.poolId())) {
-                notes.add("back-test on file for pool '" + orphan.poolId() + "' performed "
-                    + orphan.performedOn() + " matches no pool in force on " + asOf
-                    + "; either the pool id does not join — which would publish a properly"
-                    + " back-tested pool as unevidenced — or the pool was dissolved and the"
-                    + " evidence outlived it");
+        for (PoolBackTest unused : submission.backTests()) {
+            if (poolsInForce.contains(unused.poolId())) {
+                if (!unused.wasPerformedBy(asOf)) {
+                    // The pool joins and is in force; the evidence simply had not been struck
+                    // yet. Reported separately because the remediation differs entirely: this is
+                    // a test attributed to the wrong period, not a broken reference. Admitting
+                    // it would also breach DT-1 — a replay of this period would defend a
+                    // collective measurement the original run reported as unevidenced.
+                    notes.add("back-test for pool '" + unused.poolId() + "' was performed "
+                        + unused.performedOn() + ", after the reporting date " + asOf
+                        + "; it is excluded because a test cannot evidence a close struck before"
+                        + " it, and admitting it would make a DT-1 replay of this period disagree"
+                        + " with the original run. The pool is in force and the pool id joins —"
+                        + " this is a test attributed to the wrong period, not a broken key");
+                }
+                continue;
             }
+            notes.add("back-test on file for pool '" + unused.poolId() + "' performed "
+                + unused.performedOn() + " matches no pool in force on " + asOf
+                + "; either the pool id does not join — which would publish a properly"
+                + " back-tested pool as unevidenced — or the pool was dissolved and the"
+                + " evidence outlived it");
         }
         InvariantResult eligibility = submission.pools().eligibility(asOf);
         return rows.isEmpty()
@@ -427,6 +472,14 @@ public final class ApproximationRegister {
      * run. Where two share a performance date the <em>less favourable</em> one wins, so a
      * duplicate submission cannot launder a breached back-test by re-recording it the same day
      * with a better variance.
+     *
+     * <p><b>The tie is broken on the absolute variance, not on the excess over threshold.</b>
+     * The excess is clamped to zero at or under the threshold, so two same-day back-tests that
+     * both pass — one at 2 bps and one at 24 bps against a 25 bps tolerance — would tie at zero
+     * and the winner would be whichever the source happened to list first. The published
+     * {@code varianceBps} would then depend on iteration order, which is the kind of answer
+     * {@code SuspensionPools.of} refuses two same-dated pool versions over: "whichever we found
+     * first is not an accounting answer". Comparing the unclamped magnitude orders every pair.
      */
     private static PoolBackTest governingBackTest(
         List<PoolBackTest> backTests, String poolId, LocalDate asOf) {
@@ -449,8 +502,8 @@ public final class ApproximationRegister {
         if (candidate.performedOn().isBefore(incumbent.performedOn())) {
             return false;
         }
-        return candidate.excessOverThresholdBps()
-            .compareTo(incumbent.excessOverThresholdBps()) > 0;
+        return candidate.absoluteVarianceBps()
+            .compareTo(incumbent.absoluteVarianceBps()) > 0;
     }
 
     /** The ACPIR 54 revolving elections, and whether this engine can honour each. */
@@ -477,6 +530,10 @@ public final class ApproximationRegister {
                     + election.approximation(),
                 true,
                 evidenced,
+                // An ACPIR 54 approximation is applied to every revolver by construction, and
+                // nothing refuses one outright, so an unassessed election is undocumented.
+                true,
+                false,
                 election.describe(),
                 election.assessedOn(),
                 null,
@@ -506,9 +563,14 @@ public final class ApproximationRegister {
         Objects.requireNonNull(assembled, "assembled");
         List<Json.Obj> categories = new ArrayList<>();
         int gaps = 0;
+        int withRows = 0;
+        int noneInForce = 0;
         for (CategoryReturn block : assembled.categories()) {
-            if (block.isGap()) {
-                gaps++;
+            switch (block.status()) {
+                case NOT_AVAILABLE -> gaps++;
+                case REPORTED -> withRows++;
+                case NONE_IN_FORCE -> noneInForce++;
+                default -> throw new IllegalStateException("unhandled " + block.status());
             }
             categories.add(renderCategory(block));
         }
@@ -530,9 +592,15 @@ public final class ApproximationRegister {
             .str("period", Integer.toString(assembled.periodId()))
             .str("asOf", assembled.asOf().toString())
             .bool("complete", assembled.complete())
-            .count("categoriesReported", assembled.categories().size())
+            // Named so the four cannot be read as a total plus a subset of itself. An earlier
+            // draft published categoriesReported: 4 beside categoriesNotAvailable: 4, which reads
+            // as eight of four; these three partition the total and the total is stated once.
+            .count("categoriesTotal", assembled.categories().size())
             .count("categoriesInFr809", ApproximationCategory.values().length)
+            .count("categoriesWithRows", withRows)
+            .count("categoriesNoneInForce", noneInForce)
             .count("categoriesNotAvailable", gaps)
+            .count("shortcutsSought", (int) assembled.shortcutsSought())
             .count("shortcutsInForce", (int) assembled.shortcutsInForce())
             .count("undocumentedShortcuts", (int) assembled.undocumentedShortcuts())
             .count("parametersRequiringBoardAttention",
@@ -551,6 +619,8 @@ public final class ApproximationRegister {
                 .str("shortcut", row.shortcut())
                 .bool("inForce", row.inForce())
                 .bool("evidenced", row.evidenced())
+                .bool("sought", row.sought())
+                .bool("correctlyRefused", row.correctlyRefused())
                 .bool("undocumented", row.undocumented())
                 .str("evidenceDate", row.evidenceDate() == null
                     ? null : row.evidenceDate().toString())
@@ -572,6 +642,7 @@ public final class ApproximationRegister {
             .str("statusMeaning", block.status().meaning())
             .count("subjects", block.rows().size())
             .count("inForce", (int) block.inForceCount())
+            .count("sought", (int) block.soughtCount())
             .count("undocumented", (int) block.undocumentedCount())
             .str("gap", block.gap())
             .str("wouldBePopulatedBy", block.category().wouldBePopulatedBy())

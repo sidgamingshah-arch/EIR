@@ -60,9 +60,13 @@ public final class IndAs107Extract {
         List<String> refusals = signOffRefusals(sections, register);
         List<Json.Obj> rendered = new ArrayList<>(sections.size());
         int gaps = 0;
+        int withLines = 0;
         for (SectionReturn section : sections) {
             if (section.status() == CategoryReturn.Status.NOT_AVAILABLE) {
                 gaps++;
+            }
+            if (section.status() == CategoryReturn.Status.REPORTED) {
+                withLines++;
             }
             rendered.add(renderSection(section));
         }
@@ -73,15 +77,25 @@ public final class IndAs107Extract {
             .str("specSection", "06 § 7")
             .str("period", Integer.toString(register.periodId()))
             .str("asOf", register.asOf().toString())
-            .bool("complete", gaps == 0)
+            // The register's own completeness is part of this extract's completeness, and leaving
+            // it out let the extract publish complete: true over a measurement-basis note whose
+            // every line read "NOT DISCLOSABLE". The section is always REPORTED — see
+            // fromRegister — so it never counted towards `gaps`, and a consumer keying off this
+            // one flag read coverage across a wholly unsourced FR-809 register.
+            .bool("complete", gaps == 0 && register.complete())
             .bool("signOffPermitted", refusals.isEmpty())
-            .count("sectionsReported", sections.size())
+            // Partitioned rather than a total beside a subset of itself: an earlier draft
+            // published sectionsReported: 5 next to sectionsNotAvailable: 4 on a response where
+            // exactly one section carried lines, which reads as nine of five.
+            .count("sectionsTotal", sections.size())
+            .count("sectionsWithLines", withLines)
             .count("sectionsNotAvailable", gaps)
             .strings("signOffRefusals", refusals)
             .array("sections", rendered)
             .obj("approximationsRegister", Json.object()
                 .bool("complete", register.complete())
                 .count("categoriesNotAvailable", register.gaps().size())
+                .count("shortcutsSought", (int) register.shortcutsSought())
                 .count("shortcutsInForce", (int) register.shortcutsInForce())
                 .count("undocumentedShortcuts", (int) register.undocumentedShortcuts())
                 .strings("gaps", register.gaps()))
@@ -110,9 +124,10 @@ public final class IndAs107Extract {
         lines.add(DisclosureSources.DisclosureLine.narrative(
             "Completeness of the approximations register (FR-809)",
             register.complete()
-                ? "complete: every one of FR-809's four categories had a source, and "
-                    + register.shortcutsInForce() + " shortcut(s) are in force of which "
-                    + register.undocumentedShortcuts() + " are undocumented"
+                ? "complete: every one of FR-809's four categories had a source. "
+                    + register.shortcutsSought() + " shortcut(s) were sought and "
+                    + register.shortcutsInForce() + " are in force; "
+                    + register.undocumentedShortcuts() + " were sought with no evidence on file"
                 : "INCOMPLETE: " + register.gaps().size() + " of "
                     + register.categories().size() + " categories had no source, so no statement"
                     + " can be made about whether an approximation is in force in those"
@@ -122,9 +137,11 @@ public final class IndAs107Extract {
             lines.add(DisclosureSources.DisclosureLine.narrative(
                 block.category().title(),
                 switch (block.status()) {
-                    case REPORTED -> block.rows().size() + " subject(s), " + block.inForceCount()
-                        + " with the approximation in force, " + block.undocumentedCount()
-                        + " of which are applied with no evidence on file. " + block.category()
+                    case REPORTED -> block.rows().size() + " subject(s): "
+                        + block.soughtCount() + " sought the approximation, "
+                        + block.inForceCount() + " are measured on it, and "
+                        + block.undocumentedCount()
+                        + " sought it with no evidence on file. " + block.category()
                             .shortcut() + ". Specification: "
                         + block.category().specReference();
                     case NONE_IN_FORCE -> "none in force in the period. The source was consulted"
@@ -183,10 +200,12 @@ public final class IndAs107Extract {
         }
         if (register.undocumentedShortcuts() > 0) {
             refusals.add("MEASUREMENT_BASIS_AND_APPROXIMATIONS (Ind AS 1.122): "
-                + register.undocumentedShortcuts() + " approximation(s) are in force with no"
-                + " evidence on file. 03 § 10.2: \"we approximated because it was immaterial\" is"
-                + " a complete answer only when the materiality assessment exists on paper with a"
-                + " number attached");
+                + register.undocumentedShortcuts() + " approximation(s) were sought with no"
+                + " evidence on file. Sought, not merely in force: an unevidenced Tier 3"
+                + " population is demoted to Tier 2 by FR-411, so a count over shortcuts still"
+                + " in force would never see the population the equivalence test exists for."
+                + " 03 § 10.2: \"we approximated because it was immaterial\" is a complete answer"
+                + " only when the materiality assessment exists on paper with a number attached");
         }
         return List.copyOf(refusals);
     }

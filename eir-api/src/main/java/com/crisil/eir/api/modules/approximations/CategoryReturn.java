@@ -180,12 +180,23 @@ public record CategoryReturn(
         return status == Status.NOT_AVAILABLE;
     }
 
-    /** Shortcuts actually applied in the period. */
+    /** Shortcuts actually applied in the period — what the book is measured on. */
     public long inForceCount() {
         return rows.stream().filter(ApproximationRow::inForce).count();
     }
 
-    /** Shortcuts applied with nothing on file to defend them — FR-809's finding. */
+    /**
+     * Shortcuts proposed, whether or not a gate then refused them.
+     *
+     * <p>Larger than {@link #inForceCount()} exactly where a gate demoted a population, which for
+     * Tier 3 is every unevidenced one. Published beside the in-force count because the difference
+     * between the two is the amount of work the gates did this period.
+     */
+    public long soughtCount() {
+        return rows.stream().filter(ApproximationRow::sought).count();
+    }
+
+    /** Shortcuts sought with nothing on file to defend them — FR-809's finding. */
     public long undocumentedCount() {
         return rows.stream().filter(ApproximationRow::undocumented).count();
     }

@@ -47,7 +47,9 @@ public final class EngineSources implements ApproximationSources, DisclosureSour
             + " are not recorded anywhere. EquivalenceTestGate implements the whole of FR-411 and"
             + " FR-412 — including FORBIDDEN_APPROXIMATION for zero-coupon and deep-discount"
             + " instruments and NO_TEST_ON_FILE demoting to Tier 2 with an exception raised — and"
-            + " has no caller outside its own package. So a 15-year zero-coupon instrument is"
+            + " has no caller in the measurement path — this register calls it, but a report"
+            + " cannot gate a measurement that has already happened. So a 15-year zero-coupon"
+            + " instrument is"
             + " assigned Tier 3, solved on Tier 3's tightened tolerance and recognised, with"
             + " nothing recording that the permission was never sought. Reference case 9 measures"
             + " that shortcut at 81.0% overstatement of year-one income.";
@@ -64,9 +66,10 @@ public final class EngineSources implements ApproximationSources, DisclosureSour
             + " holds it, and there is no field on any type in the engine that could.";
 
     private static final String POOL_GAP =
-        "no source. PoolDefinition and SuspensionPools exist in eir-policy and have no caller"
-            + " outside it — no pool is defined in this deployment and nothing in eir-application"
-            + " or eir-api constructs one. Separately, 03 § 10.1's mandatory quarterly back-test"
+        "no source. PoolDefinition and SuspensionPools exist in eir-policy and no pool is defined"
+            + " in this deployment: nothing in eir-application or eir-api constructs one, and"
+            + " this register's own PoolSubmission is therefore always empty. 03 § 10.1's"
+            + " mandatory quarterly back-test"
             + " has no artefact in the engine at all: ExceptionCategory.POOL_BACKTEST_BREACH"
             + " exists as a queue category with nothing that can raise it. PoolBackTest in this"
             + " package is the shape such an artefact would take, and it has no producer.";

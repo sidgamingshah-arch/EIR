@@ -288,7 +288,11 @@ class ApproximationsModuleTest {
                 .contains("\"complete\":false")
                 .contains("\"categoriesNotAvailable\":4")
                 .contains("\"categoriesInFr809\":4")
-                .contains("\"categoriesReported\":4");
+                .contains("\"categoriesTotal\":4")
+                // The three status counts partition the total, so a reader cannot add a total to
+                // a subset of itself and get nine of four.
+                .contains("\"categoriesWithRows\":0")
+                .contains("\"categoriesNoneInForce\":0");
 
             // The other half of the same claim, and the sharper one: nothing in this response may
             // assert that a shortcut is NOT in force. NONE_IN_FORCE is a positive statement and
@@ -301,10 +305,18 @@ class ApproximationsModuleTest {
             // class a reader can open.
             assertThat(response.body())
                 .contains("EquivalenceTestGate implements the whole of FR-411 and FR-412")
-                .contains("has no caller outside its own package")
                 .contains("ContractTerms.expectedLifePeriods() resolves an unstated")
                 .contains("PoolDefinition and SuspensionPools exist in eir-policy")
                 .contains("ProjectorRegistry wires one RevolvingProjector");
+
+            // The gap text must be true of the engine as it now stands. This register itself
+            // calls EquivalenceTestGate, so "no caller outside its own package" became false the
+            // moment this module shipped — and it ships inside an auditor-facing 200. The claim
+            // that is actually true is about the measurement path.
+            assertThat(response.body())
+                .as("a gap that states something untrue about the engine is worse than a vague one")
+                .contains("has no caller in the measurement path")
+                .doesNotContain("has no caller outside its own package");
 
             // Every category still names its own invariant and specification section, so an
             // unpopulated register still tells a reader what the control would have been.
@@ -365,9 +377,16 @@ class ApproximationsModuleTest {
             // fifth is the measurement-basis note, which is fed by the FR-809 register and is
             // therefore always present — its content here is that the register is incomplete.
             assertThat(response.body())
-                .contains("\"sectionsReported\":5")
+                .contains("\"sectionsTotal\":5")
+                .contains("\"sectionsWithLines\":1")
                 .contains("\"sectionsNotAvailable\":4")
                 .contains("\"signOffPermitted\":false");
+            // complete must fold in the FR-809 register, not only the figure sections. The
+            // register-fed section is always REPORTED, so counting gaps alone let this extract
+            // publish complete: true over a note whose every line said NOT DISCLOSABLE.
+            assertThat(response.body())
+                .as("an extract whose measurement-basis note is undisclosable is not complete")
+                .contains("\"asOf\":\"2028-05-31\",\"complete\":false,\"signOffPermitted\":false");
             // Refusals name the standard paragraph, so closing them is a list of tasks.
             assertThat(response.body())
                 .contains("Ind AS 107.20(b)(i)")
@@ -571,6 +590,50 @@ class ApproximationsModuleTest {
                 .contains("\"subject\":\"WCDL-RETAIL\"")
                 .contains("\"exception\":\"STALE_EQUIVALENCE_TEST\"");
         }
+
+        @Test
+        @DisplayName("a Tier 3 population with no test on file IS an undocumented shortcut")
+        void anUnevidencedTierThreePopulationReachesTheHeadlineCount() {
+            String body = moduleOver(
+                new Wired().tier3(List.of(wcdl("WCDL-RETAIL")), EquivalenceTestGate.empty()),
+                new WiredDisclosures())
+                .approximations(PERIOD).toString();
+
+            // The defect this asserts against: undocumentedShortcuts was defined as
+            // `inForce && !evidenced`, and EquivalenceTestGate DEMOTES an unevidenced Tier 3
+            // population to Tier 2 — so the shortcut stops being in force the instant the
+            // evidence is missing, and the count could never see the one population FR-411
+            // exists to catch. The flagship category was invisible to the flagship figure.
+            assertThat(body)
+                .as("the shortcut was sought and nothing defends it; that is the finding FR-809"
+                    + " publishes, and a demotion must not hide it")
+                .contains("\"undocumentedShortcuts\":1")
+                .contains("\"shortcutsSought\":1")
+                .contains("\"shortcutsInForce\":0")
+                .contains("\"undocumented\":true")
+                .contains("\"sought\":true")
+                .contains("\"inForce\":false");
+        }
+
+        @Test
+        @DisplayName("an FR-412 refusal is subtracted from the count, not added to it")
+        void aCorrectRefusalIsNotAnUndocumentedShortcut() {
+            String body = moduleOver(
+                new Wired().tier3(List.of(caseNineZeroCoupon()), EquivalenceTestGate.empty()),
+                new WiredDisclosures())
+                .approximations(PERIOD).toString();
+
+            // The zero-coupon was proposed for Tier 3 and has no test on file, so `sought` is
+            // true and `evidenced` false — yet this is not a missing document. 03 § 10.3 refuses
+            // it, the gate applies that before consulting evidence, and
+            // EquivalenceTestOutcome.Ground is explicit that such a refusal is a TG-1 pass:
+            // counting it would bury the genuine breaches in a list of correct refusals.
+            assertThat(body)
+                .contains("\"sought\":true")
+                .contains("\"correctlyRefused\":true")
+                .contains("\"undocumented\":false")
+                .contains("\"undocumentedShortcuts\":0");
+        }
     }
 
     @Nested
@@ -642,6 +705,39 @@ class ApproximationsModuleTest {
         }
 
         @Test
+        @DisplayName("a back-test performed after the reporting date is diagnosed as postdated")
+        void aPostdatedBackTestIsNotCalledAnOrphan() {
+            PoolDefinition cards = new PoolDefinition(poolVersion("POL-POOL-2028.1"),
+                "POOL-CARDS", "CARD", Set.of(TierAssignmentFeature.CARD_OR_KCC_REVOLVER),
+                Set.of("E-1"));
+            // Performed 2028-07-31, two months after the 2028-05-31 reporting date. The pool is
+            // in force and the pool id joins perfectly; the evidence had simply not been struck.
+            PoolBackTest postdated = new PoolBackTest("POOL-CARDS", LocalDate.of(2028, 7, 31), 400,
+                new BigDecimal("12"), new BigDecimal("25"), "board.risk.committee");
+
+            String body = moduleOver(
+                new Wired().pools(SuspensionPools.of(cards), List.of(postdated)),
+                new WiredDisclosures())
+                .approximations(PERIOD).toString();
+
+            // The old note offered two explanations — a broken pool id, or a dissolved pool —
+            // and both are false here. An operator would go and correct a reference table that
+            // is already right, while the actual fault, a test booked to the wrong period, went
+            // unnamed. EquivalenceTestGate separates these with Ground.TEST_POSTDATED.
+            assertThat(body)
+                .as("a diagnosis that is confidently wrong is worse than none")
+                .contains("was performed 2028-07-31, after the reporting date 2028-05-31")
+                .contains("this is a test attributed to the wrong period, not a broken key")
+                .doesNotContain("the pool was dissolved and the evidence outlived it");
+            // Still excluded from the evidence, and for the DT-1 reason: admitting it would make
+            // a replay of this period defend a measurement the original run reported as bare.
+            assertThat(body)
+                .contains("\"evidenced\":false")
+                .contains("\"undocumented\":true")
+                .contains("a DT-1 replay of this period disagree with the original run");
+        }
+
+        @Test
         @DisplayName("a back-test matching no pool in force is published, not dropped")
         void anOrphanBackTestIsPublished() {
             PoolDefinition cards = new PoolDefinition(poolVersion("POL-POOL-2028.1"),
@@ -663,6 +759,37 @@ class ApproximationsModuleTest {
                 .contains("back-test on file for pool 'POOL-CARD' performed 2028-04-30 matches no"
                     + " pool in force on 2028-05-31")
                 .contains("\"evidenced\":false");
+        }
+
+        @Test
+        @DisplayName("two same-day back-tests resolve to the worse one, not to list order")
+        void aSameDayDuplicateResolvesDeterministically() {
+            PoolDefinition cards = new PoolDefinition(poolVersion("POL-POOL-2028.1"),
+                "POOL-CARDS", "CARD", Set.of(TierAssignmentFeature.CARD_OR_KCC_REVOLVER),
+                Set.of("E-1"));
+            // Both performed 2028-04-30 and both inside the 25 bps threshold, at 2 and 24 bps.
+            // The tie-break used excessOverThresholdBps(), which clamps to zero at or under the
+            // threshold — so both scored 0, neither superseded the other, and the published
+            // variance was whichever the caller listed first. Comparing the unclamped magnitude
+            // orders the pair, and the less favourable one wins so a duplicate cannot launder a
+            // worse result by re-recording it the same day.
+            PoolBackTest better = new PoolBackTest("POOL-CARDS", LocalDate.of(2028, 4, 30), 400,
+                new BigDecimal("2"), new BigDecimal("25"), "board.risk.committee");
+            PoolBackTest worse = new PoolBackTest("POOL-CARDS", LocalDate.of(2028, 4, 30), 400,
+                new BigDecimal("24"), new BigDecimal("25"), "board.risk.committee");
+
+            String favourableFirst = moduleOver(
+                new Wired().pools(SuspensionPools.of(cards), List.of(better, worse)),
+                new WiredDisclosures()).approximations(PERIOD).toString();
+            String worseFirst = moduleOver(
+                new Wired().pools(SuspensionPools.of(cards), List.of(worse, better)),
+                new WiredDisclosures()).approximations(PERIOD).toString();
+
+            assertThat(favourableFirst)
+                .as("the published variance must not depend on the order the source listed the"
+                    + " duplicates in — \"whichever we found first is not an accounting answer\"")
+                .contains("\"varianceBps\":\"24\"");
+            assertThat(worseFirst).contains("\"varianceBps\":\"24\"");
         }
 
         @Test
@@ -749,8 +876,55 @@ class ApproximationsModuleTest {
             assertThat(body)
                 .contains("\"signOffPermitted\":false")
                 .contains("\"sectionsNotAvailable\":0")
-                .contains("1 approximation(s) are in force with no evidence on file")
+                .contains("1 approximation(s) were sought with no evidence on file")
                 .contains("Ind AS 1.122");
+        }
+
+        @Test
+        @DisplayName("every figure sourced but the register unsourced is NOT a complete extract")
+        void aSourcedExtractOverAnUnsourcedRegisterIsIncomplete() {
+            // The isolating case, and the one the socket tests could not reach: all four
+            // figure-bearing sections answer, so `gaps` is zero, and the FR-809 register is
+            // wholly unsourced. The register-fed section is always REPORTED by design — the
+            // disclosure of an incomplete register is that it is incomplete — so it never counts
+            // towards `gaps`, and an extract whose `complete` flag looked only at gaps published
+            // complete: true over a note whose every line read "NOT DISCLOSABLE".
+            String body = moduleOver(new EngineSources(), new WiredDisclosures())
+                .indAs107(PERIOD).toString();
+
+            // Anchored on the two neighbouring fields, because the body carries a second
+            // "complete" inside approximationsRegister and a bare substring matches that one —
+            // which is how this assertion first passed against the very defect it was written
+            // for. Json.Obj writes fields in insertion order, so the triple is deterministic.
+            assertThat(body)
+                .as("Ind AS 107.21's measurement basis is a section of this extract, so an"
+                    + " unenumerable set of judgements makes the extract incomplete")
+                .contains("\"asOf\":\"2028-05-31\",\"complete\":false,\"signOffPermitted\":false")
+                .contains("\"sectionsNotAvailable\":0")
+                .contains("\"sectionsWithLines\":5");
+            assertThat(body)
+                .contains("INCOMPLETE: 4 of 4 categories had no source")
+                .contains("NOT DISCLOSABLE");
+        }
+
+        @Test
+        @DisplayName("an unevidenced Tier 3 population alone refuses sign-off")
+        void anUnevidencedTierThreePopulationRefusesSignOff() {
+            // The end-to-end consequence of the count fix. Before it, this book signed off: the
+            // gate demoted the population to Tier 2, so nothing was "in force" unevidenced, the
+            // count was zero and the Ind AS 1.122 refusal never fired — on a book where a Tier 3
+            // shortcut had been sought with no equivalence test anywhere.
+            Wired sources = new Wired().allEmpty()
+                .tier3(List.of(wcdl("WCDL-RETAIL")), EquivalenceTestGate.empty());
+            String body = moduleOver(sources, new WiredDisclosures()).indAs107(PERIOD).toString();
+
+            assertThat(body)
+                .as("a disclosure of judgements cannot be signed while a judgement is"
+                    + " undocumented, and a demotion does not document it")
+                .contains("\"signOffPermitted\":false")
+                .contains("\"sectionsNotAvailable\":0")
+                .contains("1 approximation(s) were sought with no evidence on file")
+                .contains("an unevidenced Tier 3 population is demoted to Tier 2 by FR-411");
         }
     }
 
@@ -803,11 +977,56 @@ class ApproximationsModuleTest {
         void undatedEvidenceIsRefused() {
             assertThatThrownBy(() -> new ApproximationRow(
                 ApproximationCategory.POOL_LEVEL_MEASUREMENT, "POOL-CARDS", "pool EIR",
-                true, true, "back-tested at some point", null, null, null, null, "PL-2", null))
+                true, true, true, false, "back-tested at some point",
+                null, null, null, null, "PL-2", null))
                 .as("currency is date arithmetic; an undated document can be neither current nor"
                     + " stale, and the row would satisfy every count in the report")
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("claims documented evidence with no date on it");
+        }
+
+        @Test
+        @DisplayName("a shortcut in force but never sought is refused, as is a refusal in force")
+        void theInForceAndSoughtPairingIsEnforced() {
+            // undocumented() counts over `sought` and the "measured on" reading is over
+            // `inForce`. A row in force and not sought would be applied to the book and counted
+            // by neither figure — the shape where a shortcut is live and no number knows.
+            assertThatThrownBy(() -> new ApproximationRow(
+                ApproximationCategory.POOL_LEVEL_MEASUREMENT, "POOL-CARDS", "pool EIR",
+                true, false, false, false, "applied without ever being proposed",
+                null, null, null, null, "PL-2", null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("absent from every figure");
+
+            // FR-412 refuses before evidence is consulted, so a refusal cannot also be applied.
+            assertThatThrownBy(() -> new ApproximationRow(
+                ApproximationCategory.TIER_3_APPROXIMATION, "ZCB-15Y", "straight line",
+                true, false, true, true, "refused by FR-412 and applied anyway",
+                null, null, null, null, "TG-1", null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("03 § 10.3's prohibition is absolute");
+        }
+
+        @Test
+        @DisplayName("a weekly term is stated in periods rather than truncated to months")
+        void anIncommensurableTermIsNotTruncated() {
+            // termPeriods = 10 at 52 a year is a 2.3-month term. The old arithmetic,
+            // 10 × 12 ÷ 52, truncated it to 2 months and put that in the disclosure sentence.
+            ContractTerms weekly = ContractTerms.of(
+                Money.inr("100000.00"), Rate.periodic(new BigDecimal("0.001000000000"), 52),
+                10, 52, LocalDate.of(2028, 1, 3), LocalDate.of(2028, 1, 10),
+                DayCountConvention.ACT_365F, ScheduleShape.ANNUITY_EMI, RateType.FIXED);
+
+            ContractualLifeFallback fallback =
+                new ContractualLifeFallback("C-0900", weekly, null, null);
+
+            assertThat(fallback.termIsCommensurableWithTheCalendar()).isFalse();
+            assertThat(fallback.contractualTermDescription())
+                .as("a wrong tenor in a note to the accounts is worse than an absent one")
+                .contains("10 periods at 52 a year")
+                .contains("no month equivalent to state and none is invented")
+                .doesNotContain("2 months");
+            assertThat(fallback.describe()).doesNotContain("2 months");
         }
 
         @Test

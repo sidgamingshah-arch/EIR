@@ -53,17 +53,49 @@ public record ContractualLifeFallback(
     }
 
     /**
+     * Whether the compounding frequency divides twelve, so a term in months exists at all.
+     *
+     * <p>The same condition {@code ContractTerms.monthsPerPeriod()} refuses on, asked rather than
+     * triggered — a report is the wrong place to raise an exception over one row's tenor label.
+     */
+    public boolean termIsCommensurableWithTheCalendar() {
+        return 12 % terms.periodsPerYear() == 0;
+    }
+
+    /**
      * The contractual term in months, which is what the expected life fell back to.
      *
-     * <p>Computed as {@code termPeriods × 12 ÷ periodsPerYear} rather than through
-     * {@code ContractTerms.monthsPerPeriod()}, which throws where the frequency does not divide
-     * twelve. A report is the wrong place to raise that: a daily-compounding facility on the
-     * fallback would answer this endpoint with a 500 and the whole register would be lost over
-     * one row's tenor label. Multiplying first keeps the answer exact for every commensurable
-     * frequency and truncates rather than fails for the rest.
+     * <p>Delegates to {@code ContractTerms.monthsPerPeriod()} rather than recomputing
+     * {@code termPeriods × 12 ÷ periodsPerYear}. That arithmetic silently truncated: a weekly
+     * facility of ten periods — {@code termPeriods = 10, periodsPerYear = 52}, a 2.3-month term —
+     * reported <b>2 months</b>, and that number went straight into the disclosure sentence
+     * "expected life taken as the contractual term, being N months". A wrong tenor in a note to
+     * the accounts is worse than an absent one, so the truncation is gone and the delegation
+     * carries the guard.
+     *
+     * @throws IllegalStateException where the frequency does not divide twelve; ask
+     *     {@link #termIsCommensurableWithTheCalendar()} first, or use
+     *     {@link #contractualTermDescription()}, which never throws
      */
     public int contractualTermMonths() {
-        return terms.termPeriods() * 12 / terms.periodsPerYear();
+        return terms.termPeriods() * terms.monthsPerPeriod();
+    }
+
+    /**
+     * The term as the register states it, in months where months exist and in periods otherwise.
+     *
+     * <p>Never throws, because this is what the disclosure line and the row's shortcut label are
+     * built from. An incommensurable frequency says so instead of rounding to a figure nobody can
+     * reconcile: FR-102 already requires the billed schedule be supplied externally for such an
+     * instrument, and this label points at the same fact.
+     */
+    public String contractualTermDescription() {
+        if (termIsCommensurableWithTheCalendar()) {
+            return contractualTermMonths() + " months";
+        }
+        return terms.termPeriods() + " periods at " + terms.periodsPerYear() + " a year — a"
+            + " frequency that does not divide 12, so there is no month equivalent to state and"
+            + " none is invented (FR-102)";
     }
 
     /** Whether the election is justified and dated — the two halves of an explicit election. */
@@ -74,7 +106,7 @@ public record ContractualLifeFallback(
     /** The audit sentence, naming the term the life fell back to and the election, or its absence. */
     public String describe() {
         String sentence = "expected life unstated, taken as the contractual term of "
-            + contractualTermMonths() + " months (FR-310, ACPIR 51)";
+            + contractualTermDescription() + " (FR-310, ACPIR 51)";
         if (isJustified()) {
             return sentence + "; elected " + electedOn + " on the ground that " + justification;
         }
