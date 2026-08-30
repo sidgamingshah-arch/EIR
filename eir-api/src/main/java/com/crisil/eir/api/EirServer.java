@@ -1,7 +1,10 @@
 package com.crisil.eir.api;
 
+import com.crisil.eir.api.http.ApiModule;
 import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.http.Json;
+import com.crisil.eir.api.http.Routes;
+import com.crisil.eir.api.modules.ApiModules;
 import com.crisil.eir.api.store.Seed;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -58,6 +61,24 @@ public final class EirServer {
         post("/api/close", service::close);
         post("/api/replay", service::replay);
         post("/api/onboard", service::onboard);
+
+        // Every module in docs/06's surface, each registering its own routes. The list is in
+        // ApiModules; nothing here knows what any module does, which is what lets the surface be
+        // built by several hands without any of them editing this file.
+        Routes routes = new Routes() {
+            @Override
+            public void get(String path, Function<HttpExchange, Json.Obj> handler) {
+                EirServer.this.get(path, handler);
+            }
+
+            @Override
+            public void post(String path, Function<FormBody, Json.Obj> handler) {
+                EirServer.this.post(path, handler);
+            }
+        };
+        for (ApiModule module : ApiModules.all(service)) {
+            module.register(routes);
+        }
 
         server.createContext("/", this::page);
     }

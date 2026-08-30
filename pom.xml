@@ -24,7 +24,26 @@
     <module>eir-gl</module>
     <module>eir-application</module>
     <module>eir-api</module>
+    <module>eir-batch</module>
   </modules>
+
+  <profiles>
+    <profile>
+      <!--
+        The JDBC persistence adapters, behind a profile rather than in <modules>.
+
+        The PostgreSQL driver and Flyway are not in the local repository, so putting this module in
+        the default build would make `mvn -o install` fail for the whole reactor — which is the one
+        property this repository has protected since Phase 2, because an air-gapped bank CI has no
+        Central. `mvn install` stays offline-capable; `mvn -Pjdbc install` adds the module and needs
+        network once, after which it is cached too.
+      -->
+      <id>jdbc</id>
+      <modules>
+        <module>eir-persistence-jdbc</module>
+      </modules>
+    </profile>
+  </profiles>
 
   <properties>
     <maven.compiler.release>21</maven.compiler.release>

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.crisil.eir</groupId>
+    <artifactId>eir-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>eir-batch</artifactId>
+  <name>EIR :: batch</name>
+  <description>
+    The runner: partitioned amortisation runs, restartability, and the nightly replay schedule
+    (ADR-0007). This is the module ADR-0010's exemption mechanism was written for.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-application</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-domain</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-policy</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.batch</groupId>
+      <artifactId>spring-batch-core</artifactId>
+      <version>5.1.2</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <!--
+              FRAMEWORK EXEMPTION: ADR-0007 (Spring Batch for runs), permitted by ADR-0010.
+
+              ADR-0010 makes the framework ban fail closed and inherit into every module, and
+              provides exactly this override for a module that genuinely needs a framework. This is
+              that module: Spring Batch is the RUNNER — partitioning, restart from a failed step,
+              a job repository — and none of that is arithmetic. eir-domain and eir-calc can never
+              take this exemption, and nothing here is on the calculation path.
+            -->
+            <id>ban-frameworks-in-calculation-path</id>
+            <phase>none</phase>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
