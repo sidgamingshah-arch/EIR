@@ -548,7 +548,8 @@ public final class EirService {
 
         RunClose.ClosePresentation presentation = RunClose.present(
             request(completed.runId()), completed.aggregate(), Book.GCA_ACCOUNT,
-            contractualLegLines(completed), portfolioTies(completed), period, closedBy, closedAt,
+            contractualLegLines(completed, Seed.PERIOD_ID), portfolioTies(completed),
+            period, closedBy, closedAt,
             completed.exceptions(), acceptances);
 
         return Json.object()
@@ -600,7 +601,7 @@ public final class EirService {
         }
         return Optional.of(new PublishedFigures(
             completed.runId(), request(completed.runId()), completed.aggregate(),
-            completed.computations(), contractualLegLines(completed)));
+            completed.computations(), contractualLegLines(completed, periodId)));
     }
 
     /**
@@ -653,12 +654,19 @@ public final class EirService {
      * this book, 5,298.16. A loop that took its population from the CBS feed instead would present
      * a line on both sides for every contract the feed carried and the presence break would be
      * invisible.
+     *
+     * <p><b>{@code periodId} is a parameter and not the book's constant, which is a correctness
+     * fix rather than tidiness.</b> {@code CoreBankingReconciliation.over} refuses a line stamped
+     * with another period — "C-14 compares one period against the same period" — so a line
+     * hard-coded to the seed period would make both the close and the reconciliation report throw
+     * the first time {@code lastRun} held a second period. Found in review, before there was a
+     * second period to find it with.
      */
-    private List<ContractualLegInterest> contractualLegLines(Completed completed) {
+    private List<ContractualLegInterest> contractualLegLines(Completed completed, int periodId) {
         List<ContractualLegInterest> lines = new ArrayList<>();
         for (ContractResult result : completed.aggregate().results()) {
             if (result.isComputed()) {
-                lines.add(new ContractualLegInterest(result.contractId(), Seed.PERIOD_ID,
+                lines.add(new ContractualLegInterest(result.contractId(), periodId,
                     book.holding(result.contractId())
                         .orElseThrow()
                         .state()

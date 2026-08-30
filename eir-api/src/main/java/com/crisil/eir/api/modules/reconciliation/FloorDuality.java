@@ -10,6 +10,7 @@ import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Stage;
 import java.util.ArrayList;
+import java.util.Currency;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -55,10 +56,15 @@ public final class FloorDuality {
     /**
      * The basis {@link FloorApplication#apply} is reached with when the caller states none.
      *
-     * <p>It changes nothing that is published. {@code apply} needs a basis to build a record, the
-     * reported provision is the greater of the accounting figure and the floor regardless of it,
-     * and PF-1 is a statement about that pair only. What the basis governs is PF-2, and PF-2 is not
-     * published on this path — see the class javadoc.
+     * <p><b>It changes no figure, and it must not reach a response.</b> {@code apply} needs a basis
+     * to build a record; the reported provision is the greater of the accounting figure and the
+     * floor regardless of it, and PF-1 is a statement about that pair only. What the basis governs
+     * is PF-2. But the record {@code apply} returns carries this constant on {@code basis()}, inside
+     * {@code describe()} and as a fully-formed PF-2 result on {@code invariants()} — so
+     * {@link Exposure} lifts the figures off it and holds the <em>stated</em> basis instead, and
+     * this constant does not leave the file. Getting that wrong published
+     * {@code "basisApplied":"ACCOUNT"} beside {@code "floorBasisStated":false}; the test that now
+     * catches it is {@code thePlaceholderBasisDoesNotLeak}.
      */
     private static final FloorBasis UNSTATED = FloorBasis.ACCOUNT;
 
@@ -79,30 +85,59 @@ public final class FloorDuality {
     }
 
     /**
-     * One exposure's duality.
+     * One exposure's duality: the figures the evaluator published, and nothing it inferred.
      *
-     * @param contractId       the exposure
-     * @param stage            the stage the ECL engine put it in
-     * @param eclEngineVersion which ECL model measured the pre-floor figure; 04 § 2.9 requires it
-     *                         to travel with the figure, and a provision whose model is unnamed is
-     *                         one no replay can reproduce
-     * @param application      the floor application, holding both figures and their divergence
-     * @param preFloorRetained PF-1 over the pair; see the class javadoc on why it cannot fail here
-     * @param basisPermitted   PF-2, or {@code null} where the caller stated no basis
+     * <p><b>Why the {@link FloorApplication} itself is not a field.</b> Where the caller states no
+     * basis, {@link FloorApplication#apply} still has to be reached with one, and the record it
+     * returns then carries {@link #UNSTATED} on {@code basis()}, inside {@code describe()}, and as
+     * a fully-formed PF-2 result on {@code invariants()}. Holding that record and letting readers
+     * help themselves is how a placeholder reaches a response, and it did: the first version of
+     * this class published {@code "basisApplied":"ACCOUNT"} on every row of a response that also
+     * said {@code "floorBasisStated":false} and carried a caveat calling a defaulted basis a
+     * control asserted over a fabricated input. So the figures are lifted off the application here
+     * and the placeholder does not leave this file. {@code basisStated} is the basis the
+     * <em>caller</em> stated, or null.
+     *
+     * @param contractId            the exposure
+     * @param stage                 the stage the ECL engine put it in
+     * @param eclEngineVersion      which ECL model measured the pre-floor figure; 04 § 2.9 requires
+     *                              it to travel with the figure, and a provision whose model is
+     *                              unnamed is one no replay can reproduce
+     * @param preFloorAccountingEcl the EIR-derived figure, retained verbatim
+     * @param regulatoryFloor       the ACPIR 90 floor; nil throughout on this book
+     * @param reportedProvision     what is reported: the greater of the two, from the evaluator
+     * @param flooredBy             the ACPIR 90 divergence, from the evaluator
+     * @param floorBinds            whether the floor raised the reported figure
+     * @param basisStated           the basis the caller stated, or {@code null}
+     * @param preFloorRetained      PF-1 over the pair; see the class javadoc on why it cannot fail
+     * @param basisPermitted        PF-2, or {@code null} where the caller stated no basis
      */
     public record Exposure(
         String contractId,
         Stage stage,
         String eclEngineVersion,
-        FloorApplication application,
+        Money preFloorAccountingEcl,
+        Money regulatoryFloor,
+        Money reportedProvision,
+        Money flooredBy,
+        boolean floorBinds,
+        FloorBasis basisStated,
         InvariantResult preFloorRetained,
         InvariantResult basisPermitted) {
 
         public Exposure {
             Objects.requireNonNull(contractId, "contractId");
             Objects.requireNonNull(stage, "stage");
-            Objects.requireNonNull(application, "application");
+            Objects.requireNonNull(preFloorAccountingEcl, "preFloorAccountingEcl");
+            Objects.requireNonNull(regulatoryFloor, "regulatoryFloor");
+            Objects.requireNonNull(reportedProvision, "reportedProvision");
+            Objects.requireNonNull(flooredBy, "flooredBy");
             Objects.requireNonNull(preFloorRetained, "preFloorRetained");
+        }
+
+        /** Whether a floor was supplied for this exposure at all. */
+        public boolean regulatoryFloorSupplied() {
+            return !regulatoryFloor.isZero();
         }
     }
 
@@ -158,7 +193,9 @@ public final class FloorDuality {
 
             exposures.add(new Exposure(
                 result.contractId(), opening.stage(), opening.eclEngineVersion(),
-                application, preFloorRetained, basisPermitted));
+                application.accountingEcl(), application.regulatoryFloor(),
+                application.reportedProvision(), application.flooredBy(),
+                application.floorBinds(), basis, preFloorRetained, basisPermitted));
         }
 
         return new FloorDuality(
@@ -195,20 +232,53 @@ public final class FloorDuality {
         return statedBasis;
     }
 
+    /**
+     * The currency these exposures are denominated in.
+     *
+     * <p>Read off the population being summed rather than assumed to be INR. Every total below
+     * seeds with it, because {@code Money.plus} refuses to add across currencies — correctly — and
+     * a total seeded with the wrong one turns a mixed-currency book into a 500 on a report instead
+     * of a report. INR only where there is nothing to sum, so that an empty population still
+     * produces a well-formed answer rather than throwing on the way to saying it is empty.
+     */
+    public Currency currency() {
+        return exposures.isEmpty()
+            ? Money.INR
+            : exposures.getFirst().preFloorAccountingEcl().currency();
+    }
+
+    /**
+     * Whether any exposure carries an ACPIR 90 floor at all.
+     *
+     * <p><b>Derived, never asserted by the renderer.</b> This is false on this book because the
+     * floor is nil on every row, and the response's "the two columns are equal because nothing was
+     * floored" caveat hangs off it. A renderer that hardcoded {@code false} would keep saying so —
+     * and keep printing the caveat — on the first period a floor is actually supplied, while the
+     * columns beside it diverged.
+     */
+    public boolean regulatoryFloorSupplied() {
+        for (Exposure exposure : exposures) {
+            if (exposure.regulatoryFloorSupplied()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** The pre-floor total: the accounting ECL measured at the EIR, summed. */
     public Money totalAccountingEcl() {
-        Money total = Money.zero(Money.INR);
+        Money total = Money.zero(currency());
         for (Exposure exposure : exposures) {
-            total = total.plus(exposure.application().accountingEcl());
+            total = total.plus(exposure.preFloorAccountingEcl());
         }
         return total;
     }
 
     /** The post-floor total: what is reported, summed. */
     public Money totalReportedProvision() {
-        Money total = Money.zero(Money.INR);
+        Money total = Money.zero(currency());
         for (Exposure exposure : exposures) {
-            total = total.plus(exposure.application().reportedProvision());
+            total = total.plus(exposure.reportedProvision());
         }
         return total;
     }
@@ -221,9 +291,9 @@ public final class FloorDuality {
      * measurement PF-2 exists to forbid.
      */
     public Money totalFlooredBy() {
-        Money total = Money.zero(Money.INR);
+        Money total = Money.zero(currency());
         for (Exposure exposure : exposures) {
-            total = total.plus(exposure.application().flooredBy());
+            total = total.plus(exposure.flooredBy());
         }
         return total;
     }
@@ -232,7 +302,7 @@ public final class FloorDuality {
     public int bindingCount() {
         int binding = 0;
         for (Exposure exposure : exposures) {
-            if (exposure.application().floorBinds()) {
+            if (exposure.floorBinds()) {
                 binding++;
             }
         }

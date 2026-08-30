@@ -240,6 +240,30 @@ class ReconciliationReportsModuleTest {
                 .contains("\"differenceWorking\":\"-36059.88489512004800\"");
         }
 
+        /**
+         * The two portfolio sides are summed here from the evaluator's own per-account figures,
+         * and {@code RunClose.sumOf} computes the same pair privately for the close gate's tie.
+         * This is what bounds that duplication: the published sides must differ by exactly the
+         * difference SL-1 itself reports, so a sum that stopped agreeing with the evaluator fails
+         * a test rather than reaching a report.
+         */
+        @Test
+        @DisplayName("the two published sides differ by exactly the difference SL-1 reports")
+        void theTwoSidesAgreeWithTheEvaluatorsOwnDifference() throws IOException {
+            rollThePeriodForward();
+
+            String body = get(GL).body();
+
+            // 1,020,754.76 − 1,056,814.64 = −36,059.88, which is the account line's difference and
+            // (absolute) SL-1's deviation. All three are asserted so none can drift alone.
+            assertThat(body)
+                .contains("\"subLedgerTotal\":\"" + SUB_LEDGER_TWO_CONTRACTS + "\"")
+                .contains("\"glTotal\":\"" + GL_OPENING_TWO_CONTRACTS + "\"")
+                .contains("\"difference\":\"-" + SL_ONE_BREAK + "\"")
+                .contains("\"unexplainedTotal\":\"" + SL_ONE_BREAK + "\"")
+                .contains("\"deviation\":\"" + SL_ONE_BREAK + "\"");
+        }
+
         @Test
         @DisplayName("after posting, the account ties and the source reference moves with it")
         void greenOnceTheJournalsArePosted() throws IOException {
@@ -462,7 +486,10 @@ class ReconciliationReportsModuleTest {
                 .as("one S3-1 per suppressed contract, and this book has one such contract")
                 .isEqualTo(1);
             assertThat(body)
-                .contains("\"totalAbsoluteResidual\":\"0\"")
+                // At presentation scale, like every other figure in the response: a portfolio
+                // total rendered at working precision beside per-leg residuals at two places
+                // visibly fails to add up to the rows above it.
+                .contains("\"totalAbsoluteResidual\":\"0.00\"")
                 .contains("It is not a fifth S3-1")
                 .as("the total must be absolute, or two contracts broken in opposite directions"
                     + " net to a reconciled period")
@@ -546,6 +573,31 @@ class ReconciliationReportsModuleTest {
                 .contains("\"basisPermitted\":null")
                 .contains("PF-2 is NOT asserted")
                 .doesNotContain("\"id\":\"PF-2\"");
+        }
+
+        /**
+         * {@code FloorApplication.apply} cannot be reached without a basis, so an unstated one is
+         * reached with a placeholder — and the record it returns then carries that placeholder on
+         * {@code basis()}, inside {@code describe()} and as a PF-2 result. Publishing any of them
+         * told a reader the ACPIR 90 floor had been applied account by account on a Stage 3
+         * exposure, in the same response that said no basis was stated. Found in review.
+         */
+        @Test
+        @DisplayName("the placeholder basis apply() is reached with never reaches the response")
+        void thePlaceholderBasisDoesNotLeak() throws IOException {
+            rollThePeriodForward();
+
+            Response response = get(FLOOR);
+
+            assertThat(response.body())
+                .as("a basis nobody stated must not appear as a basis the floor was applied on")
+                .contains("\"basisApplied\":null")
+                .doesNotContain("\"basisApplied\":\"ACCOUNT\"")
+                .doesNotContain("on a ACCOUNT basis")
+                .doesNotContain("on a PORTFOLIO basis");
+            // The stated case still publishes it, or the field would be useless.
+            assertThat(get(FLOOR + "&basis=ACCOUNT").body())
+                .contains("\"basisApplied\":\"ACCOUNT\"");
         }
 
         /**

@@ -343,7 +343,11 @@ public final class ReconciliationReportsModule implements ApiModule {
             .count("contractsWithRecognitionSuppressed", suppressed)
             .count("fourWaysReconciling", reconciliations.stageThreeReconciling())
             .count("fourWaysBroken", suppressed - reconciliations.stageThreeReconciling())
-            .figure("totalAbsoluteResidual", reconciliations.stageThreeTotalAbsoluteResidual())
+            .str("currency", reconciliations.currency().getCurrencyCode())
+            .figure("totalAbsoluteResidual",
+                presented(reconciliations.stageThreeTotalAbsoluteResidual()))
+            .figure("totalAbsoluteResidualWorking",
+                reconciliations.stageThreeTotalAbsoluteResidual().amount())
             .array("contracts", rows)
             .obj("population", population(published.get().aggregate()))
             .strings("caveats", withPopulationCaveat(published.get().aggregate(), List.of(
@@ -403,15 +407,18 @@ public final class ReconciliationReportsModule implements ApiModule {
                 .str("contractId", exposure.contractId())
                 .str("stage", exposure.stage().name())
                 .str("eclEngineVersion", exposure.eclEngineVersion())
-                .figure("preFloorAccountingEcl",
-                    presented(exposure.application().accountingEcl()))
-                .figure("regulatoryFloor", presented(exposure.application().regulatoryFloor()))
-                .figure("postFloorReportedProvision",
-                    presented(exposure.application().reportedProvision()))
-                .figure("flooredBy", presented(exposure.application().flooredBy()))
-                .bool("floorBinds", exposure.application().floorBinds())
-                .str("basisApplied", exposure.application().basis().name())
-                .str("duality", exposure.application().describe())
+                .figure("preFloorAccountingEcl", presented(exposure.preFloorAccountingEcl()))
+                .figure("regulatoryFloor", presented(exposure.regulatoryFloor()))
+                .figure("postFloorReportedProvision", presented(exposure.reportedProvision()))
+                .figure("flooredBy", presented(exposure.flooredBy()))
+                .bool("floorBinds", exposure.floorBinds())
+                .bool("regulatoryFloorSupplied", exposure.regulatoryFloorSupplied())
+                // Null where the caller stated no basis, and NOT the placeholder FloorApplication
+                // had to be reached with. Publishing that placeholder told a reader the ACPIR 90
+                // floor had been applied account by account on a Stage 3 exposure in the same
+                // response that said no basis was stated — see FloorDuality.Exposure.
+                .str("basisApplied", exposure.basisStated() == null
+                    ? null : exposure.basisStated().name())
                 .obj("preFloorRetained", invariant(exposure.preFloorRetained()));
             // Present only when the caller stated the basis. A PF-2 row over a basis this module
             // chose would be a control asserted about its own default.
@@ -421,7 +428,11 @@ public final class ReconciliationReportsModule implements ApiModule {
         }
 
         return header("PF-1", periodId, "the pre-/post-floor duality", published.get())
-            .bool("regulatoryFloorSupplied", false)
+            .str("currency", duality.currency().getCurrencyCode())
+            // Derived from the exposures, never asserted here. A hardcoded false would keep
+            // saying so — and keep printing the equal-columns caveat below — on the first period
+            // a floor is actually supplied, while the two columns diverged.
+            .bool("regulatoryFloorSupplied", duality.regulatoryFloorSupplied())
             .bool("floorBasisStated", duality.basisStated())
             .str("floorBasisStatedAs",
                 duality.basisStated() ? duality.statedBasis().name() : null)
@@ -438,11 +449,19 @@ public final class ReconciliationReportsModule implements ApiModule {
             .strings("exposuresWithoutStateOnFile", duality.exposuresWithoutState())
             .obj("population", population(published.get().aggregate()))
             .strings("caveats", withPopulationCaveat(published.get().aggregate(), List.of(
-                "NO regulatory floor is supplied by this book, so the floor is nil on every"
-                    + " exposure and the pre-floor and post-floor columns hold the same figure."
-                    + " A nil-against-nil duality reads as tied on every run ever made, which is"
-                    + " why RunClose refuses to synthesise the pre-/post-floor tie. Do not read"
-                    + " these equal columns as agreement — nothing was floored.",
+                // Conditional on the exposures, not on the book: the day a floor arrives, this
+                // caveat is false and a caveat that keeps printing after it stops being true is a
+                // caveat nobody reads.
+                duality.regulatoryFloorSupplied()
+                    ? "A regulatory floor IS supplied on at least one exposure, so the two columns"
+                        + " are a real duality: totalFlooredBy is the ACPIR 90 divergence, and"
+                        + " flooredBy on each row is the amount that exposure was raised by."
+                    : "NO regulatory floor is supplied by this book, so the floor is nil on every"
+                        + " exposure and the pre-floor and post-floor columns hold the same"
+                        + " figure. A nil-against-nil duality reads as tied on every run ever"
+                        + " made, which is why RunClose refuses to synthesise the pre-/post-floor"
+                        + " tie. Do not read these equal columns as agreement — nothing was"
+                        + " floored.",
                 "PF-1 here is asserted over a pair this report computed, so it cannot go red."
                     + " preFloorRetained becomes a real control the moment a reported provision is"
                     + " read back from a store rather than from the arithmetic that produced it —"

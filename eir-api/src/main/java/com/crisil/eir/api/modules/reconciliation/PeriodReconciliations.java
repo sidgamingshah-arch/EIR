@@ -194,9 +194,20 @@ public final class PeriodReconciliations {
      * Signed netting is what would let a contract broken one way and a contract broken the other
      * report a reconciled period, which is the classic way this control passes while being broken
      * twice.
+     *
+     * <p><b>Returned as {@link Money} and not as a bare {@link BigDecimal},</b> so that the report
+     * can reduce it to presentation scale exactly once, the way every other figure in these four
+     * responses is reduced. An {@code InvariantResult}'s deviation is a plain decimal at working
+     * precision; published raw beside per-leg residuals at two places, a broken period's portfolio
+     * total renders at twelve decimals and visibly fails to add up to the rows above it.
      */
-    public BigDecimal stageThreeTotalAbsoluteResidual() {
-        return EirService.totalDeviation(stageThreeResults());
+    public Money stageThreeTotalAbsoluteResidual() {
+        return Money.of(EirService.totalDeviation(stageThreeResults()), currency());
+    }
+
+    /** The currency the reconciliations are in, as the GL side reported it. */
+    public Currency currency() {
+        return subLedgerToGl.currency();
     }
 
     /** How many of the four-ways reconcile on every leg. */
@@ -217,6 +228,16 @@ public final class PeriodReconciliations {
      * balances handed in, for the reason {@code RunClose.sumOf} states: a tie reported as
      * "difference nil" and a tie reported as "1,056,814.64 against 1,056,814.64" are the same fact
      * and only the second lets a reader see the magnitude being reconciled.
+     *
+     * <p><b>A known duplication, recorded rather than hidden.</b> {@code RunClose.sumOf} computes
+     * the same two sides for the close gate's {@code SUBLEDGER_TO_GL} tie, privately, so this is
+     * the second implementation of one sum. It cannot be shared from here — the method is private
+     * in another module, and {@link GlReconciliation} publishes its explained, unexplained and
+     * self-reversing totals but not the two raw sides. The right fix is a pair of accessors on
+     * {@code GlReconciliation}, which is another unit's file. Until then the drift is bounded by a
+     * test: {@code ReconciliationReportsModuleTest} asserts that the two sides published here
+     * differ by exactly the difference SL-1 itself reports, so a sum that stopped agreeing with the
+     * evaluator fails rather than reaching a report.
      *
      * @param subLedgerSide true for the sub-ledger's total, false for the general ledger's
      */
