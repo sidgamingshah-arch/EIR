@@ -19,27 +19,27 @@ import java.util.Objects;
  *
  * <p>Specification: {@code docs/06-api-spec.md} 06 § 2.3.
  */
-public final class TraceModule implements ApiModule {{
+public final class TraceModule implements ApiModule {
 
     private final EirService service;
 
-    public TraceModule(EirService service) {{
+    public TraceModule(EirService service) {
         this.service = Objects.requireNonNull(service, "service");
-    }}
+    }
 
     /** The engine this module reads through. Protected from an unused-field warning while stubbed. */
-    protected EirService service() {{
+    protected EirService service() {
         return service;
-    }}
+    }
 
     @Override
-    public void register(Routes routes) {{
+    public void register(Routes routes) {
         Objects.requireNonNull(routes, "routes");
         // Nothing yet. See the class javadoc.
-    }}
+    }
 
     @Override
-    public String specSection() {{
+    public String specSection() {
         return "06 § 2.3";
-    }}
-}}
+    }
+}
