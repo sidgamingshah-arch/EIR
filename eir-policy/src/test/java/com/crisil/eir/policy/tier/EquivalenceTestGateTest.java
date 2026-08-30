@@ -353,6 +353,82 @@ class EquivalenceTestGateTest {
         }
 
         @Test
+        @DisplayName("two same-day tests that both PASS resolve on headroom, not on list order")
+        void sameDayPassesResolveOnHeadroom() {
+            // The defect this pins. governingTest broke a same-day tie on
+            // excessOverThresholdBps(), which CLAMPS AT ZERO -- so two duplicates that both sat
+            // inside the tolerance each reported nil excess, compared equal, supersedes() returned
+            // false, and the governing test became whichever the register happened to list first.
+            //
+            // That is a laundering route, not a tidiness problem: re-record a test on the same day
+            // with a better delta and it takes effect purely by landing later in the list. The
+            // tie-break exists to close exactly that, and on the clamped figure it did not.
+            //
+            // Both tests below are on a 25 bp tolerance and both pass. Derived by hand: solved
+            // 8.24% against approximated 8.00% is a delta of 24 bps, headroom +1; solved 8.05% is a
+            // delta of 5 bps, headroom +20. The less favourable test -- 1 bp of room -- must govern
+            // whichever order the register lists them in.
+            LocalDate sameDay = LocalDate.of(2027, 6, 30);
+            EquivalenceTestRecord tight = test(WCDL, sameDay, "0.0824", "25");
+            EquivalenceTestRecord loose = test(WCDL, sameDay, "0.0805", "25");
+
+            assertThat(tight.excessOverThresholdBps())
+                .as("both clamp to nil excess, which is why the old comparison could not separate"
+                    + " them")
+                .isEqualByComparingTo(loose.excessOverThresholdBps());
+
+            for (List<EquivalenceTestRecord> order
+                : List.of(List.of(tight, loose), List.of(loose, tight))) {
+                assertThat(EquivalenceTestGate.of(order).governingTest(WCDL, MARCH_2028)
+                    .absoluteDeltaBps())
+                    .as("listed as %s, the less favourable test must still govern",
+                        order == null ? "?" : order.indexOf(tight) == 0 ? "tight first"
+                            : "loose first")
+                    .isEqualByComparingTo(new BigDecimal("24"));
+            }
+        }
+
+        @Test
+        @DisplayName("a same-day breach still beats a same-day pass")
+        void sameDayBreachBeatsAPass() {
+            // The case the clamped comparison did get right, kept so that the fix cannot regress
+            // it. Solved 8.60% against approximated 8.00% is 60 bps against a 25 bp tolerance:
+            // headroom −35, a breach. The pass has +20. Less headroom governs.
+            LocalDate sameDay = LocalDate.of(2027, 6, 30);
+            EquivalenceTestGate gate = EquivalenceTestGate.of(List.of(
+                test(WCDL, sameDay, "0.0805", "25"),
+                test(WCDL, sameDay, "0.086", "25")));
+
+            assertThat(gate.governingTest(WCDL, MARCH_2028).isWithinThreshold())
+                .as("re-recording a failed test on the same day with a better delta must not"
+                    + " launder it")
+                .isFalse();
+            assertThat(gate.evaluate(wcdl(), MARCH_2028).effectiveTier())
+                .as("and the breach demotes, which is the consequence that matters")
+                .isEqualTo(MaterialityTier.TIER_2);
+        }
+
+        @Test
+        @DisplayName("headroom is measured against each record's own threshold, not a bare delta")
+        void headroomIsAgainstEachRecordsOwnThreshold() {
+            // Why the comparison is on headroom rather than on absoluteDeltaBps: the Board
+            // tolerance can be re-approved between two tests of one population. A 30 bp delta
+            // inside a 50 bp tolerance (headroom +20) is more favourable than a 10 bp delta inside
+            // a 5 bp one (headroom −5, a breach) -- comparing raw deltas would invert that.
+            LocalDate sameDay = LocalDate.of(2027, 6, 30);
+            EquivalenceTestGate gate = EquivalenceTestGate.of(List.of(
+                test(WCDL, sameDay, "0.083", "50"),
+                test(WCDL, sameDay, "0.081", "5")));
+
+            EquivalenceTestRecord governing = gate.governingTest(WCDL, MARCH_2028);
+            assertThat(governing.absoluteDeltaBps())
+                .as("the SMALLER delta governs, because it is the one that breaches its own"
+                    + " threshold")
+                .isEqualByComparingTo(new BigDecimal("10"));
+            assertThat(governing.isWithinThreshold()).isFalse();
+        }
+
+        @Test
         @DisplayName("a test dated after the reporting date cannot evidence that close")
         void postdatedTestIsRefused() {
             // Admitting it would breach DT-1 in the most confusing way available: a replay of

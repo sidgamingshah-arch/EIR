@@ -5,6 +5,7 @@ import com.crisil.eir.application.ContractResult;
 import com.crisil.eir.application.run.ContractComputation;
 import com.crisil.eir.application.run.RunAggregate;
 import com.crisil.eir.calc.amort.AmortisationRow;
+import com.crisil.eir.domain.InvariantId;
 import com.crisil.eir.domain.Money;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -169,24 +170,32 @@ public record MovementSchedule(
      */
     public static final Money RESIDUE_BOUND_PER_CONTRACT = Money.inr("0.02");
 
-    /** The name the columns-sum check publishes under. See {@link #INVARIANT_ID_REQUESTED}. */
-    public static final String CHECK_NAME = "MOVEMENT-COLUMNS-SUM";
+    /**
+     * The name the columns-sum check publishes under: {@link InvariantId#MV_1}'s own name.
+     *
+     * <p>Was the bare string {@code MOVEMENT-COLUMNS-SUM}, because {@code InvariantId} carried no id
+     * for this control and {@code eir-domain} was another unit's file to change. The id now exists,
+     * so the check publishes under it rather than beside it — which is what lets a run-level
+     * aggregator see a movement break at all. A control publishing under a name no aggregator knows
+     * is visible only to whoever reads this one endpoint.
+     */
+    public static final String CHECK_NAME = InvariantId.MV_1.name();
 
     /** How many legs the check has. Fixed, because {@code Check.columnsSum()} reads leg 1. */
     public static final int LEGS = 4;
 
     /**
-     * The invariant id this check wants and does not have.
+     * The statement {@link InvariantId#MV_1} carries, for the response to publish alongside the id.
      *
-     * <p>{@code InvariantId} carries no id for the movement schedule's columns, and no existing id
-     * fits: SL-2 is a journal's two sides, S3-1 is the Stage 3 four-way, ST-2 is the decomposition
-     * against the ledger. Publishing under one of those would give a named invariant a second claim,
-     * and {@code InvariantResult.conjunction} keeps only the FIRST breach's deviation among results
-     * sharing an id — so a movement break and a journal break under one id would report one
-     * deviation and hide the other. So the check publishes under this name as a string, the
-     * response says so, and the id is requested rather than borrowed.
+     * <p>This constant used to be named {@code INVARIANT_ID_REQUESTED} and held the id this check
+     * wanted and did not have. No existing id fitted: SL-2 is a journal's two sides, S3-1 is the
+     * Stage 3 four-way, ST-2 is the decomposition against the ledger, and publishing under any of
+     * them would give a named invariant a second claim — {@code InvariantResult.conjunction} keeps
+     * only the FIRST breach's deviation among results sharing an id, so a movement break and a
+     * journal break filed together would report one deviation and drop the other. MV-1 now exists
+     * and this holds its statement.
      */
-    public static final String INVARIANT_ID_REQUESTED = "MV_1(\"movement schedule columns sum\")";
+    public static final String INVARIANT_STATEMENT = InvariantId.MV_1.statement();
 
     public MovementSchedule {
         Objects.requireNonNull(runId, "runId");
@@ -326,8 +335,8 @@ public record MovementSchedule(
     }
 
     /**
-     * The published check: one result, the shape {@code InvariantResult} would have if
-     * {@link MovementSchedule#INVARIANT_ID_REQUESTED} existed.
+     * The published check: one result, in the shape {@code InvariantResult} carries, under
+     * {@link InvariantId#MV_1}.
      *
      * @param proves whether the check proves anything — false over an empty scope, where a pass is
      *               a statement about no figures. The distinction {@code ReplayVerification} draws
@@ -876,9 +885,10 @@ public record MovementSchedule(
                 + " which is the sub-ledger figure SL-1 ties to. On the seed book they are"
                 + " 1,020,754.75 and 1,020,754.76; aggregationResidue is the difference, and it is"
                 + " presentation aggregation rather than a break.",
-            "The columns-sum check has no InvariantId. It publishes under the name "
-                + CHECK_NAME + " and asks for " + INVARIANT_ID_REQUESTED + "; borrowing SL-2 or"
-                + " S3-1 would give a named invariant a second claim, and"
+            "The columns-sum check publishes under InvariantId." + CHECK_NAME + " — \""
+                + INVARIANT_STATEMENT + "\" — which is its own id and not a borrowed one. It had"
+                + " none when this report was built and published under a bare string; borrowing"
+                + " SL-2 or S3-1 instead would have given a named invariant a second claim, and"
                 + " InvariantResult.conjunction keeps only the first breach's deviation among"
                 + " results sharing an id.");
     }

@@ -683,24 +683,32 @@ class MovementReportModuleTest {
     }
 
     @Nested
-    @DisplayName("the check has no invariant id, and says so")
-    class TheMissingInvariantId {
+    @DisplayName("the check publishes under InvariantId.MV_1")
+    class TheInvariantId {
 
         @Test
-        @DisplayName("the response names the id it wants rather than borrowing one")
-        void theResponseAsksForAnId() throws IOException {
+        @DisplayName("the check publishes under its own id, MV-1, and not a borrowed one")
+        void theCheckPublishesUnderItsOwnId() throws IOException {
             post("/api/run", "");
 
             String body = get("/api/reports/movement?period=202805").body();
 
-            // InvariantId belongs to another unit. Borrowing SL-2 or S3-1 would give a named
-            // invariant a second claim, and InvariantResult.conjunction keeps only the FIRST
-            // breach's deviation among results sharing an id — so a movement break and a journal
-            // break under one id would report one deviation and hide the other.
+            // This test asserted the ABSENCE of an id -- "no InvariantId", plus the name the check
+            // was asking for -- because InvariantId was another unit's file while this report was
+            // being built. The id now exists and the check publishes under it. What must not happen
+            // is publishing under SL-2 or S3-1: that would give a named invariant a second claim,
+            // and InvariantResult.conjunction keeps only the FIRST breach's deviation among results
+            // sharing an id, so a movement break and a journal break filed together would report
+            // one deviation and drop the other.
             assertThat(body)
-                .contains("\"id\":\"MOVEMENT-COLUMNS-SUM\"")
-                .contains("no InvariantId")
-                .contains("MV_1");
+                .contains("\"id\":\"MV_1\"")
+                .contains("movement schedule columns sum")
+                .doesNotContain("no InvariantId");
+            assertThat(body)
+                .as("no other invariant's id may appear on this check")
+                .doesNotContain("\"id\":\"SL_2\"")
+                .doesNotContain("\"id\":\"S3_1\"")
+                .doesNotContain("\"id\":\"ST_2\"");
             assertThat(body)
                 .as("the four legs are each reported, so a reader sees which one broke")
                 .contains("\"legs\":4")

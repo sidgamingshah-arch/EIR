@@ -35,32 +35,61 @@ public final class Json {
     public static final class Obj {
         private final Map<String, String> fields = new LinkedHashMap<>();
 
+        /**
+         * Records one field, and refuses a key this object already carries.
+         *
+         * <p><b>Why this throws rather than overwriting.</b> {@code fields.put} took the second
+         * value silently, and a review found a response that assembled a {@code cohortCount} in one
+         * branch and again in another: the first figure was gone from the wire with nothing said,
+         * and the endpoint reported a count it had computed and then discarded. That failure is
+         * invisible in every test that asserts on the surviving value — which is the shape of defect
+         * this codebase keeps finding — and it is worse here than in a general JSON library, because
+         * the values being overwritten are control figures and refusal reasons.
+         *
+         * <p>An {@link IllegalStateException} rather than a refusal value, because there is no
+         * caller who can compensate: a handler that names one key twice is a defect in the handler,
+         * not a fact about the book, and 06's convention reserves 500 for exactly that. Insertion
+         * order is untouched, which several assertions depend on.
+         *
+         * <p>To replace a field deliberately, build the object with the value you mean. There is no
+         * overwrite method on purpose: the one legitimate use — a conditional field — is expressed
+         * by choosing the value before the call, and an overwrite method would give the silent
+         * behaviour a name and let it back in.
+         */
+        private Obj set(String key, String rendered) {
+            Objects.requireNonNull(key, "key");
+            String existing = fields.putIfAbsent(key, rendered);
+            if (existing != null) {
+                throw new IllegalStateException(
+                    "field \"" + key + "\" is already set on this object to " + existing
+                        + " and would be silently replaced by " + rendered
+                        + "; a response that names one key twice publishes one of the two figures"
+                        + " and discards the other with nothing said");
+            }
+            return this;
+        }
+
         /** A string-valued field; the value is escaped. Null becomes JSON null. */
         public Obj str(String key, String value) {
-            fields.put(key, value == null ? "null" : quote(value));
-            return this;
+            return set(key, value == null ? "null" : quote(value));
         }
 
         /** A figure. Emitted as a JSON string — see the class javadoc for why. */
         public Obj figure(String key, BigDecimal value) {
-            fields.put(key, value == null ? "null" : quote(value.toPlainString()));
-            return this;
+            return set(key, value == null ? "null" : quote(value.toPlainString()));
         }
 
         /** A count. The only numbers this API emits as JSON numbers. */
         public Obj count(String key, int value) {
-            fields.put(key, Integer.toString(value));
-            return this;
+            return set(key, Integer.toString(value));
         }
 
         public Obj bool(String key, boolean value) {
-            fields.put(key, Boolean.toString(value));
-            return this;
+            return set(key, Boolean.toString(value));
         }
 
         public Obj obj(String key, Obj value) {
-            fields.put(key, value == null ? "null" : value.toString());
-            return this;
+            return set(key, value == null ? "null" : value.toString());
         }
 
         /** An array of objects. */
@@ -69,8 +98,7 @@ public final class Json {
             for (Obj value : values) {
                 rendered.add(value.toString());
             }
-            fields.put(key, "[" + String.join(",", rendered) + "]");
-            return this;
+            return set(key, "[" + String.join(",", rendered) + "]");
         }
 
         /** An array of strings, each escaped. */
@@ -79,8 +107,7 @@ public final class Json {
             for (String value : values) {
                 rendered.add(quote(value));
             }
-            fields.put(key, "[" + String.join(",", rendered) + "]");
-            return this;
+            return set(key, "[" + String.join(",", rendered) + "]");
         }
 
         @Override

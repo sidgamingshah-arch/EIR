@@ -192,6 +192,74 @@ class EirServerTest {
         }
 
         @Test
+        @DisplayName("a Tier 3 proposal with no equivalence test on file is demoted, and says so")
+        void aTierThreeProposalWithNoTestIsDemotedAndReported() throws IOException {
+            // FR-411/FR-412 through HTTP, and the defect this pins is the one a review found in
+            // this very method: EirService called InitialRecognition.onboard(), which returns the
+            // disposition alone and DROPS the TierPermission. So the gate ran, NO_TEST_ON_FILE
+            // demoted the contract to Tier 2, the solve used Tier 2's tolerance -- and the response
+            // said nothing at all about a tier, leaving a caller to assume the Tier 3 shortcut it
+            // had asked for. That is the Cambodia failure mode arriving through a dropped return
+            // value rather than through a decision, and Case 9 measures the cost of the shortcut
+            // taken without a test at 81.0% year-one income overstatement on a zero-coupon.
+            //
+            // Twelve periods, so 03 § 10's short-tenor row proposes Tier 3. The service's register
+            // is EquivalenceTestGate.empty() -- a real register with nothing in it -- so no test is
+            // on file and the only lawful answer is a demotion with an exception raised.
+            Response response = post("/api/onboard",
+                "contractId=C-0110&principal=2000000.00&rate=0.010000000000"
+                    + "&termPeriods=12&feeCode=PROC_FEE&feeAmount=20000.00");
+
+            assertThat(response.status()).isEqualTo(200);
+            assertThat(response.body())
+                .as("the proposal and the measurement are different facts and both must be on the"
+                    + " response: reporting only the effective tier loses which § 10 row proposed"
+                    + " Tier 3, which is what a Board reviewing the refusals needs")
+                .contains("\"tierProposed\":\"TIER_3\"")
+                .contains("\"tierMeasured\":\"TIER_2\"")
+                .contains("\"tierDemoted\":true")
+                .contains("\"tierGateConsulted\":true");
+            assertThat(response.body())
+                .as("a demotion that raised no exception is a control nobody has to clear, and it"
+                    + " must block the close: 03 § 10.2's consequence is a more expensive basis,"
+                    + " not a stop, so nothing else would ever surface it")
+                .contains("\"category\":\"STALE_EQUIVALENCE_TEST\"")
+                .contains("no equivalence test on file")
+                .contains("\"blocksClose\":true");
+            assertThat(response.body())
+                .as("the population the permission was judged at, which is productId:segment per"
+                    + " the recorded decision -- a caller cannot obtain the test without it")
+                .contains("\"equivalenceTestPopulation\":\"HL:RETAIL\"");
+            assertThat(response.body())
+                .as("TG-1 lives on the permission, not on the outcome, so a response reading the"
+                    + " outcome's invariant list showed a clean panel for a refused permission")
+                .contains("\"id\":\"TG-1\"")
+                .contains("\"satisfied\":false");
+        }
+
+        @Test
+        @DisplayName("a Tier 1 contract consults no gate, and TG-1 is absent rather than passing")
+        void aTierOneContractHasNoTierGateResult() throws IOException {
+            // The other half, and it is not symmetry for its own sake. TG-1 is a claim about Tier 3
+            // populations; publishing a vacuous pass for every Tier 1 and Tier 2 contract would put
+            // a green TG-1 on the overwhelming majority of the book and make a real one unfindable
+            // in a control report. Twenty-four periods, so the short-tenor row does not fire.
+            Response response = post("/api/onboard",
+                "contractId=C-0111&principal=1000000.00&rate=0.010000000000"
+                    + "&termPeriods=24&feeCode=PROC_FEE&feeAmount=15000.00");
+
+            assertThat(response.status()).isEqualTo(200);
+            assertThat(response.body())
+                .contains("\"tierDemoted\":false")
+                .contains("\"tierGateConsulted\":false")
+                .doesNotContain("STALE_EQUIVALENCE_TEST")
+                .doesNotContain("TG-1");
+            assertThat(response.body())
+                .as("and the proposal is measured, which is the point of not demoting it")
+                .contains("\"recognised\":true");
+        }
+
+        @Test
         @DisplayName("an SPPI failure is excluded, and nothing below the gate runs")
         void anSppiFailureStopsAtTheGate() throws IOException {
             Response response = post("/api/onboard",

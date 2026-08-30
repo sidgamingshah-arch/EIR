@@ -146,6 +146,28 @@ public record EquivalenceTestRecord(
         return excess.signum() > 0 ? excess : BigDecimal.ZERO;
     }
 
+    /**
+     * How much room the documented delta has left against its own approved tolerance: the
+     * threshold less the absolute delta. Negative where the test breaches.
+     *
+     * <p><b>Why this and not {@link #excessOverThresholdBps()} for ranking two tests.</b> The
+     * excess clamps at zero, so every test that passes reports the same nil excess — and a
+     * comparison on it cannot separate a population 1 bp inside a 5 bp tolerance from one 4.9 bp
+     * inside it. {@code EquivalenceTestGate.governingTest} ranks same-day duplicates by which is
+     * <em>less favourable</em>, and on the clamped figure two passing duplicates compared equal
+     * and the answer fell to whichever the register happened to list first. Headroom is the
+     * unclamped form of the same quantity and is total: it separates two passes, two breaches, and
+     * a pass from a breach, in one comparison.
+     *
+     * <p>Stated against each record's <em>own</em> threshold rather than as a bare delta, because
+     * the Board tolerance can be re-approved between two tests of one population. Comparing raw
+     * deltas across two thresholds would call a 6 bp delta under a 10 bp tolerance less favourable
+     * than a 4 bp delta under a 3 bp one, which inverts the answer.
+     */
+    public BigDecimal thresholdHeadroomBps() {
+        return boardApprovedThresholdBps.subtract(absoluteDeltaBps());
+    }
+
     /** The last date this test still permits the Tier 3 shortcut. */
     public LocalDate expiresOn() {
         return performedOn.plus(ANNUAL_WINDOW);

@@ -160,10 +160,14 @@ public final class EquivalenceTestGate {
      * register. Excluding them also means a post-dated submission cannot hide an older test
      * that is still in date: the older one is still the one that governs.
      *
-     * <p>Where two tests share a performance date, the <em>less favourable</em> one wins — the
-     * one further over its threshold. A duplicate submission is a data-quality matter this
-     * register does not adjudicate, but it must not become a way to launder a failed test by
-     * re-recording it on the same day with a better delta.
+     * <p>Where two tests share a performance date, the <em>less favourable</em> one wins — the one
+     * with less headroom against its own threshold, whether that headroom is negative (a breach) or
+     * positive (a pass with little room). A duplicate submission is a data-quality matter this
+     * register does not adjudicate, but it must not become a way to launder a test by re-recording
+     * it on the same day with a better delta. Ranked on
+     * {@link EquivalenceTestRecord#thresholdHeadroomBps()} and not on the excess over the
+     * threshold, because the excess clamps at zero and so cannot separate two passing duplicates —
+     * which left the answer to the register's list order.
      */
     public EquivalenceTestRecord governingTest(String populationId, LocalDate asOf) {
         Objects.requireNonNull(populationId, "populationId");
@@ -188,8 +192,15 @@ public final class EquivalenceTestGate {
         if (candidate.performedOn().isBefore(incumbent.performedOn())) {
             return false;
         }
-        return candidate.excessOverThresholdBps()
-            .compareTo(incumbent.excessOverThresholdBps()) > 0;
+        // Less headroom wins, which is the javadoc's "less favourable" made total. This compared
+        // excessOverThresholdBps() until a review found the excess clamps at zero: two same-day
+        // duplicates that both passed reported nil excess each, compared equal, and the governing
+        // test became whichever the register listed first -- so re-recording a test on the same day
+        // with a better delta could take effect purely by landing later in the list, which is the
+        // laundering route this tie-break exists to close. Headroom separates two passes as well as
+        // two breaches.
+        return candidate.thresholdHeadroomBps()
+            .compareTo(incumbent.thresholdHeadroomBps()) < 0;
     }
 
     /**

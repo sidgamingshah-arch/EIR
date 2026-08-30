@@ -446,7 +446,35 @@ public enum InvariantId {
      * <p>"Zero unexplained" rather than zero: a timing difference with a stated cause is
      * explained and does not breach. The deviation is the money amount that is not.
      */
-    RC_1("contractual leg ties to core banking");
+    RC_1("contractual leg ties to core banking"),
+
+    /**
+     * A published movement schedule's columns sum: opening + EIR interest − cash applied = closing,
+     * per product and in total (FR-805).
+     *
+     * <p><b>Why the movement schedule needs its own id rather than borrowing one.</b> The report is
+     * a presentation of figures other invariants already govern, so the temptation is to publish its
+     * columns check under SL-2 or ST-2. Two reasons not to. First, they are different claims: SL-2
+     * is a journal's two sides, ST-2 is the net-interest decomposition against the ledger, and this
+     * is a rendering's arithmetic — a schedule can foot perfectly on figures a broken journal
+     * produced, and a correct journal can be rendered into a schedule that does not add up.
+     * Second, and decisively: {@link InvariantResult#conjunction} keeps only the <em>first</em>
+     * breach's deviation among results sharing an id, so a movement break and a journal break filed
+     * under one id would report one deviation and silently drop the other.
+     *
+     * <p><b>What makes it fail, which is the standing requirement on any new control here.</b> A
+     * computed contract present in the run but absent from the schedule's rows: its opening and
+     * closing balances leave the totals while its interest stays, so the total column stops footing
+     * by that contract's roll-forward. That is the defect a per-product report actually has — a
+     * product bucket that silently drops a contract with no product id on file — and it is why
+     * the check reports four legs rather than one boolean.
+     *
+     * <p>Deviation is the money residue by which the columns fail to foot, presented at the
+     * schedule's own scale. Rounding is not a breach: the presented figures are each rounded to the
+     * minor unit, so four rounded figures can disagree by up to two paise per contract without
+     * anything being wrong, and the evaluator carries that bound.
+     */
+    MV_1("movement schedule columns sum");
 
     private final String statement;
 

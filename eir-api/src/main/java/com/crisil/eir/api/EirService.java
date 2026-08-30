@@ -13,6 +13,7 @@ import com.crisil.eir.application.onboarding.InitialRecognition;
 import com.crisil.eir.application.onboarding.InstrumentClass;
 import com.crisil.eir.application.onboarding.MeasurementCategory;
 import com.crisil.eir.application.onboarding.OnboardingOutcome;
+import com.crisil.eir.application.onboarding.OnboardingRecognition;
 import com.crisil.eir.application.onboarding.OnboardingRequest;
 import com.crisil.eir.application.onboarding.OnboardingWork;
 import com.crisil.eir.application.onboarding.SppiAssessment;
@@ -61,6 +62,7 @@ import com.crisil.eir.policy.close.ExceptionAcceptance;
 import com.crisil.eir.policy.close.ReconciliationScope;
 import com.crisil.eir.policy.close.ReconciliationTie;
 import com.crisil.eir.policy.exception.ExceptionQueue;
+import com.crisil.eir.policy.tier.EquivalenceTestGate;
 import com.crisil.eir.policy.exception.ExceptionRecord;
 import com.crisil.eir.policy.reconciliation.ContractualLegInterest;
 import com.crisil.eir.policy.replay.ClosedPeriod;
@@ -299,9 +301,17 @@ public final class EirService {
             List.of(new FeeSubmission(feeCode, feeAmount, Seed.PERIOD_START, null, null)),
             TierAssignmentSegment.RETAIL, Set.of(), principal);
 
-        OnboardingOutcome outcome = InitialRecognition
-            .standard(feeRules(), tierGate())
-            .onboard("ONBOARD-" + Seed.PERIOD_ID, BOUNDARY, onboardingRequest);
+        // recognise(), not onboard(). The difference is FR-411/FR-412's second gate: onboard()
+        // returns the disposition alone and DROPS the TierPermission, so a Tier 3 contract with no
+        // equivalence test on file was demoted to Tier 2, solved on Tier 2's tolerance, and reported
+        // back as TIER_3 with no exception -- the console asserting a permission that had been
+        // refused one frame earlier. InitialRecognition.onboard's own javadoc says so: a caller that
+        // persists the tier, files the TG-1 result or files the STALE_EQUIVALENCE_TEST entry must use
+        // recognise().
+        OnboardingRecognition recognition = InitialRecognition
+            .standard(feeRules(), tierGate(), equivalenceTests())
+            .recognise("ONBOARD-" + Seed.PERIOD_ID, BOUNDARY, onboardingRequest);
+        OnboardingOutcome outcome = recognition.outcome();
 
         List<String> stepsPerformed = new ArrayList<>();
         for (OnboardingWork stage : OnboardingWork.values()) {
@@ -320,9 +330,37 @@ public final class EirService {
             .figure("eir", outcome.eir().map(Rate::periodic).orElse(null))
             .strings("stepsPerformed", stepsPerformed)
             .bool("expensiveWorkPerformed", outcome.expensiveWorkPerformed())
-            .array("invariants", invariantRows(outcome.invariants()));
+            // recognition.invariants(), not outcome.invariants(): TG-1 lives on the permission and
+            // is absent from the outcome's list, so a console reading the outcome showed a clean
+            // invariant panel for a contract whose tier permission had just been refused.
+            .array("invariants", invariantRows(recognition.invariants()));
 
-        outcome.failure().ifPresent(record -> response
+        // The tier actually measured, and the proposal it came from. Both, because they are
+        // different facts and FR-107 asks for the assignment "and the basis": a response carrying
+        // only the effective tier loses which section 10 row proposed Tier 3, which is what a Board
+        // reviewing FR-412 refusals needs -- a rule proposing Tier 3 for instruments FR-412 refuses
+        // is an amendment to that table, not a per-contract event.
+        recognition.permission().ifPresent(permission -> response
+            .str("tierMeasured", permission.effectiveTier().name())
+            .str("tierProposed", permission.proposed().tier().name())
+            .bool("tierDemoted", permission.demoted())
+            .bool("tierGateConsulted", permission.gateConsulted())
+            .str("tierBasis", permission.describe())
+            .str("equivalenceTestPopulation", permission.populationId().orElse(null)));
+
+        // Every queue entry, and there can be two for one contract: a Tier 3 population with no
+        // test on file demotes AND its Tier 2 solve can then find no root. Keeping one would lose
+        // whichever this loop's author thought less important -- one is a control failure somebody
+        // must clear, the other is a computation that produced no figure.
+        List<Json.Obj> queueRows = new ArrayList<>();
+        for (ExceptionRecord record : recognition.queueEntries()) {
+            queueRows.add(Json.object()
+                .str("category", record.category().name())
+                .str("detail", record.describe())
+                .bool("blocksClose", record.blocksClose()));
+        }
+        response.array("exceptions", queueRows);
+        recognition.queueEntries().stream().findFirst().ifPresent(record -> response
             .str("exceptionCategory", record.category().name())
             .str("exceptionDetail", record.describe()));
 
@@ -377,6 +415,30 @@ public final class EirService {
                 "policy.maker", "policy.checker", LocalDate.of(2028, 3, 15),
                 PolicyVersionStatus.EFFECTIVE),
             Money.inr("500000000.00"));
+    }
+
+    /**
+     * The 03 § 10.2 equivalence-test register this service consults for FR-411/FR-412.
+     *
+     * <p><b>Empty, and empty is a real answer rather than a missing one.</b>
+     * {@link EquivalenceTestGate#empty()} is a register with nothing in it: a Tier 3 proposal
+     * against it returns {@code NO_TEST_ON_FILE}, demotes to Tier 2 and raises the queue entry,
+     * which is exactly what an unpopulated register should mean. What this must not be is the
+     * two-argument {@code InitialRecognition.standard}, which supplied the same empty gate through
+     * {@link #onboard}'s path and then discarded its answer — so the demotion happened, the solve
+     * ran on Tier 2's tolerance, and the response said {@code TIER_3} with no exception.
+     *
+     * <p><b>Why no demonstration record is seeded here, when {@link #feeRules()} and
+     * {@link #tierGate()} do seed demonstration policies.</b> A fee rule and a tier threshold are
+     * policy parameters; an equivalence test is <em>evidence that a test was performed</em>, with a
+     * performance date, a solved rate, an approximated rate and a Board-approved tolerance. Seeding
+     * one would put a fabricated performed-test on the register whose only purpose is catching
+     * fabricated approximations, and a console that showed a permitted Tier 3 measurement on it
+     * would be demonstrating the failure this gate exists to prevent. So the demonstration shows
+     * the refusal, which is the direction that matters, and a bank supplies its own register.
+     */
+    private static EquivalenceTestGate equivalenceTests() {
+        return EquivalenceTestGate.empty();
     }
 
     // ================================================== stage 2: the month-end run

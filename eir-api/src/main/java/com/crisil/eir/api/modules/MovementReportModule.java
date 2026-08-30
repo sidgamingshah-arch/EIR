@@ -164,9 +164,8 @@ public final class MovementReportModule implements ApiModule {
             // between dtOneSatisfied() and provesReproduction().
             .bool("reconciliationProven", schedule.check().proves())
             .figure("deviation", presented(schedule.check().deviation()))
-            .str("checkId", MovementSchedule.CHECK_NAME
-                + " (no InvariantId — see invariantIdRequested)")
-            .str("invariantIdRequested", MovementSchedule.INVARIANT_ID_REQUESTED)
+            .str("checkId", MovementSchedule.CHECK_NAME)
+            .str("checkStatement", MovementSchedule.INVARIANT_STATEMENT)
             .array("excluded", excludedRows(schedule.excluded()))
             .strings("caveats", schedule.caveats());
     }
