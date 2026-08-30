@@ -77,6 +77,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -129,6 +130,56 @@ public final class EirService {
         Map<String, ContractComputation> computations,
         List<ExceptionRecord> exceptions,
         Map<PolicyKind, String> policyStamps) {
+    }
+
+    /**
+     * The last completed run for a period, as a <b>report</b> reads it — empty where this process
+     * has run none.
+     *
+     * <p><b>Why the reporting modules need a read seam at all.</b> 06 § 7's reports are all
+     * functions of figures a run already published: a movement schedule, four reconciliations, an
+     * approximation register. None of them may run, post, accept or close, and none of them may
+     * recompute — a report that re-derived its own figures would reconcile against itself and tie
+     * on a book the run got wrong. So this returns the run's own working papers, read-only, and
+     * nothing that could change them.
+     *
+     * <p><b>Why the holdings come along.</b> A movement schedule is presented per product and a
+     * product id lives on the holding, not on the computation. The alternative — copying the
+     * product id onto {@code ContractComputation} — would widen the spine's vocabulary for one
+     * report's benefit, which is the trade {@code ContractComputation}'s own javadoc refuses.
+     *
+     * <p><b>The holdings and not the {@link Book}, and the difference is the whole point of the
+     * word read-only above.</b> {@code Book} carries {@code put}, {@code postToGl} and
+     * {@code recordOnboarded}, so handing one to a report would document an incapability the type
+     * does not have — a reporting module could post to the general ledger through a seam whose
+     * javadoc promises it cannot. {@code Book.holdings()} is an immutable list of immutable records,
+     * so the promise is enforced by the type rather than by this sentence.
+     */
+    public Optional<RunSnapshot> lastRunFor(int periodId) {
+        Completed completed = lastRun.get(periodId);
+        return completed == null
+            ? Optional.empty()
+            : Optional.of(new RunSnapshot(completed.runId(), periodId, completed.aggregate(),
+                completed.computations(), book.holdings()));
+    }
+
+    /**
+     * What a report needs of a finished run: the spine's per-contract results, the per-contract
+     * working papers, and the holdings the population came from. See {@link #lastRunFor}.
+     */
+    public record RunSnapshot(
+        String runId,
+        int periodId,
+        RunAggregate aggregate,
+        Map<String, ContractComputation> computations,
+        List<Book.Holding> holdings) {
+
+        public RunSnapshot {
+            Objects.requireNonNull(runId, "runId");
+            Objects.requireNonNull(aggregate, "aggregate");
+            computations = Map.copyOf(Objects.requireNonNull(computations, "computations"));
+            holdings = List.copyOf(Objects.requireNonNull(holdings, "holdings"));
+        }
     }
 
     public EirService(Book book) {
