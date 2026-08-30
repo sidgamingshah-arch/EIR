@@ -314,6 +314,111 @@ class TierPermissionTest {
         }
 
         @Test
+        @DisplayName("a deep-discount bond wearing a token coupon is refused too")
+        void deepDiscountRefused() {
+            // The limb the first version of this mapper could not reach, and the reason it could
+            // not: presenting the subject through EquivalenceTestSubject.couponBearingAtPar forces
+            // redemption equal to inception, so accretion reads nil and the accretion share reads
+            // nil however deep the discount is. A 15-year bond bought at 315,241.70 against
+            // 1,000,000 of face with 10,000 a year of coupon is the Case 9 economics wearing just
+            // enough of a coupon to fail a zero-coupon test, and it is an ordinary way to write a
+            // bond rather than a contrivance.
+            //
+            // By hand:  accretion    = 1,000,000.00 - 315,241.70 = 684,758.30
+            //           coupon       = 15 x 10,000.00            =   150,000.00
+            //           total return =                              834,758.30
+            //           share        = 684,758.30 / 834,758.30  =        0.8203  (4dp HALF_UP)
+            // 0.8203 >= the 0.50 policy share, so 03 § 10.3 refuses Tier 3.
+            ProjectionResult projection = OnboardingFixtures.deepDiscountProjector()
+                .project(OnboardingFixtures.deepDiscountTerms(), List.of());
+            EquivalenceTestSubject subject = EquivalenceTestSubjects.subjectFor(
+                OnboardingFixtures.deepDiscountRequest("C-DEEP"), projection,
+                MaterialityTier.TIER_3);
+
+            assertThat(paise(subject.inceptionAmount()))
+                .isEqualByComparingTo(paise(CASE9_ISSUE_PRICE));
+            assertThat(paise(subject.redemptionAmount()))
+                .isEqualByComparingTo(paise(CASE9_FACE_VALUE));
+            assertThat(paise(subject.contractualCouponTotal()))
+                .isEqualByComparingTo(paise(OnboardingFixtures.DEEP_DISCOUNT_COUPON_TOTAL));
+            assertThat(paise(subject.accretion()))
+                .isEqualByComparingTo(paise(CASE9_DISCOUNT_TO_ACCRETE));
+            assertThat(paise(subject.totalReturn())).isEqualByComparingTo("834758.30");
+            assertThat(subject.accretionShareOfReturn().setScale(4, java.math.RoundingMode.HALF_UP))
+                .isEqualByComparingTo("0.8203");
+            assertThat(subject.isZeroCoupon())
+                .as("it has a coupon leg, so the zero-coupon limb cannot be what refuses it")
+                .isFalse();
+            assertThat(subject.isDeepDiscount()).isTrue();
+            assertThat(subject.approximationForbidden()).isTrue();
+        }
+
+        @Test
+        @DisplayName("the pipeline refuses it, with the share in the recorded basis")
+        void deepDiscountRefusedByThePipeline() {
+            InitialRecognition pipeline = new InitialRecognition(feeRules(), tierGate(),
+                register(equivalenceTest(ZERO_COUPON_POPULATION, LocalDate.of(2025, 10, 1), "5")),
+                OnboardingFixtures.deepDiscountProjector(), new CountingSolver());
+
+            TierPermission permission = pipeline
+                .recognise(RUN, boundary(), OnboardingFixtures.deepDiscountRequest("C-DEEP"))
+                .tierPermission();
+
+            assertThat(permission.proposed().tier()).isEqualTo(MaterialityTier.TIER_3);
+            assertThat(permission.gateOutcome().ground())
+                .as("refused before the current, passing test on file is even consulted")
+                .isEqualTo(EquivalenceTestOutcome.Ground.FORBIDDEN_APPROXIMATION);
+            assertThat(permission.effectiveTier()).isEqualTo(MaterialityTier.TIER_2);
+            assertThat(permission.gateOutcome().basis())
+                .contains("deep-discount")
+                .contains("0.8203");
+            assertThat(permission.failure())
+                .as("a correct policy refusal is not a queue entry")
+                .isEmpty();
+        }
+
+        @Test
+        @DisplayName("an undecomposed bullet at maturity is capital, not coupon")
+        void undecomposedBulletIsNotReadAsPar() {
+            // WHAT INPUT MAKES THIS FAIL: reading any COMBINED_EMI vector as par-and-coupon without
+            // checking that the instalments amortise. Case 9's bond arriving from an LMS feed as one
+            // undecomposed 1,000,000 line against 315,241.70 paid would then report 684,758.30 of
+            // "coupon", accretion of nil and an accretion share of nil — FR-412 silent on the
+            // instrument the whole unit exists for. This was a live hole after the first fix, found
+            // in review, and it is production-reachable: ExternalScheduleProjector is layered into
+            // the registry by prepend for the LMS_AUTHORITATIVE path and Instalment.of defaults to
+            // COMBINED_EMI.
+            //
+            // One flow, in the last period, is not an instalment schedule. By hand:
+            //   redemption = 1,000,000.00 (the terminal undecomposed line, read as capital)
+            //   coupon     = nil
+            //   accretion  = 1,000,000.00 - 315,241.70 = 684,758.30, share 1.0
+            ProjectionResult projection = OnboardingFixtures.undecomposedBulletProjector()
+                .project(OnboardingFixtures.deepDiscountTerms(), List.of());
+            EquivalenceTestSubject subject = EquivalenceTestSubjects.subjectFor(
+                OnboardingFixtures.deepDiscountRequest("C-LMS"), projection,
+                MaterialityTier.TIER_3);
+
+            assertThat(paise(subject.redemptionAmount()))
+                .isEqualByComparingTo(paise(CASE9_FACE_VALUE));
+            assertThat(subject.contractualCouponTotal().isZero())
+                .as("an undecomposed terminal lump is not evidence of a coupon leg")
+                .isTrue();
+            assertThat(paise(subject.accretion()))
+                .isEqualByComparingTo(paise(CASE9_DISCOUNT_TO_ACCRETE));
+            assertThat(subject.isZeroCoupon()).isTrue();
+            assertThat(subject.approximationForbidden()).isTrue();
+
+            InitialRecognition pipeline = new InitialRecognition(feeRules(), tierGate(),
+                register(equivalenceTest(ZERO_COUPON_POPULATION, LocalDate.of(2025, 10, 1), "5")),
+                OnboardingFixtures.undecomposedBulletProjector(), new CountingSolver());
+            assertThat(pipeline.recognise(RUN, boundary(),
+                    OnboardingFixtures.deepDiscountRequest("C-LMS"))
+                .tierPermission().gateOutcome().ground())
+                .isEqualTo(EquivalenceTestOutcome.Ground.FORBIDDEN_APPROXIMATION);
+        }
+
+        @Test
         @DisplayName("a coupon-bearing exposure at par is not caught by FR-412")
         void couponBearingIsNotRefused() {
             // The other side of the discriminant, and the one that matters for false positives: a
@@ -472,6 +577,19 @@ class TierPermissionTest {
             assertThat(queue.quarantinedContracts())
                 .as("STALE_EQUIVALENCE_TEST does not stop the contract, so nothing is quarantined")
                 .isEmpty();
+            assertThat(queue.blocksClose())
+                .as("04 § 3: the entry blocks the close until somebody accepts the demotion with"
+                    + " approval. THE QUEUE IS THE AUTHORITY HERE, NOT THE RUN —"
+                    + " OnboardingRun.blocksClose() reads breaches, quarantine count and"
+                    + " assertedNothing, and a TG-1 demotion trips none of the three: TG-1 is"
+                    + " deliberately not a population obligation and the contract's disposition is"
+                    + " RECOGNISED. That divergence is recorded on InitialRecognition.onboardAll"
+                    + " and is a change to OnboardingRun, which this unit does not own")
+                .isTrue();
+            assertThat(run.blocksClose())
+                .as("pinned deliberately, so the divergence above is visible rather than assumed:"
+                    + " the run object alone does not know the population changed measurement basis")
+                .isFalse();
         }
 
         @Test

@@ -44,30 +44,82 @@ import com.crisil.eir.policy.tier.EquivalenceTestSubject;
  * permission granted on evidence gathered somewhere else, which is the 08 risk register's Cambodia
  * failure mode with a document attached to make it look governed.
  *
- * <h2>Which factory, and how the choice is made</h2>
+ * <h2>How the three figures are read off the vector</h2>
  *
- * <p>{@link EquivalenceTestSubject} offers two factories and the contractual leg decides between
- * them. The discriminant is <b>whether the vector carries an interest leg at all</b>:
+ * <p>{@link EquivalenceTestSubject} takes an inception amount, a redemption amount <em>excluding
+ * coupon</em>, and a lifetime coupon total, and computes the accretion share from them. The
+ * contractual leg is partitioned by {@link FlowKind} — see {@link #legOf}, an exhaustive switch —
+ * and the three figures are sums over that partition:
+ *
+ * <pre>
+ *   inception  = |sum of DISBURSEMENT|
+ *   redemption = |sum of PRINCIPAL, BALLOON, RESIDUAL_VALUE, NOTIONAL_REDEMPTION|
+ *   coupon     = |sum of INTEREST|
+ * </pre>
+ *
+ * <p>That reading, and not a shortcut through
+ * {@link EquivalenceTestSubject#couponBearingAtPar}, is what makes FR-412's <b>deep-discount</b>
+ * limb reachable, and getting it wrong was a defect in the first version of this file. The
+ * instrument that exposes it is a fifteen-year bond bought at 315,241.70 against 1,000,000 of face
+ * with a token 10,000 annual coupon: 684,758.30 of accretion against 150,000 of coupon is
+ * <b>0.8203 of total return arising from accretion</b>, comfortably over the 0.50 policy share, so
+ * FR-412 refuses it. Presenting it through {@code couponBearingAtPar} — which forces redemption
+ * equal to inception and folds everything else into the coupon total — reports accretion of nil and
+ * an accretion share of nil, and the instrument sails through the very limb written to catch it.
+ * A deep-discount bond with a 1% coupon is a completely ordinary way to write the Case 9 economics
+ * while defeating a zero-coupon test, so this is the Cambodia direction and not an edge case.
+ *
+ * <h2>The one shape that cannot be partitioned: {@code COMBINED_EMI}</h2>
+ *
+ * <p>An annuity vector carries no separate interest flow — the whole instalment is one
+ * {@link FlowKind#COMBINED_EMI} flow — so the principal and coupon halves are not observable from
+ * it. That is not a rare corner: {@code Instalment.of(date, period, amount)} defaults to
+ * {@code COMBINED_EMI} and its javadoc calls that "what most retail schedules supply", and
+ * {@code ExternalScheduleProjector} is layered into the registry by {@code prepend} for the
+ * {@code LMS_AUTHORITATIVE} path — so undecomposed lines arrive from a live feed, not only from a
+ * derived annuity.
+ *
+ * <p>The reading turns on <b>when the undecomposed cash comes back</b>, because that is what FR-412
+ * is about. 03 § 10.3's mechanism is "the entire return is accretion and the straight-line error
+ * compounds with tenor", and it needs a <em>growing</em> balance: the error is in the shape of
+ * accretion onto capital that is still outstanding. Two cases, and the boundary between them is
+ * observable:
  *
  * <ul>
- *   <li>Any {@link FlowKind#INTEREST} or {@link FlowKind#COMBINED_EMI} flow with a non-zero amount
- *       means the instrument returns something other than accretion, and
- *       {@link EquivalenceTestSubject#couponBearingAtPar} is the shape: advanced at par, repayable
- *       at par, with the lifetime interest as the coupon total. {@code COMBINED_EMI} counts because
- *       an annuity vector carries no separate interest flow — the whole instalment is one flow —
- *       and a discriminant that looked only for {@code INTEREST} would read every EMI loan in the
- *       book as a zero-coupon instrument and refuse it Tier 3 on FR-412.
- *   <li>No interest leg means the entire return is the difference between what was paid and what
- *       is redeemed, which is {@link EquivalenceTestSubject#discountInstrument}: a T-bill, CP, CD
- *       or the {@code Case 9} zero-coupon bond.
+ *   <li><b>Instalments spread over the schedule</b> — an amortising loan. Capital returns
+ *       throughout, the balance declines, and there is no back-loaded accretion for straight line
+ *       to mis-shape. The par reading applies: {@link EquivalenceTestSubject#couponBearingAtPar}
+ *       with inception and redemption both the amount advanced and everything received above it as
+ *       the coupon total. On reference case 1 that is 129,763.28 of lifetime interest and nil
+ *       accretion, which is what the instrument is.
+ *   <li><b>Every undecomposed flow in the final period</b> — not an instalment schedule at all, but
+ *       a bullet whose principal and interest components were never identified. Read as capital
+ *       returned at maturity, alongside the separated legs below. This is the limb that matters:
+ *       without it, {@code Case 9}'s bond arriving from a feed as a single 1,000,000
+ *       {@code COMBINED_EMI} line against 315,241.70 paid would be presented as a par loan with
+ *       684,758.30 of "coupon", report accretion of nil, and clear FR-412 — the whole defect
+ *       reintroduced through a flow kind.
  * </ul>
  *
- * <p>Deciding on the <em>vector</em> rather than on {@code terms.shape()} is deliberate, and it is
- * the same argument {@code EquivalenceTestSubject}'s own javadoc makes for deriving the return
- * profile from cash amounts instead of reading an {@code is_zero_coupon} flag: "An instrument
- * booked with a coupon code but no coupon flows is caught here; a flag-based test would pass it."
- * A shape of {@code BULLET} whose projector emitted no interest — a zero-rate advance mis-booked as
- * a term loan — is a discount instrument to FR-412 whatever the product master says.
+ * <p><b>The limitation this leaves, stated rather than hidden.</b> A loan pool <em>purchased at a
+ * discount</em> whose acquired instalments arrive undecomposed reads as a par loan with a large
+ * coupon, because nothing in the vector distinguishes it from a high-yield loan advanced at par —
+ * both pay the same cash on the same dates. That is the right answer for FR-412 even so: a pool
+ * bought at a discount amortises it against a declining balance, which is not the growing-balance
+ * error 03 § 10.3 forbids. Where a bank needs the distinction on the record, the schedule has to
+ * arrive decomposed, and {@code Instalment.of(date, period, amount, kind)} is how.
+ *
+ * <p>A discriminant that instead looked simply for the absence of {@code INTEREST} flows would read
+ * every EMI loan in the book as a zero-coupon instrument and refuse it Tier 3 on FR-412 — which is
+ * why {@code COMBINED_EMI} is a partition class of its own here rather than being lumped with
+ * either side.
+ *
+ * <p>Deciding on the <em>vector</em> rather than on {@code terms.shape()} is deliberate throughout,
+ * and it is the same argument {@code EquivalenceTestSubject}'s own javadoc makes for deriving the
+ * return profile from cash amounts instead of reading an {@code is_zero_coupon} flag: "An
+ * instrument booked with a coupon code but no coupon flows is caught here; a flag-based test would
+ * pass it." A shape of {@code BULLET} whose projector emitted no interest — a zero-rate advance
+ * mis-booked as a term loan — is a discount instrument to FR-412 whatever the product master says.
  *
  * <h2>Magnitudes, not signed amounts</h2>
  *
@@ -138,7 +190,7 @@ public final class EquivalenceTestSubjects {
      * @param request      the contract, for the population key and the terms
      * @param projection   the projection already built and already IC-1 asserted; the
      *                     <b>contractual</b> leg is read, never the expected one — see
-     *                     {@link #contractualReceipts}
+     *                     {@link #sumOf}
      * @param proposedTier what the tier assignment proposed, carried through unchanged. The gate
      *                     disposes; this mapper does not second-guess the proposal
      */
@@ -149,39 +201,51 @@ public final class EquivalenceTestSubjects {
         String populationId = populationIdFor(request);
         int tenorMonths = originalTenorMonths(request.terms());
         Money advanced = inceptionAmount(request.contractId(), projection);
-        Money receipts = contractualReceipts(contractual).abs();
+        Money combined = sumOf(contractual, Leg.COMBINED_RECEIPT).abs();
 
-        if (!carriesAnInterestLeg(contractual)) {
-            // No interest leg at all: everything the instrument returns is the difference between
-            // the price paid and the amount redeemed. This is the Case 9 shape and the T-bill
-            // shape, and EquivalenceTestSubject.isZeroCoupon() will read the zero coupon total and
-            // FR-412 will refuse Tier 3 outright.
-            return EquivalenceTestSubject.discountInstrument(
-                populationId, proposedTier, tenorMonths, advanced, receipts);
+        if (!combined.isZero() && amortisesOverTheSchedule(contractual)) {
+            // An amortising vector: undecomposed instalments spread over the schedule, so capital
+            // returns throughout and the balance declines. The principal and coupon halves are not
+            // observable, and the par reading is both the only defensible one and what the shape
+            // is. On reference case 1: 24 x 47,073.47 = 1,129,763.28 of instalments less
+            // 1,000,000.00 advanced = 129,763.28 of lifetime interest, redeeming at par, so
+            // accretion is nil.
+            Money allReceipts = combined
+                .plus(sumOf(contractual, Leg.PRINCIPAL_RECEIPT).abs())
+                .plus(sumOf(contractual, Leg.COUPON_RECEIPT).abs());
+            Money lifetimeInterest = allReceipts.minus(advanced);
+            if (!lifetimeInterest.isPositive()) {
+                // Receipts do not exceed what was advanced, so there is no coupon leg to carry the
+                // recognition profile and EquivalenceTestSubject refuses a negative coupon total
+                // outright. Presented as the discount instrument it arithmetically is, and refused
+                // by FR-412 — which is the answer EquivalenceTestSubject.isZeroCoupon() documents
+                // for exactly this case: "an interest-free advance repayable at face has no return
+                // to mis-accrete, so refusing it Tier 3 buys nothing except consistency. It is
+                // refused anyway, because FR-412 is a refusal and the moment it acquires an
+                // exception for 'well, this one is harmless' it becomes a threshold with an
+                // undocumented boundary."
+                return EquivalenceTestSubject.discountInstrument(
+                    populationId, proposedTier, tenorMonths, advanced, allReceipts);
+            }
+            return EquivalenceTestSubject.couponBearingAtPar(
+                populationId, proposedTier, tenorMonths, advanced, lifetimeInterest);
         }
-        Money lifetimeInterest = receipts.minus(advanced);
-        if (!lifetimeInterest.isPositive()) {
-            // An interest leg is present and the contractual receipts do not exceed what was
-            // advanced: an interest-free advance repayable at face, or a schedule whose flows total
-            // less than the principal. Neither is a coupon-bearing instrument in FR-412's sense —
-            // there is no positive coupon leg to carry the recognition profile — and
-            // EquivalenceTestSubject refuses a negative coupon total outright, so it is presented
-            // as the discount instrument it arithmetically is. The refusal that follows is the one
-            // EquivalenceTestSubject.isZeroCoupon() documents for exactly this case: "an
-            // interest-free advance repayable at face has no return to mis-accrete, so refusing it
-            // Tier 3 buys nothing except consistency. It is refused anyway, because FR-412 is a
-            // refusal and the moment it acquires an exception for 'well, this one is harmless' it
-            // becomes a threshold with an undocumented boundary."
-            return EquivalenceTestSubject.discountInstrument(
-                populationId, proposedTier, tenorMonths, advanced, receipts);
-        }
-        // Advanced and repayable at par, with the coupon leg alongside. lifetimeInterest is
-        // arithmetic and not a judgement: total contractual receipts less the principal advanced,
-        // both summed off the vector, both at magnitude. On reference case 1 that is
-        // 24 x 47,073.47 = 1,129,763.28 of instalments less 1,000,000.00 advanced = 129,763.28 of
-        // lifetime interest, and the accretion share is nil because the exposure redeems at par.
-        return EquivalenceTestSubject.couponBearingAtPar(
-            populationId, proposedTier, tenorMonths, advanced, lifetimeInterest);
+
+        // Either the vector separates the legs — the discount instruments, the bullets, the step
+        // ladders, a decomposed supplied schedule — or every undecomposed flow sits in the final
+        // period, which is a bullet whose components were never identified rather than an
+        // instalment schedule. Both are read the same way, and the terminal undecomposed cash is
+        // capital returned at maturity: the three figures are then read as they are, so accretion
+        // is redemption less inception and the accretion share means what FR-412 says it means.
+        //
+        // This is the branch the Case 9 zero-coupon takes (coupon nil, accretion 684,758.30, share
+        // 1.0), the branch that catches a deep-discount bond wearing a token coupon (share
+        // 0.8203), and the branch that catches the same bond arriving from an LMS feed as one
+        // undecomposed 1,000,000 line — which the par reading would have cleared.
+        Money redemption = sumOf(contractual, Leg.PRINCIPAL_RECEIPT).abs().plus(combined);
+        Money coupon = sumOf(contractual, Leg.COUPON_RECEIPT).abs();
+        return new EquivalenceTestSubject(
+            populationId, proposedTier, tenorMonths, advanced, redemption, coupon);
     }
 
     /**
@@ -250,76 +314,103 @@ public final class EquivalenceTestSubjects {
     }
 
     /**
-     * Everything the contractual leg says will be received, signed as the vector holds it.
+     * Whether the undecomposed instalments actually amortise, or all sit at maturity.
      *
-     * <p><b>The contractual leg, never the expected one.</b> The expected leg truncates at expected
-     * life and carries the balance outstanding as an {@code EXPECTED_PREPAYMENT}, so its totals are
-     * a behavioural assumption. FR-412 is a statement about the instrument's contractual return
-     * profile — 03 § 10.3's "the entire return is accretion" — and reading the behavioural leg
-     * would make a Tier 3 refusal move when the prepayment curve was re-estimated.
+     * <p>The premise the par reading depends on, <b>checked rather than assumed</b>. The first
+     * version of this file assumed it, and the class comment gives the instrument that exploited the
+     * assumption: {@code Case 9}'s bond arriving as one undecomposed 1,000,000 line against
+     * 315,241.70 paid would have been presented as a par loan with 684,758.30 of coupon, reported
+     * accretion of nil, and cleared FR-412 — the defect this whole unit exists to close,
+     * reintroduced through a flow kind.
      *
-     * <p>The kinds are partitioned by {@link #legOf}, an exhaustive switch, so that adding a
-     * {@link FlowKind} constant is a compile error here rather than a silent omission. That
-     * matters in one direction in particular: a kind quietly dropped from the receipt side
-     * understates the coupon total, which understates the accretion share, which lets a
-     * deep-discount instrument through FR-412 — the Cambodia direction.
+     * <p>"Amortises" means at least one undecomposed flow falls before the vector's last period.
+     * Deliberately weak: the question is only whether capital comes back <em>during</em> the life,
+     * because that is what makes the balance decline and takes the instrument outside 03 § 10.3's
+     * growing-balance mechanism. A stronger test — that the instalments are level, or consistent
+     * with an annuity at the contractual rate — would be re-deriving the projector's own arithmetic
+     * here, and would false-refuse every stepped, restructured or irregular schedule a live feed
+     * supplies.
+     *
+     * <p>Compared against {@link FlowVector#maxPeriodIndex()} rather than against
+     * {@code terms.termPeriods()}: a supplied schedule may legitimately run short of the recorded
+     * term, and the question is about the shape of the vector that will actually be solved.
      */
-    private static Money contractualReceipts(FlowVector contractual) {
-        Money receipts = Money.zero(contractual.currency());
+    private static boolean amortisesOverTheSchedule(FlowVector contractual) {
+        int lastPeriod = contractual.maxPeriodIndex();
         for (CashFlow flow : contractual.flows()) {
-            if (legOf(flow.kind()) == Leg.RECEIPT) {
-                receipts = receipts.plus(flow.amount());
-            }
-        }
-        return receipts;
-    }
-
-    /**
-     * Whether the vector carries a coupon or interest leg — the discriminant between the two
-     * factories.
-     *
-     * <p>Non-zero amounts only. A projector that emitted a schedule of zero interest flows for a
-     * zero-rate advance has produced an instrument whose entire return is accretion, and reading the
-     * presence of the flow rather than its amount would hand it the Tier 3 shortcut on the strength
-     * of a row of zeroes.
-     */
-    private static boolean carriesAnInterestLeg(FlowVector contractual) {
-        for (CashFlow flow : contractual.flows()) {
-            boolean interestBearing =
-                flow.kind() == FlowKind.INTEREST || flow.kind() == FlowKind.COMBINED_EMI;
-            if (interestBearing && !flow.amount().isZero()) {
+            if (legOf(flow.kind()) == Leg.COMBINED_RECEIPT
+                && !flow.amount().isZero()
+                && flow.periodIndex() < lastPeriod) {
                 return true;
             }
         }
         return false;
     }
 
+    /**
+     * The signed total of the contractual leg's flows falling on one side of the partition.
+     *
+     * <p><b>The contractual leg, never the expected one.</b> The expected leg truncates at expected
+     * life and carries the balance outstanding as an {@code EXPECTED_PREPAYMENT}, so its totals are
+     * a behavioural assumption. FR-412 is a statement about the instrument's contractual return
+     * profile — 03 § 10.3's "the entire return is accretion" — and reading the behavioural leg would
+     * make a Tier 3 refusal move when the prepayment curve was re-estimated.
+     */
+    private static Money sumOf(FlowVector contractual, Leg side) {
+        Money total = Money.zero(contractual.currency());
+        for (CashFlow flow : contractual.flows()) {
+            if (legOf(flow.kind()) == side) {
+                total = total.plus(flow.amount());
+            }
+        }
+        return total;
+    }
+
     /** Which side of the subject's arithmetic a flow falls on. */
     private enum Leg {
         /** Cash out at inception: the price paid, or the principal advanced. */
         ADVANCE,
-        /** A contractual receipt over the life: principal, coupon, balloon, residual. */
-        RECEIPT,
-        /** An integral fee or cost. Excluded from both sides; see {@link #inceptionAmount}. */
+        /** A contractual return of capital: principal, balloon, residual, notional redemption. */
+        PRINCIPAL_RECEIPT,
+        /** A contractual coupon or interest receipt, separately identified. */
+        COUPON_RECEIPT,
+        /**
+         * An instalment that is not decomposed into principal and interest.
+         *
+         * <p>A class of its own, and that is the point. Folded into {@link #PRINCIPAL_RECEIPT} an
+         * EMI loan would show 1,129,763.28 of "redemption" against 1,000,000.00 advanced and read
+         * as a discount instrument; folded into {@link #COUPON_RECEIPT} it would show nil
+         * redemption and read as a perpetual. Neither is the instrument. Its presence selects the
+         * par reading instead — see {@link #subjectFor}.
+         */
+        COMBINED_RECEIPT,
+        /** An integral fee or cost. Excluded from every side; see {@link #inceptionAmount}. */
         FEE
     }
 
     /**
      * The flow kind's side, as an exhaustive switch so a new {@link FlowKind} cannot be forgotten.
      *
-     * <p>{@code EXPECTED_PREPAYMENT} is classed as a receipt even though the contractual leg never
-     * carries one — it is the contractual balance at a truncation date, so if a projector ever put
-     * one on the contractual leg it would be a contractual receipt and not something to drop.
+     * <p>Exhaustive deliberately. A kind quietly dropped from the coupon side understates the coupon
+     * total, which overstates the accretion share; one dropped from the redemption side understates
+     * the accretion. Both directions move an FR-412 boundary, and one of them moves it the way that
+     * lets a deep-discount instrument through.
      *
-     * <p>{@code NOTIONAL_REDEMPTION} is a receipt for the same reason: the B5.4.4 shortcut treats
-     * the balance at the repricing date as a redemption, and that is precisely the redemption
-     * amount FR-412 measures accretion against.
+     * <p>{@code EXPECTED_PREPAYMENT} is classed as a return of capital even though the contractual
+     * leg never carries one — it is the contractual balance at a truncation date, so if a projector
+     * ever put one on the contractual leg it would be a redemption and not something to drop.
+     *
+     * <p>{@code NOTIONAL_REDEMPTION} is a return of capital for the same reason: the B5.4.4
+     * shortcut treats the balance at the repricing date as a redemption, and that is precisely the
+     * redemption amount FR-412 measures accretion against.
      */
     private static Leg legOf(FlowKind kind) {
         return switch (kind) {
             case DISBURSEMENT -> Leg.ADVANCE;
-            case PRINCIPAL, INTEREST, COMBINED_EMI, BALLOON, RESIDUAL_VALUE, NOTIONAL_REDEMPTION,
-                EXPECTED_PREPAYMENT -> Leg.RECEIPT;
+            case PRINCIPAL, BALLOON, RESIDUAL_VALUE, NOTIONAL_REDEMPTION, EXPECTED_PREPAYMENT ->
+                Leg.PRINCIPAL_RECEIPT;
+            case INTEREST -> Leg.COUPON_RECEIPT;
+            case COMBINED_EMI -> Leg.COMBINED_RECEIPT;
             case INTEGRAL_FEE_RECEIVED, INTEGRAL_COST_PAID -> Leg.FEE;
         };
     }

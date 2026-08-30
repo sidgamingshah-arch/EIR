@@ -428,6 +428,21 @@ public final class InitialRecognition {
      * population changing measurement basis between one close and the next is exactly what a close
      * should surface.
      *
+     * <p><b>A gap this unit cannot close, named rather than left to be discovered.</b> The queue is
+     * the authority on whether a TG-1 demotion blocks the close, and the {@link OnboardingRun}
+     * returned here does not know about it. {@code OnboardingRun.blocksClose()} reads three things —
+     * a published invariant breach, the quarantine count, and whether the run asserted nothing — and
+     * a demoted contract trips none of them: TG-1 is deliberately not a population obligation (next
+     * paragraph), and the contract's disposition is {@code RECOGNISED} because
+     * {@code STALE_EQUIVALENCE_TEST} does not stop it. So {@code run.describeClose()} prints "close
+     * may proceed" over a population whose measurement basis changed, while
+     * {@code queue.blocksClose()} correctly says otherwise — and that method's own javadoc claims
+     * its second bullet covers "every category {@code ExceptionCategory#blocksClose()}", which this
+     * change makes untrue. Callers must gate on the queue. Closing it properly means giving
+     * {@code OnboardingRun} sight of the permissions, which is a change to a type this unit does not
+     * own; {@code TierPermissionTest.queueEntriesAreFiled} pins both sides so the divergence is
+     * visible rather than assumed.
+     *
      * <p><b>TG-1 is deliberately absent from {@link OnboardingRun#POPULATION_INVARIANTS}.</b> A
      * population with no Tier 3 contracts asserts TG-1 nowhere, so declaring it an obligation would
      * make {@code unassertedInvariants()} name it — and therefore block the close — on every book

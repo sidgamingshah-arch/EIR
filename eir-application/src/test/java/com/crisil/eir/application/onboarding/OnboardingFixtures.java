@@ -4,6 +4,8 @@ import com.crisil.eir.application.port.AsAtBoundary;
 import com.crisil.eir.application.port.ContractSource;
 import com.crisil.eir.calc.projection.CashflowProjector;
 import com.crisil.eir.calc.projection.ContractTerms;
+import com.crisil.eir.calc.projection.ExternalScheduleProjector;
+import com.crisil.eir.calc.projection.Instalment;
 import com.crisil.eir.calc.projection.FeePosting;
 import com.crisil.eir.calc.projection.ProjectionResult;
 import com.crisil.eir.calc.projection.ProjectorRegistry;
@@ -14,6 +16,7 @@ import com.crisil.eir.calc.solver.SolveRequest;
 import com.crisil.eir.calc.solver.SolveResult;
 import com.crisil.eir.domain.DayCountConvention;
 import com.crisil.eir.domain.FeeClassification;
+import com.crisil.eir.domain.FlowKind;
 import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Rate;
 import com.crisil.eir.domain.RateType;
@@ -369,6 +372,92 @@ final class OnboardingFixtures {
                 case9ZeroCouponTerms(), TierAssignmentSegment.WHOLESALE)
             .withRuleSetKey(ZERO_COUPON_PRODUCT, "IN-MUM")
             .with(TierAssignmentFeature.FULLY_COLLATERALISED_LOW_FEE);
+    }
+
+    /**
+     * The same bond wearing a token coupon — FR-412's <b>deep-discount</b> limb.
+     *
+     * <p>The instrument that defeats a zero-coupon test while keeping the Case 9 economics, and it
+     * is an entirely ordinary way to write a bond: 315,241.70 paid, 1,000,000.00 of face at year
+     * fifteen, and 10,000 a year of coupon — 1% of face, a twelfth of the 8% yield. By hand:
+     *
+     * <pre>
+     *   accretion    = 1,000,000.00 - 315,241.70            = 684,758.30
+     *   coupon       = 15 x 10,000.00                       =  150,000.00
+     *   total return = 684,758.30 + 150,000.00              =  834,758.30
+     *   share        = 684,758.30 / 834,758.30              =       0.8203 (4dp)
+     * </pre>
+     *
+     * <p>0.8203 is over {@code EquivalenceTestSubject.DEEP_DISCOUNT_ACCRETION_SHARE} of 0.50, so
+     * 03 § 10.3 refuses Tier 3 for it. The coupon leg is what makes it a control rather than a
+     * restatement of the zero-coupon case: {@code isZeroCoupon()} is false here, so the refusal has
+     * to come from the share.
+     *
+     * <p>Supplied as a billed schedule rather than derived, because no projector in the registry
+     * emits a deep-discount-with-coupon shape from terms alone: {@code DISCOUNT_INSTRUMENT} derives
+     * the price and emits no coupon, and the bullets advance at par. A traded price with a quoted
+     * coupon schedule is exactly what {@code ExternalScheduleProjector} is for, and its javadoc
+     * calls itself "the refusal to guess".
+     */
+    static List<Instalment> deepDiscountBilledSchedule() {
+        List<Instalment> billed = new ArrayList<>();
+        for (int period = 1; period <= 15; period++) {
+            billed.add(Instalment.of(DISBURSEMENT.plusYears(period), period,
+                Money.inr("10000"), FlowKind.INTEREST));
+        }
+        billed.add(Instalment.of(DISBURSEMENT.plusYears(15), 15, CASE9_FACE_VALUE,
+            FlowKind.PRINCIPAL));
+        return billed;
+    }
+
+    /** Its 15 x 10,000 of coupon: <b>150,000.00</b>, by hand. */
+    static final Money DEEP_DISCOUNT_COUPON_TOTAL = Money.inr("150000.00");
+
+    /**
+     * Its terms: the <b>price paid</b> as principal, so the disbursement leg is the 315,241.70 a
+     * trade was struck at rather than a figure discounted from a yield.
+     */
+    static ContractTerms deepDiscountTerms() {
+        return ContractTerms.of(CASE9_ISSUE_PRICE, EIGHT_PERCENT_ANNUAL, 15, 1, DISBURSEMENT,
+            DISBURSEMENT.plusYears(1), DayCountConvention.THIRTY_360_BOND,
+            ScheduleShape.STRUCTURED, RateType.FIXED);
+    }
+
+    /** That bond as a request, wholesale and fully collateralised, so assigned Tier 3. */
+    static OnboardingRequest deepDiscountRequest(String contractId) {
+        return OnboardingRequest.of(contractId, InstrumentClass.INVESTMENT,
+                MeasurementCategory.AMORTISED_COST,
+                SppiAssessment.passed(DISBURSEMENT, "classification.committee"),
+                deepDiscountTerms(), TierAssignmentSegment.WHOLESALE)
+            .withRuleSetKey(ZERO_COUPON_PRODUCT, "IN-MUM")
+            .with(TierAssignmentFeature.FULLY_COLLATERALISED_LOW_FEE);
+    }
+
+    /** The projection seam that serves {@link #deepDiscountBilledSchedule()}. */
+    static CashflowProjector deepDiscountProjector() {
+        return new ExternalScheduleProjector(deepDiscountBilledSchedule());
+    }
+
+    /**
+     * Case 9's bond as an LMS feed would supply it: one <b>undecomposed</b> line at maturity.
+     *
+     * <p>The instrument that exploited the first fix's remaining assumption. 1,000,000.00 falls due
+     * at year fifteen against 315,241.70 paid, and the line carries no principal/interest split —
+     * which is the ordinary case, because {@code Instalment.of(date, period, amount)} defaults to
+     * {@code COMBINED_EMI} and its own javadoc calls that "what most retail schedules supply".
+     *
+     * <p>Reading a {@code COMBINED_EMI} vector as par-and-coupon without checking that the
+     * instalments actually amortise reports 684,758.30 of "coupon", accretion of nil, and an
+     * accretion share of nil — so FR-412 stays silent on the very instrument reference case 9 is
+     * about. One flow, in the last period, is not an instalment schedule.
+     */
+    static List<Instalment> undecomposedBulletSchedule() {
+        return List.of(Instalment.of(DISBURSEMENT.plusYears(15), 15, CASE9_FACE_VALUE));
+    }
+
+    /** The projection seam that serves {@link #undecomposedBulletSchedule()}. */
+    static CashflowProjector undecomposedBulletProjector() {
+        return new ExternalScheduleProjector(undecomposedBulletSchedule());
     }
 
     /**
