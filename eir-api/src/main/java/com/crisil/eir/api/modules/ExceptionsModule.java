@@ -89,14 +89,20 @@ public final class ExceptionsModule implements ApiModule {
     /** 06 § 6's work queue. */
     public static final String QUEUE_PATH = "/api/exceptions";
 
-    /** 06 § 6's resolution. See {@link #register} on why the id is not in the path. */
-    public static final String RESOLVE_PATH = "/api/exceptions/resolve";
+    /**
+     * The subtree 06 § 6's two mutations live under: {@code /api/exceptions/{id}/{action}}.
+     *
+     * <p>Registered with {@link Routes#route}, which hands the handler the exchange — so the id is
+     * read from the path where 06 § 6 puts it, and the action is read from the path too rather than
+     * guessed from which fields the body happens to carry.
+     */
+    public static final String SUBTREE_PATH = "/api/exceptions/";
 
-    /** 06 § 6's acceptance. See {@link #register} on why the id is not in the path. */
-    public static final String ACCEPT_PATH = "/api/exceptions/accept";
+    /** 06 § 6's resolution, as the last segment of {@link #SUBTREE_PATH}. */
+    public static final String RESOLVE_ACTION = "resolve";
 
-    /** Everything else under the queue — the {@code /{id}/…} shape. See {@link #register}. */
-    public static final String PATH_ID_PATH = "/api/exceptions/";
+    /** 06 § 6's acceptance, as the last segment of {@link #SUBTREE_PATH}. */
+    public static final String ACCEPT_ACTION = "accept";
 
     /**
      * The run id the derived queue attributes its rows to.
@@ -133,47 +139,75 @@ public final class ExceptionsModule implements ApiModule {
     }
 
     /**
-     * Registers 06 § 6's three endpoints, and one fourth that exists to explain a deviation.
+     * Registers 06 § 6's three endpoints, at the paths 06 § 6 writes them at.
      *
-     * <p><b>Why the id is a body field and not a path segment.</b> 06 § 6 writes
-     * {@code POST /exceptions/{id}/resolve} and {@code POST /exceptions/{id}/accept}.
-     * {@link Routes#post} hands a handler the parsed form body and not the exchange, so a POST
-     * handler cannot read its own request path; and the JDK's HTTP server matches a context by
-     * longest path prefix, so both of those paths fall into one {@code /api/exceptions/} context
-     * with nothing to tell {@code resolve} from {@code accept}. Guessing the action from which
-     * fields the body happens to carry is the defect FR-507 names in another guise — treatment
-     * inferred from an observation — and here the guess that goes wrong turns a resolution into an
-     * acceptance, which is the difference between a defect that was fixed and a period closed over
-     * one that stands. So the action is the path and the id is a body field, and
-     * {@link #PATH_ID_PATH} answers the specified shape with a 400 that names the seam instead of a
-     * bewildering 405 from the listing route.
+     * <p>The listing keeps {@link Routes#get} — one verb, one fixed path, always 200, which is
+     * exactly its shape. The two mutations take {@link Routes#route} over
+     * {@link #SUBTREE_PATH}, because a path parameter cannot be read any other way: {@code route}
+     * hands the handler the exchange, so {@code {id}} comes off the path and the action comes off
+     * the path as well.
      *
-     * <p><b>Two consequences of prefix routing that this module cannot fix, recorded rather than
-     * left for somebody to find.</b> {@link Routes} registers one verb per path, so
-     * {@code GET /api/exceptions/{id}} answers 405 rather than the 400 above — the explanatory
-     * context is claimed for POST, and claiming it for both verbs is a duplicate-context error at
-     * server start. And the JDK server matches by longest prefix with nothing after it, so
-     * {@code POST /api/exceptions/resolveXYZ} and {@code POST /api/exceptions/resolve/anything}
-     * reach the resolution handler, which cannot see the path it was reached by and therefore
-     * cannot refuse them. A mistyped action path performs the mutation. That is a property of every
-     * route on this server — {@code POST /api/run/foo} runs the month end — and it is the same
-     * missing seam: a {@code Routes.post} that carried the exchange would let each handler check
-     * the path it was actually called on.
+     * <p><b>Why reading the action off the path matters more than the id does.</b> Before this seam
+     * existed the id travelled as a body field, which was merely inelegant. The action could not
+     * travel at all: {@link Routes#post} registers one handler per prefix and the JDK server
+     * matches by longest prefix, so {@code /{id}/resolve} and {@code /{id}/accept} arrived at one
+     * handler with nothing to distinguish them, and the only way to dispatch would have been to
+     * infer the action from which fields the body carried. That is the defect FR-507 names in
+     * another guise — treatment inferred from an observation rather than declared — and the guess
+     * that goes wrong here turns a resolution into an acceptance, which is the difference between a
+     * defect that was fixed and a period closed over one that stands.
+     *
+     * <p><b>The shape is checked exactly, and anything else is declined.</b> The suffix must be
+     * two segments, {@code {id}} then a known action. So {@code POST /api/exceptions/resolveXYZ},
+     * {@code POST /api/exceptions/{id}/resolve/anything} and {@code POST /api/exceptions/{id}/approve}
+     * are all declined rather than swallowed — a prefix context used to hand every one of them to
+     * the resolution handler, which could not see the path it was reached by and so performed the
+     * mutation for a mistyped action. Declining returns {@code null}, which lets a sibling module
+     * on the same prefix try and, if none claims it, produces the server's 404 naming the path.
+     * Declining is only ever for a path or verb this module does not recognise: a request it
+     * recognises and refuses comes back as an {@link Routes.Answer} on a 200 with the whole list,
+     * because a refusal is a value in this engine.
+     *
+     * <p>Segments are split on the <em>raw</em> path and each is decoded afterwards. Decoding first
+     * would let an id carrying {@code %2F} split into two segments and address something the caller
+     * did not name.
      */
     @Override
     public void register(Routes routes) {
         Objects.requireNonNull(routes, "routes");
         routes.get(QUEUE_PATH, this::listQueue);
-        routes.post(RESOLVE_PATH, this::resolve);
-        routes.post(ACCEPT_PATH, this::accept);
-        routes.post(PATH_ID_PATH, body -> {
-            throw new FormBody.BadRequest("06 § 6 addresses an exception as"
-                + " /api/exceptions/{id}/resolve and /api/exceptions/{id}/accept, and this server"
-                + " cannot read a POST handler's own path: Routes.post carries the form body and"
-                + " not the exchange, and one prefix context cannot tell the two actions apart."
-                + " Post to " + RESOLVE_PATH + " or " + ACCEPT_PATH + " with the id as a form"
-                + " field. GET " + QUEUE_PATH + " reports the id of every queued exception");
-        });
+        routes.route(SUBTREE_PATH, this::mutate);
+    }
+
+    /**
+     * Dispatches {@code /api/exceptions/{id}/{action}} to the resolution or the acceptance.
+     *
+     * <p>Returns {@code null} for anything else — a suffix that is not two segments, an action this
+     * module does not serve, or a method other than POST. A GET under this subtree is somebody
+     * else's or nobody's, and 06 § 6 gives it no meaning here.
+     */
+    private Routes.Answer mutate(HttpExchange exchange, FormBody body) {
+        String rawPath = exchange.getRequestURI().getRawPath();
+        if (!rawPath.startsWith(SUBTREE_PATH)) {
+            return null;
+        }
+        String[] segments = rawPath.substring(SUBTREE_PATH.length()).split("/");
+        if (segments.length != 2) {
+            return null;
+        }
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            return null;
+        }
+        String id = URLDecoder.decode(segments[0], StandardCharsets.UTF_8);
+        String action = URLDecoder.decode(segments[1], StandardCharsets.UTF_8);
+        // Exact match on the action, and no case folding: an action is a path segment 06 § 6
+        // spells out, not a value a caller chooses, and accepting /RESOLVE would be inventing
+        // surface nothing specifies.
+        return switch (action) {
+            case RESOLVE_ACTION -> Routes.Answer.ok(resolve(id, body));
+            case ACCEPT_ACTION -> Routes.Answer.ok(accept(id, body));
+            default -> null;
+        };
     }
 
     @Override

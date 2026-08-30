@@ -222,20 +222,31 @@ class FrameworkBanTest {
         }
 
         @Test
-        @DisplayName("today, nothing is exempt — recorded so the first exemption is a visible diff")
-        void nothingIsExemptYet() {
-            // Pinned deliberately, and expected to be edited. eir-persistence has EARNED an
-            // exemption (04's schema wants an ORM) and has not taken one, because an exemption
-            // for a dependency nobody has added is the same undocumented licence in the other
-            // direction. When eir-batch arrives this assertion changes in the same commit that
-            // adds the dependency, which is the point.
+        @DisplayName("exactly two modules are exempt, and both are runners rather than arithmetic")
+        void exactlyTheIntendedModulesAreExempt() {
+            // Pinned deliberately, and this is the edit the previous version of this test predicted:
+            // "when eir-batch arrives this assertion changes in the same commit that adds the
+            // dependency, which is the point." Two arrived together.
+            //
+            // eir-batch takes it under ADR-0007: Spring Batch is the RUNNER — partitioning, restart
+            // from a failed step, a job repository — and none of that is arithmetic.
+            // eir-persistence-jdbc takes it under ADR-0011: Flyway is a migration runner and the
+            // PostgreSQL driver is a wire protocol.
+            //
+            // eir-persistence still has EARNED an exemption (04's schema wants an ORM) and still
+            // has not taken one, because an exemption for a dependency nobody has added is the same
+            // undocumented licence in the other direction. That remains the interesting entry in
+            // this list: the one that is absent on purpose.
             List<String> exempt = modulePoms.entrySet().stream()
                     .filter(module -> overridesTheBan(module.getValue()))
                     .map(Map.Entry::getKey)
+                    .sorted()
                     .toList();
             assertThat(exempt)
-                    .as("if this fails, check the exemption is intended and update the list here")
-                    .isEmpty();
+                    .as("if this fails, check the exemption is intended and update the list here;"
+                            + " a third exemption should be a visible diff and a paragraph of"
+                            + " justification, not a quiet addition")
+                    .containsExactly("eir-batch", "eir-persistence-jdbc");
         }
     }
 }
