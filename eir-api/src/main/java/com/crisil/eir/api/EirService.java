@@ -815,4 +815,89 @@ public final class EirService {
         }
         return total;
     }
+
+    // ============================================== FR-808: the audit endpoint's read path
+
+    /**
+     * The working papers of the last run for a period, or empty where this process has none.
+     *
+     * <p><b>Why this exists and why it is read-only.</b> FR-808's trace resolves a published figure
+     * to its inputs, and every one of those inputs is already here: {@link #lastRun} holds the
+     * aggregate the close read, the per-contract {@link ContractComputation} the period balance is
+     * written from, the queue, and the policy stamps. A trace that re-ran the pipeline to answer
+     * would be answering about a <em>second</em> computation — plausible, arithmetically identical
+     * on a book that has not moved, and no evidence at all about the figures actually published.
+     * So the endpoint reads what was published, through this, and cannot write.
+     *
+     * <p><b>Empty is the honest answer, not an error.</b> A trace request for a period this process
+     * never ran has no inputs to resolve to, and the caller needs to be told which of the two
+     * things happened — nothing ran, or the contract was quarantined by the run that did. An
+     * absent-versus-refused distinction collapsed into a 404 is the single most common way an audit
+     * endpoint stops being usable as evidence.
+     */
+    public java.util.Optional<RunPapers> runPapers(int periodId) {
+        Completed completed = lastRun.get(periodId);
+        return completed == null
+            ? java.util.Optional.empty()
+            : java.util.Optional.of(new RunPapers(
+                completed.runId(), completed.aggregate(), completed.computations(),
+                completed.exceptions(), completed.policyStamps()));
+    }
+
+    /**
+     * One contract's position and movements as the book carries them, or empty.
+     *
+     * <p>Narrower than handing out {@link Book} on purpose: the trace endpoint needs the inputs
+     * side of a figure — terms, opening balances, stage, the period's flow vector and the cash
+     * book's split — and nothing at the edge should be able to move the book while rendering an
+     * audit answer.
+     */
+    public java.util.Optional<Book.Holding> holdingOnFile(String contractId) {
+        return book.holding(contractId);
+    }
+
+    /**
+     * A finished run's working papers, exposed for the trace endpoint.
+     *
+     * <p>The same five things {@code Completed} carries. A separate public type rather than
+     * publishing {@code Completed} itself, so that what a reader may see is a decision this class
+     * makes rather than a consequence of a private record's shape.
+     *
+     * @param runId         the run that published these figures
+     * @param aggregate     the population accounting and the run-level invariants
+     * @param computations  per-contract working papers, keyed by contract; a quarantined contract
+     *                      is absent from this map and present in {@code aggregate.results()}
+     * @param exceptions    the run's queue, as it now stands including any acceptances
+     * @param policyStamps  the versions the run stamped, per kind
+     */
+    public record RunPapers(
+        String runId,
+        RunAggregate aggregate,
+        Map<String, ContractComputation> computations,
+        List<ExceptionRecord> exceptions,
+        Map<PolicyKind, String> policyStamps) {
+
+        public RunPapers {
+            Objects.requireNonNull(runId, "runId");
+            Objects.requireNonNull(aggregate, "aggregate");
+            computations = Map.copyOf(Objects.requireNonNull(computations, "computations"));
+            exceptions = List.copyOf(Objects.requireNonNull(exceptions, "exceptions"));
+            policyStamps = Map.copyOf(Objects.requireNonNull(policyStamps, "policyStamps"));
+        }
+
+        /** This contract's working papers, or empty where the run published none for it. */
+        public java.util.Optional<ContractComputation> computationFor(String contractId) {
+            return java.util.Optional.ofNullable(computations.get(contractId));
+        }
+
+        /** This contract's result — computed or quarantined — or empty where it was not in the run. */
+        public java.util.Optional<ContractResult> resultFor(String contractId) {
+            for (ContractResult result : aggregate.results()) {
+                if (result.contractId().equals(contractId)) {
+                    return java.util.Optional.of(result);
+                }
+            }
+            return java.util.Optional.empty();
+        }
+    }
 }
