@@ -4,6 +4,8 @@ import com.crisil.eir.application.port.AsAtBoundary;
 import com.crisil.eir.application.port.ContractSource;
 import com.crisil.eir.calc.projection.CashflowProjector;
 import com.crisil.eir.calc.projection.ContractTerms;
+import com.crisil.eir.calc.projection.ExternalScheduleProjector;
+import com.crisil.eir.calc.projection.Instalment;
 import com.crisil.eir.calc.projection.FeePosting;
 import com.crisil.eir.calc.projection.ProjectionResult;
 import com.crisil.eir.calc.projection.ProjectorRegistry;
@@ -14,6 +16,7 @@ import com.crisil.eir.calc.solver.SolveRequest;
 import com.crisil.eir.calc.solver.SolveResult;
 import com.crisil.eir.domain.DayCountConvention;
 import com.crisil.eir.domain.FeeClassification;
+import com.crisil.eir.domain.FlowKind;
 import com.crisil.eir.domain.Money;
 import com.crisil.eir.domain.Rate;
 import com.crisil.eir.domain.RateType;
@@ -23,7 +26,10 @@ import com.crisil.eir.policy.PolicyVersionStatus;
 import com.crisil.eir.policy.fee.rule.FeeClassificationResolver;
 import com.crisil.eir.policy.fee.rule.FeeRule;
 import com.crisil.eir.policy.fee.rule.FeeRuleSet;
+import com.crisil.eir.policy.tier.EquivalenceTestGate;
+import com.crisil.eir.policy.tier.EquivalenceTestRecord;
 import com.crisil.eir.policy.tier.TierAssignment;
+import com.crisil.eir.policy.tier.TierAssignmentFeature;
 import com.crisil.eir.policy.tier.TierAssignmentSegment;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -143,6 +149,64 @@ final class OnboardingFixtures {
     /** A fee code no version of the rule set states. FR-202's refusal. */
     static final String UNMAPPED_CODE = "MYSTERY_FEE";
 
+    // ------------------------------------------- the tier gate's second gate (FR-411, FR-412)
+
+    /** The product code of the Tier 3 short-tenor exposure below. */
+    static final String WCDL_PRODUCT = "WCDL";
+
+    /**
+     * The population key the equivalence-test register is loaded under for that exposure.
+     *
+     * <p>Written out in full rather than computed, so that the test states the key it expects
+     * instead of asking the code under test what key it produced. Product then segment, colon
+     * separated, per {@code EquivalenceTestSubjects.populationIdFor}.
+     */
+    static final String WCDL_POPULATION = "WCDL:RETAIL";
+
+    /** The product code of the Case 9 zero-coupon bond below. */
+    static final String ZERO_COUPON_PRODUCT = "ZCB";
+
+    /** Its population key: a wholesale holding, so not the retail population above. */
+    static final String ZERO_COUPON_POPULATION = "ZCB:WHOLESALE";
+
+    /** Reference case 9's face value at maturity: <b>1,000,000.00</b>. */
+    static final Money CASE9_FACE_VALUE = Money.inr("1000000");
+
+    /**
+     * Reference case 9's issue price: <b>315,241.70</b>.
+     *
+     * <p>Quoted from the reference case and independently derivable: 1,000,000 discounted at 8%
+     * effective annual over fifteen whole years is {@code 1,000,000 / 1.08^15}. {@code 1.08^15 =
+     * 3.172169113645344...}, so the price is 315,241.704965890... which presents as 315,241.70.
+     */
+    static final Money CASE9_ISSUE_PRICE = Money.inr("315241.70");
+
+    /**
+     * Reference case 9's discount to accrete: <b>684,758.30</b>.
+     *
+     * <p>1,000,000.00 face less 315,241.70 paid, by hand. The whole of the instrument's return, all
+     * of it accretion — which is why FR-412 refuses Tier 3 for it at any tenor, and why straight
+     * line takes 45,650.55 a year (684,758.30 / 15) against the EIR method's 25,219.34 in year one:
+     * an 81.0% overstatement of year-one income.
+     */
+    static final Money CASE9_DISCOUNT_TO_ACCRETE = Money.inr("684758.30");
+
+    /** 8.00% effective annual, the yield reference case 9's bond is quoted at. */
+    static final Rate EIGHT_PERCENT_ANNUAL = Rate.annualEffective(new BigDecimal("0.08"));
+
+    /**
+     * The Board-approved equivalence-test tolerance used here: <b>25 bps</b>.
+     *
+     * <p>Arbitrary, and only ever compared against a delta this file also states, so no assertion
+     * depends on the figure itself. 03 § 10.2 item 2 requires the threshold to be Board approved and
+     * {@code EquivalenceTestRecord} requires an approver named, which is what the constant pair
+     * models.
+     */
+    static final BigDecimal BOARD_THRESHOLD_BPS = new BigDecimal("25");
+
+    /** Who approved it. {@code EquivalenceTestRecord} refuses a blank approver. */
+    static final String THRESHOLD_APPROVER = "board.audit.committee";
+
     private OnboardingFixtures() {
     }
 
@@ -234,6 +298,190 @@ final class OnboardingFixtures {
             SppiAssessment.failed(DISBURSEMENT, "classification.committee"),
             case1Terms(), TierAssignmentSegment.RETAIL)
             .withFees(case1Fees());
+    }
+
+    /**
+     * A 12-month working-capital demand loan: interest monthly, principal at maturity.
+     *
+     * <p>Tier 3 by {@code TIER_3_SHORT_TENOR}, and by exactly the boundary § 10 draws. Disbursed
+     * 1 Apr 2026 with twelve monthly periods, so {@code maturityDate()} is 1 Apr 2027 and
+     * {@code TierAssignmentInput.tenorMonthsBetween} reads twelve months — "≤ 12", which is Tier 3,
+     * while {@code TIER_2_RETAIL_OR_MSME_LONG_TENOR}'s "> 12" does not fire. § 10's Tier 3 row names
+     * WCDL first.
+     *
+     * <p>It carries a coupon leg, deliberately: twelve interest flows of 1% of 1,000,000 = 10,000
+     * each, 120,000 over the life, repayable at par. So FR-412's absolute refusal does <em>not</em>
+     * apply to it and the decision falls to FR-411 and the register — which is what makes it the
+     * contract that distinguishes "no test on file" from "test on file and current".
+     */
+    static ContractTerms wcdlShortTenorTerms() {
+        return ContractTerms.of(PRINCIPAL, ONE_PERCENT_MONTHLY, 12, 12, DISBURSEMENT, FIRST_DUE,
+            DayCountConvention.THIRTY_360_BOND, ScheduleShape.INTEREST_ONLY_BULLET, RateType.FIXED);
+    }
+
+    /** That loan as an onboarding request, keyed to the {@link #WCDL_POPULATION} population. */
+    static OnboardingRequest wcdlShortTenorRequest(String contractId) {
+        return OnboardingRequest.of(contractId, InstrumentClass.LOAN,
+                MeasurementCategory.AMORTISED_COST,
+                SppiAssessment.passed(DISBURSEMENT, "classification.committee"),
+                wcdlShortTenorTerms(), TierAssignmentSegment.RETAIL)
+            .withRuleSetKey(WCDL_PRODUCT, "IN-MUM");
+    }
+
+    /**
+     * Reference case 9's bond: 1,000,000 of face, 8% effective annual, fifteen annual periods.
+     *
+     * <p>{@code DISCOUNT_INSTRUMENT} quotes the face as {@code principal} and derives the price, so
+     * the projected leg is one outflow of 315,241.704965890... at inception and one receipt of
+     * 1,000,000.00 at maturity, with <b>no interest flow at all</b>. That is the shape FR-412
+     * refuses: the entire return is accretion.
+     *
+     * <p>Annual periods, so {@code dueDate(15)} is 1 Apr 2027 advanced by fourteen years — 1 Apr
+     * 2041 — and the original tenor is 180 months.
+     *
+     * <p><b>30/360 bond basis, and the choice is load-bearing for the price.</b> Case 9 discounts
+     * over fifteen <em>whole</em> years, and a single terminal flow makes
+     * {@code FlowVector.periodicIndexEligible} false — it requires every period index from 1 to the
+     * maximum to be present, and this vector has only period 15 — so the projector prices under
+     * actual dating with whatever day count the contract carries. 30/360 reads 1 Apr 2026 to 1 Apr
+     * 2041 as 5,400/360 = exactly 15.0 and reproduces the reference case's 315,241.70. ACT/365F
+     * reads the same interval as 5,479/365 = 15.0110 — the four leap days — and prices the bond at
+     * 314,975.94, which is a defensible money-market convention and is not the figure case 9
+     * publishes. The fixture reproduces the reference case.
+     */
+    static ContractTerms case9ZeroCouponTerms() {
+        return ContractTerms.of(CASE9_FACE_VALUE, EIGHT_PERCENT_ANNUAL, 15, 1, DISBURSEMENT,
+            DISBURSEMENT.plusYears(1), DayCountConvention.THIRTY_360_BOND,
+            ScheduleShape.DISCOUNT_INSTRUMENT, RateType.FIXED);
+    }
+
+    /**
+     * That bond as an onboarding request, and <b>assigned Tier 3</b>.
+     *
+     * <p>Wholesale, so the retail long-tenor rule cannot catch it; no sourced exposure, so the
+     * wholesale Board-threshold override cannot; and {@code FULLY_COLLATERALISED_LOW_FEE} asserted,
+     * which is the § 10 Tier 3 limb carrying no tenor condition. That combination is not contrived —
+     * {@code TierAssignmentRule.TIER_3_FULLY_COLLATERALISED_LOW_FEE}'s own javadoc names it as the
+     * limb that "read in isolation would sweep a 20-year fully collateralised housing loan into the
+     * straight-line approximation", and it is how a fifteen-year zero-coupon reaches Tier 3.
+     */
+    static OnboardingRequest case9ZeroCouponRequest(String contractId) {
+        return OnboardingRequest.of(contractId, InstrumentClass.INVESTMENT,
+                MeasurementCategory.AMORTISED_COST,
+                SppiAssessment.passed(DISBURSEMENT, "classification.committee"),
+                case9ZeroCouponTerms(), TierAssignmentSegment.WHOLESALE)
+            .withRuleSetKey(ZERO_COUPON_PRODUCT, "IN-MUM")
+            .with(TierAssignmentFeature.FULLY_COLLATERALISED_LOW_FEE);
+    }
+
+    /**
+     * The same bond wearing a token coupon — FR-412's <b>deep-discount</b> limb.
+     *
+     * <p>The instrument that defeats a zero-coupon test while keeping the Case 9 economics, and it
+     * is an entirely ordinary way to write a bond: 315,241.70 paid, 1,000,000.00 of face at year
+     * fifteen, and 10,000 a year of coupon — 1% of face, a twelfth of the 8% yield. By hand:
+     *
+     * <pre>
+     *   accretion    = 1,000,000.00 - 315,241.70            = 684,758.30
+     *   coupon       = 15 x 10,000.00                       =  150,000.00
+     *   total return = 684,758.30 + 150,000.00              =  834,758.30
+     *   share        = 684,758.30 / 834,758.30              =       0.8203 (4dp)
+     * </pre>
+     *
+     * <p>0.8203 is over {@code EquivalenceTestSubject.DEEP_DISCOUNT_ACCRETION_SHARE} of 0.50, so
+     * 03 § 10.3 refuses Tier 3 for it. The coupon leg is what makes it a control rather than a
+     * restatement of the zero-coupon case: {@code isZeroCoupon()} is false here, so the refusal has
+     * to come from the share.
+     *
+     * <p>Supplied as a billed schedule rather than derived, because no projector in the registry
+     * emits a deep-discount-with-coupon shape from terms alone: {@code DISCOUNT_INSTRUMENT} derives
+     * the price and emits no coupon, and the bullets advance at par. A traded price with a quoted
+     * coupon schedule is exactly what {@code ExternalScheduleProjector} is for, and its javadoc
+     * calls itself "the refusal to guess".
+     */
+    static List<Instalment> deepDiscountBilledSchedule() {
+        List<Instalment> billed = new ArrayList<>();
+        for (int period = 1; period <= 15; period++) {
+            billed.add(Instalment.of(DISBURSEMENT.plusYears(period), period,
+                Money.inr("10000"), FlowKind.INTEREST));
+        }
+        billed.add(Instalment.of(DISBURSEMENT.plusYears(15), 15, CASE9_FACE_VALUE,
+            FlowKind.PRINCIPAL));
+        return billed;
+    }
+
+    /** Its 15 x 10,000 of coupon: <b>150,000.00</b>, by hand. */
+    static final Money DEEP_DISCOUNT_COUPON_TOTAL = Money.inr("150000.00");
+
+    /**
+     * Its terms: the <b>price paid</b> as principal, so the disbursement leg is the 315,241.70 a
+     * trade was struck at rather than a figure discounted from a yield.
+     */
+    static ContractTerms deepDiscountTerms() {
+        return ContractTerms.of(CASE9_ISSUE_PRICE, EIGHT_PERCENT_ANNUAL, 15, 1, DISBURSEMENT,
+            DISBURSEMENT.plusYears(1), DayCountConvention.THIRTY_360_BOND,
+            ScheduleShape.STRUCTURED, RateType.FIXED);
+    }
+
+    /** That bond as a request, wholesale and fully collateralised, so assigned Tier 3. */
+    static OnboardingRequest deepDiscountRequest(String contractId) {
+        return OnboardingRequest.of(contractId, InstrumentClass.INVESTMENT,
+                MeasurementCategory.AMORTISED_COST,
+                SppiAssessment.passed(DISBURSEMENT, "classification.committee"),
+                deepDiscountTerms(), TierAssignmentSegment.WHOLESALE)
+            .withRuleSetKey(ZERO_COUPON_PRODUCT, "IN-MUM")
+            .with(TierAssignmentFeature.FULLY_COLLATERALISED_LOW_FEE);
+    }
+
+    /** The projection seam that serves {@link #deepDiscountBilledSchedule()}. */
+    static CashflowProjector deepDiscountProjector() {
+        return new ExternalScheduleProjector(deepDiscountBilledSchedule());
+    }
+
+    /**
+     * Case 9's bond as an LMS feed would supply it: one <b>undecomposed</b> line at maturity.
+     *
+     * <p>The instrument that exploited the first fix's remaining assumption. 1,000,000.00 falls due
+     * at year fifteen against 315,241.70 paid, and the line carries no principal/interest split —
+     * which is the ordinary case, because {@code Instalment.of(date, period, amount)} defaults to
+     * {@code COMBINED_EMI} and its own javadoc calls that "what most retail schedules supply".
+     *
+     * <p>Reading a {@code COMBINED_EMI} vector as par-and-coupon without checking that the
+     * instalments actually amortise reports 684,758.30 of "coupon", accretion of nil, and an
+     * accretion share of nil — so FR-412 stays silent on the very instrument reference case 9 is
+     * about. One flow, in the last period, is not an instalment schedule.
+     */
+    static List<Instalment> undecomposedBulletSchedule() {
+        return List.of(Instalment.of(DISBURSEMENT.plusYears(15), 15, CASE9_FACE_VALUE));
+    }
+
+    /** The projection seam that serves {@link #undecomposedBulletSchedule()}. */
+    static CashflowProjector undecomposedBulletProjector() {
+        return new ExternalScheduleProjector(undecomposedBulletSchedule());
+    }
+
+    /**
+     * One equivalence test on file, at the stated performance date and delta.
+     *
+     * @param populationId the population it was performed over
+     * @param performedOn  the date the comparison was struck; the annual window runs from here
+     * @param deltaBps     the documented spread, in basis points of effective annual rate, applied
+     *                     as {@code solved = 8.00%} against {@code approximated = 8.00% - delta}.
+     *                     A delta of 5 is within the 25 bps threshold; one of 40 is not
+     */
+    static EquivalenceTestRecord equivalenceTest(
+        String populationId, LocalDate performedOn, String deltaBps) {
+        BigDecimal solved = new BigDecimal("0.08");
+        BigDecimal approximated = solved.subtract(
+            new BigDecimal(deltaBps).movePointLeft(4));
+        return new EquivalenceTestRecord(populationId, performedOn, 40,
+            Rate.annualEffective(solved), Rate.annualEffective(approximated),
+            BOARD_THRESHOLD_BPS, THRESHOLD_APPROVER);
+    }
+
+    /** A register holding exactly the tests supplied. */
+    static EquivalenceTestGate register(EquivalenceTestRecord... records) {
+        return EquivalenceTestGate.of(List.of(records));
     }
 
     /** A percentage at {@code scale} places, for comparing a rate with the fixture's printed figure. */
