@@ -77,6 +77,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -134,6 +135,41 @@ public final class EirService {
     public EirService(Book book) {
         this.book = Objects.requireNonNull(book, "book");
         this.routing = RoutingTableRegistry.of(RoutingTable.currentDefault());
+    }
+
+    // ============================================== what an ApiModule reads through
+
+    /**
+     * One contract's position as the book holds it — the instrument, not its rendering.
+     *
+     * <p><b>Why an {@code ApiModule} needs the holding and not {@link #book()}'s JSON.</b> Routing
+     * an event keys off the instrument's {@code rateType} and the EIR in force (FR-507), and a
+     * restatement measures from the carrying amount. None of those three survive a trip through a
+     * JSON string, and a module that re-derived them — from its own {@code Seed.book()}, say —
+     * would be a second source for a figure this class already owns, which is the defect
+     * {@code Book.postToGl}'s note describes at length. So the module reads through here and there
+     * is exactly one book.
+     *
+     * <p>Read-only by construction: {@code Book.Holding} is a record and this returns the holding
+     * itself, so a module can read the instrument and cannot move the balance. Applying a routed
+     * event to the book belongs to the month-end run ({@code ContractPipeline}), which is the only
+     * place that also rolls the period forward and asserts the invariants over the result.
+     */
+    public Optional<Book.Holding> holding(String contractId) {
+        return book.holding(Objects.requireNonNull(contractId, "contractId"));
+    }
+
+    /**
+     * The approved routing table series this service routes through.
+     *
+     * <p>Shared rather than rebuilt for the reason {@code Seed.policies()} gives: the first run of
+     * this server stamped a routing version the registry did not carry and DT-1 caught it. A module
+     * constructing its own {@code RoutingTableRegistry.of(RoutingTable.currentDefault())} would be
+     * a second series that can silently drift from the one the run record stamps, and the two would
+     * disagree about which reading governed a period while every figure stayed bit-identical.
+     */
+    public RoutingTableRegistry routingTables() {
+        return routing;
     }
 
     // ================================================================= the book
