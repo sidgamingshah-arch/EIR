@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.crisil.eir</groupId>
+    <artifactId>eir-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>eir-persistence-jdbc</artifactId>
+  <name>EIR :: persistence-jdbc</name>
+  <description>
+    JDBC implementations of eir-application's seven ports, over the verified DDL in eir-persistence.
+
+    Declared inside the root pom's `jdbc` profile rather than in its modules, so that
+    `mvn -o install` still builds the whole engine with no network. See ADR-0011 for the reasoning
+    and for the cost that arrangement carries.
+
+    The property this module exists to deliver: a read as at an earlier recorded_at returns the
+    version set that was recorded then. The in-memory book eir-api ships answers the same thing at
+    every boundary, so replay currently reproduces and is not a fair test of bitemporality. This is
+    what makes DT-1 mean something.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-application</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-domain</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-policy</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-gl</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.7.4</version>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+      <version>10.20.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+      <version>10.20.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <!--
+              FRAMEWORK EXEMPTION: ADR-0011 (JDBC persistence behind a profile), permitted by
+              ADR-0010.
+
+              Flyway is a migration runner and the PostgreSQL driver is a wire protocol; neither is
+              on the calculation path and neither computes a figure. eir-domain and eir-calc can
+              never take this exemption. What this module must not do is let a framework near the
+              arithmetic: money is read with ResultSet.getBigDecimal and never getDouble, because
+              the DDL is NUMERIC(24,6) for money and NUMERIC(20,12) for rates precisely so that no
+              precision is lost on the way in or out.
+            -->
+            <id>ban-frameworks-in-calculation-path</id>
+            <phase>none</phase>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
