@@ -21,6 +21,7 @@ import com.crisil.eir.policy.exception.ExceptionRecord;
 import com.crisil.eir.policy.exception.ExceptionStatus;
 import com.crisil.eir.policy.routing.RoutingTableRegistry;
 import com.sun.net.httpserver.HttpExchange;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -146,6 +147,18 @@ public final class ExceptionsModule implements ApiModule {
      * one that stands. So the action is the path and the id is a body field, and
      * {@link #PATH_ID_PATH} answers the specified shape with a 400 that names the seam instead of a
      * bewildering 405 from the listing route.
+     *
+     * <p><b>Two consequences of prefix routing that this module cannot fix, recorded rather than
+     * left for somebody to find.</b> {@link Routes} registers one verb per path, so
+     * {@code GET /api/exceptions/{id}} answers 405 rather than the 400 above — the explanatory
+     * context is claimed for POST, and claiming it for both verbs is a duplicate-context error at
+     * server start. And the JDK server matches by longest prefix with nothing after it, so
+     * {@code POST /api/exceptions/resolveXYZ} and {@code POST /api/exceptions/resolve/anything}
+     * reach the resolution handler, which cannot see the path it was reached by and therefore
+     * cannot refuse them. A mistyped action path performs the mutation. That is a property of every
+     * route on this server — {@code POST /api/run/foo} runs the month end — and it is the same
+     * missing seam: a {@code Routes.post} that carried the exchange would let each handler check
+     * the path it was actually called on.
      */
     @Override
     public void register(Routes routes) {
@@ -184,16 +197,27 @@ public final class ExceptionsModule implements ApiModule {
      * the request bodies use. <b>Presence is decided on the raw query and not on
      * {@link FormBody#has}</b>, which answers false for a present-but-blank value: read that way,
      * {@code ?status=} would mean "no filter" and answer the whole queue, which is the same defect
-     * as ignoring an unrecognised value. Sent blank, the parameter reaches
-     * {@link FormBody#text} and refuses.
+     * as ignoring an unrecognised value. Sent blank, or named with no value at all, the parameter
+     * refuses.
+     *
+     * <p><b>Every aggregate on this response is named for the queue it was computed over</b> —
+     * {@code queuedHere}, {@code blocksCloseOnThisQueue}, {@code thisQueueGate} — and
+     * {@code authoritativeCloseGate} names what to ask instead. Unscoped names were worse than
+     * imprecise: {@code "blocksClose":true} on a client's dashboard reads as the close gate's
+     * answer, and this module's derived snapshot is not it. After {@code POST /api/repair} and a
+     * re-run the engine has no exception blocker left and this snapshot still holds the row, so an
+     * unscoped field would be wrong in the direction that matters — believed when it says a close
+     * is blocked, and believed again when it says one is not.
      */
     private Json.Obj listQueue(HttpExchange exchange) {
         String rawQuery = exchange.getRequestURI().getRawQuery();
         FormBody query = FormBody.parse(rawQuery);
-        ExceptionStatus status = named(rawQuery, "status")
-            ? parse(ExceptionStatus.class, query.text("status"), "status") : null;
-        ExceptionCategory category = named(rawQuery, "category")
-            ? parse(ExceptionCategory.class, query.text("category"), "category") : null;
+        String rawStatus = filterValue(rawQuery, query, "status");
+        String rawCategory = filterValue(rawQuery, query, "category");
+        ExceptionStatus status =
+            rawStatus == null ? null : parse(ExceptionStatus.class, rawStatus, "status");
+        ExceptionCategory category =
+            rawCategory == null ? null : parse(ExceptionCategory.class, rawCategory, "category");
 
         ExceptionWorkQueue queue = workQueue();
         List<ExceptionRecord> matching = queue.list(status, category);
@@ -215,14 +239,18 @@ public final class ExceptionsModule implements ApiModule {
             .str("raisedByRunId", DERIVED_RUN_ID)
             .str("statusFilter", status == null ? null : status.name())
             .str("categoryFilter", category == null ? null : category.name())
-            .count("queued", queue.size())
+            .count("queuedHere", queue.size())
             .count("returned", rows.size())
-            .count("closeBlockers", queue.queue().closeBlockers().size())
-            .bool("blocksClose", queue.queue().blocksClose())
-            .str("gate", queue.queue().describeCloseGate())
-            .strings("quarantinedContracts",
+            .count("closeBlockersOnThisQueue", queue.queue().closeBlockers().size())
+            .bool("blocksCloseOnThisQueue", queue.queue().blocksClose())
+            .str("thisQueueGate", queue.queue().describeCloseGate())
+            .str("authoritativeCloseGate", "POST /api/close. PeriodCloseGate reads the engine's"
+                + " own queue and not this one, so no field on this response is an answer to"
+                + " whether the period's exception gate is clear")
+            .strings("quarantinedContractsOnThisQueue",
                 List.copyOf(queue.queue().quarantinedContracts()))
-            .strings("demotedContracts", List.copyOf(queue.queue().demotedContracts()))
+            .strings("demotedContractsOnThisQueue",
+                List.copyOf(queue.queue().demotedContracts()))
             .array("countByCategory", counts)
             .array("exceptions", rows)
             .strings("categories", names(ExceptionCategory.values()))
@@ -297,6 +325,35 @@ public final class ExceptionsModule implements ApiModule {
         String resolvedBy = body.text("resolvedBy");
         String note = body.text("note");
         String previously = row.isOpen() ? null : row.status() + " by " + row.resolvedBy();
+
+        // The one transition that is refused, and the reason is not tidiness. RESOLVED carries
+        // defectFixed = true, so it LIFTS the quarantine: a resolution written over an
+        // ACCEPTED_WITH_APPROVAL row would discard the approver's name and reason — the row holds
+        // one signatory column and that is all the audit file will ever show — and claim the
+        // contract back into the reported population on one unverified signature. That is a way
+        // past the four-eyes control by the back door: sign nothing, accept with a colleague, then
+        // resolve over it alone. ExceptionQueue.resolve already refuses to re-work a worked row for
+        // exactly this reason; find() hands back the live record, so the queue's own guard cannot
+        // see it and this one has to. Acknowledged explicitly it is allowed, because a defect
+        // genuinely fixed after being accepted is a real sequence.
+        if (row.status() == ExceptionStatus.ACCEPTED_WITH_APPROVAL
+            && !ExceptionStatus.ACCEPTED_WITH_APPROVAL.name()
+                .equals(body.textOr("replacing", ""))) {
+            return Json.object()
+                .bool("worked", false)
+                .str("id", ExceptionWorkQueue.idOf(row))
+                .str("status", row.status().name())
+                .str("approvedBy", row.resolvedBy())
+                .str("approvalNote", row.resolutionNote())
+                .str("message", "exception " + ExceptionWorkQueue.idOf(row) + " is"
+                    + " ACCEPTED_WITH_APPROVAL by " + row.resolvedBy() + " and a resolution would"
+                    + " replace that approval with a claim that the defect was fixed — discarding"
+                    + " the only signatory the row can hold, and lifting the quarantine, which"
+                    + " puts the contract back into the reported population. If the input really"
+                    + " was corrected after the acceptance, say so: post again with"
+                    + " replacing=ACCEPTED_WITH_APPROVAL")
+                .strings("caveats", queueCaveats());
+        }
 
         ExceptionRecord resolved = queue.resolve(row, resolvedBy, note);
         return Json.object()
@@ -375,24 +432,35 @@ public final class ExceptionsModule implements ApiModule {
      * sides — {@code ops.analyst} and {@code Ops.Analyst } are the same identity — and this
      * endpoint records it, reports {@code "selfApproved":true}, and the close then refuses.
      *
-     * <p><b>The delegation, and the guard on it.</b> The list the close gate weighs lives on
-     * {@link EirService}, so the acceptance has to be recorded there too and this endpoint calls
-     * the engine's own acceptance path rather than forking it. That path accepts <em>every</em> row
-     * in the engine's queue at once, which is right for a console driving a one-contract queue and
-     * wrong for a signature that names one exception: forty open rows and one signature would
-     * become forty accepted rows nobody put forward. So delegation is refused while this module's
-     * queue holds more than one row. The premise the guard rests on is stated rather than assumed:
-     * it counts <em>this</em> queue, and it is a floor under the engine's queue only for as long as
-     * the two hold the same rows — which they do on the book as seeded, and which is the reason the
-     * first caveat exists.
+     * <p><b>The engine's queue is the only place an acceptance is recorded, and this module keeps
+     * no copy.</b> That is the important design decision here and it was arrived at the other way
+     * round first. Marking the row accepted on this module's derived queue as well looked like
+     * bookkeeping and was a lie waiting for a caller: {@code EirService.accept} records nothing
+     * when no run has been rolled forward (it answers {@code "ran":false}), so a local copy would
+     * show the row {@code ACCEPTED_WITH_APPROVAL} and this module's queue reporting "close not
+     * blocked" with <em>nothing at the gate at all</em> — and a following
+     * {@code GET /api/exceptions?status=OPEN} answering that there is nothing outstanding. An
+     * understated queue is a nuisance; a queue that says the gate is clear when it is not is the
+     * failure the queue exists to prevent. So the acceptance goes to the engine and the engine's
+     * answer comes back verbatim, and the row here stays as the run raised it.
      *
-     * <p><b>An acceptance may be posted again, and that is not a loophole.</b> Every
-     * {@code POST /api/run} rebuilds the engine's queue and clears its acceptance list on purpose,
-     * so an acceptance recorded before a re-run is gone from the only place the gate reads. If this
-     * endpoint refused a second signature the acceptance could never be re-recorded and 06 § 6's
-     * only route past a queued exception would be closed for the life of the process. So a repeat
-     * is allowed, the signatory it replaced is named on the response, and the gate still refuses a
-     * self-approved one however many times it is posted.
+     * <p>Two things follow, and both are improvements. An acceptance can be posted again after a
+     * re-run — which it must be, because every {@code POST /api/run} clears the engine's acceptance
+     * list on purpose and the gate refuses a carried-forward one as
+     * {@code ACCEPTANCE_WITHOUT_AN_EXCEPTION} — and no resolution posted afterwards can overwrite
+     * an approver's name here, because there is no accepted row here to overwrite.
+     *
+     * <p><b>The guard on the delegation, and the premise it cannot check.</b>
+     * {@code EirService.accept} ignores the id and accepts <em>every</em> row in the engine's
+     * queue, which is right for a console driving a one-contract queue and wrong for a signature
+     * that names one exception: forty open rows and one signature would become forty accepted rows
+     * nobody put forward. So delegation is refused while this module's queue holds more than one
+     * row. Say plainly what that is worth: it counts <em>this</em> queue, and it bounds the
+     * engine's only while the two hold the same rows. It cannot check that, because
+     * {@code EirService} exposes no read of its queue — so {@code engine.accepted} on the response
+     * is the number of rows the engine actually signed, and a value above one means this signature
+     * covered exceptions it did not name. The seam that turns the guard into a real bound is a
+     * per-exception acceptance on {@code EirService}.
      */
     private Json.Obj accept(FormBody body) {
         ExceptionWorkQueue queue = workQueue();
@@ -406,7 +474,7 @@ public final class ExceptionsModule implements ApiModule {
             return Json.object()
                 .bool("worked", false)
                 .str("id", ExceptionWorkQueue.idOf(row))
-                .count("queued", queue.size())
+                .count("queuedHere", queue.size())
                 .str("reason", reason)
                 .bool("selfApproved", selfApproved)
                 .str("message", "this queue holds " + queue.size() + " exceptions and the engine's"
@@ -418,32 +486,28 @@ public final class ExceptionsModule implements ApiModule {
                 .strings("caveats", acceptCaveats());
         }
 
-        String previously = row.isOpen() ? null : row.status() + " by " + row.resolvedBy();
-        ExceptionRecord accepted = queue.accept(row, approvedBy, reason);
-        // The engine's own answer, verbatim and nested rather than re-rendered, and first on the
-        // response because it is the half that matters: this is the acceptance PeriodCloseGate
-        // weighs, and its `ran` field says whether there was a run to accept anything from. This
-        // layer does not parse its own JSON back to find out — that is what nesting it is for, and
-        // an acceptance posted before a run can simply be posted again after one.
+        // The engine's own answer, verbatim and nested rather than re-rendered, and FIRST on the
+        // response because it is the whole of what happened: this is the acceptance
+        // PeriodCloseGate weighs, its `ran` field says whether there was a run to accept anything
+        // from, and its `accepted` count says how many rows it signed. Nothing is recorded on this
+        // module's queue — see the javadoc: a local copy would report a clear gate on a period
+        // where the engine had recorded nothing at all.
         Json.Obj engine = service.accept(body);
 
         return Json.object()
             .obj("engine", engine)
             .bool("worked", true)
-            .str("id", ExceptionWorkQueue.idOf(accepted))
-            .str("contractId", accepted.contractId())
-            .str("category", accepted.category().name())
-            .str("status", accepted.status().name())
+            .str("id", ExceptionWorkQueue.idOf(row))
+            .str("contractId", row.contractId())
+            .str("category", row.category().name())
+            .str("recordedOn", "the engine's queue only. This module keeps no copy of an"
+                + " acceptance, so the row it lists for this exception still reads as the run"
+                + " raised it — GET /api/exceptions understates a worked row rather than"
+                + " overstating a clear gate")
             .str("acceptedBy", acceptedBy)
             .str("approvedBy", approvedBy)
             .str("reason", reason)
             .bool("selfApproved", selfApproved)
-            .str("replacedWorking", previously)
-            .obj("thisQueue", Json.object()
-                .bool("blocksClose", accepted.blocksClose())
-                .bool("quarantinesContract", accepted.quarantinesContract())
-                .bool("defectFixed", accepted.status().defectFixed())
-                .str("gate", queue.queue().describeCloseGate()))
             .str("note", selfApproved
                 ? "the same identity is on both sides. This is recorded, not rejected: the control"
                     + " is PeriodCloseGate's SELF_APPROVED_ACCEPTANCE, and a refusal manufactured"
@@ -471,6 +535,13 @@ public final class ExceptionsModule implements ApiModule {
      * roll-forward is not something a server start should do — a book of ten million contracts
      * would make the port open minutes after the process began, and an operator would read that as
      * a hung deployment.
+     *
+     * <p><b>What laziness costs, said plainly.</b> The derivation runs inside a request handler on
+     * {@code EirServer}'s single executor thread, so on a book where the run is expensive the first
+     * {@code GET /api/exceptions} blocks every other request for the length of a month-end run, and
+     * duplicates work the run it is reporting on has just done. Both are consequences of deriving
+     * the queue rather than reading it, and both go away with the same seam: a read accessor for
+     * the last run's exceptions on {@code EirService} costs a map lookup and needs no run at all.
      */
     private ExceptionWorkQueue workQueue() {
         if (workQueue == null) {
@@ -528,11 +599,10 @@ public final class ExceptionsModule implements ApiModule {
                 + " therefore report nothing outstanding over an engine queue that still holds a"
                 + " close blocker. POST /api/close is the authoritative answer to whether the"
                 + " exception gate is clear; nothing on this endpoint is.",
-            "This module's worked state is not cleared by a run, and the engine's is: every"
-                + " POST /api/run rebuilds the engine's queue and clears its acceptance list. So"
-                + " an acceptance has to be posted again after a re-run, and this endpoint allows"
-                + " a repeat for exactly that reason rather than refusing it as a second"
-                + " signature.",
+            "A resolution recorded here is not cleared by a run and the engine's queue is: every"
+                + " POST /api/run rebuilds it and clears its acceptance list. So an acceptance has"
+                + " to be posted again after a re-run, and this endpoint allows a repeat for"
+                + " exactly that reason rather than refusing it as a second signature.",
             "An id is contractId" + ExceptionWorkQueue.ID_SEPARATOR + "CATEGORY, which is the pair"
                 + " ExceptionAcceptance matches on. 06 § 6 puts it in the path; Routes.post hands a"
                 + " handler the form body and not the exchange, so it travels as a form field"
@@ -542,10 +612,11 @@ public final class ExceptionsModule implements ApiModule {
     /** The three things an operator accepting an exception has to be told. */
     private static List<String> acceptCaveats() {
         List<String> caveats = new ArrayList<>(queueCaveats());
-        caveats.add("Acceptance is recorded on the engine's queue as well as this one, because"
-            + " PeriodCloseGate weighs the engine's acceptance list. Read engine.ran on this"
-            + " response: the engine has nothing to accept until POST /api/run has been rolled"
-            + " forward, and an acceptance recorded here alone will not move the close.");
+        caveats.add("An acceptance is recorded on the ENGINE's queue and nowhere else, because"
+            + " that is the list PeriodCloseGate weighs. Read engine.ran: the engine has nothing"
+            + " to accept until POST /api/run has been rolled forward. Read engine.accepted too —"
+            + " the engine's acceptance path signs for every row in its queue at once, so a count"
+            + " above one means this signature covered exceptions it did not name.");
         caveats.add("An acceptance belongs to the run whose queue raised the exception. A new run"
             + " clears the engine's acceptance list on purpose — the gate refuses a carried-forward"
             + " one as ACCEPTANCE_WITHOUT_AN_EXCEPTION, because an acceptance list from a previous"
@@ -576,22 +647,44 @@ public final class ExceptionsModule implements ApiModule {
     }
 
     /**
-     * Whether the query string names this parameter at all, blank value included.
+     * A filter's value, or null where the query does not mention it at all.
      *
-     * <p>{@link FormBody#has} cannot answer this: it reports false for a present-but-blank value,
-     * which is right for a body field that is optional and wrong for a filter, because
-     * {@code ?status=} would then silently mean "every status" and answer a whole queue to a caller
-     * who asked for a slice of it. Decided on the raw query, before decoding, so that a blank
-     * arrives at {@link FormBody#text} and is refused there with the field named.
+     * <p><b>Presence and value are two questions and {@link FormBody} can only answer the
+     * second.</b> {@link FormBody#has} reports false for a present-but-blank value, which is right
+     * for an optional body field and wrong for a filter: read that way, {@code ?status=} would mean
+     * "every status" and answer the whole queue to a caller who asked for a slice of it — the same
+     * defect as ignoring an unrecognised value, and with the same consequence, since a caller
+     * reading forty accepted rows as forty open ones will work a queue that is already worked.
+     *
+     * <p>So presence is decided on the query string itself, and both empty forms — {@code ?status=}
+     * and a bare {@code ?status} — are refused with one message that says what happened. The
+     * parameter <em>name</em> is percent-decoded before comparison: {@code ?%73tatus=OPEN} names
+     * {@code status}, and comparing the raw form would have silently dropped the filter and
+     * answered the whole queue with {@code "statusFilter":null} — precisely the failure this method
+     * exists to prevent, arriving through the door it was watching.
      */
+    private static String filterValue(String rawQuery, FormBody query, String key) {
+        if (!named(rawQuery, key)) {
+            return null;
+        }
+        if (!query.has(key)) {
+            throw new FormBody.BadRequest("'" + key + "' is named in the query with no value; a"
+                + " filter sent empty is not 'every value'. Send a value or leave the parameter"
+                + " out — answering the whole queue to a caller who asked for a slice of it is the"
+                + " same defect as ignoring an unrecognised value");
+        }
+        return query.text(key);
+    }
+
+    /** Whether the query string names this parameter at all, empty value included. */
     private static boolean named(String rawQuery, String key) {
         if (rawQuery == null) {
             return false;
         }
         for (String pair : rawQuery.split("&")) {
             int split = pair.indexOf('=');
-            String name = split < 0 ? pair : pair.substring(0, split);
-            if (key.equals(name)) {
+            String rawName = split < 0 ? pair : pair.substring(0, split);
+            if (key.equals(URLDecoder.decode(rawName, StandardCharsets.UTF_8))) {
                 return true;
             }
         }

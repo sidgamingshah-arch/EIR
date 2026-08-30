@@ -12,6 +12,7 @@ import com.crisil.eir.api.store.Seed;
 import com.crisil.eir.policy.exception.ExceptionCategory;
 import com.crisil.eir.policy.exception.ExceptionQueue;
 import com.crisil.eir.policy.exception.ExceptionRecord;
+import com.crisil.eir.policy.exception.ExceptionStatus;
 import com.sun.net.httpserver.HttpExchange;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -121,19 +122,24 @@ class ExceptionsModuleTest {
                 .contains("\"contractId\":\"C-0003\"")
                 .contains("\"category\":\"MISSING_MANDATORY_FIELD\"")
                 .contains("\"status\":\"OPEN\"")
-                .contains("\"queued\":1");
-            // The row's three separate answers. An accepted exception stops blocking and does NOT
-            // lift the quarantine, so reporting one "worked" flag over the three would let an
-            // operator conclude the contract's figure came back.
+                .contains("\"queuedHere\":1");
+            // The row's three separate answers, asserted as the adjacent triple they are written
+            // as. An accepted exception stops blocking and does NOT lift the quarantine, so
+            // reporting one "worked" flag over the three would let an operator conclude the
+            // contract's figure came back.
             assertThat(response.body())
-                .contains("\"blocksClose\":true")
-                .contains("\"quarantinesContract\":true")
-                .contains("\"demotesContract\":false");
-            // The whole-queue arithmetic, which a filtered read must not be able to hide.
+                .contains("\"blocksClose\":true,\"quarantinesContract\":true,"
+                    + "\"demotesContract\":false");
+            // The whole-queue arithmetic, which a filtered read must not be able to hide — and
+            // every aggregate named for the queue it was computed over, with the response saying
+            // what to ask instead. An unscoped "blocksClose" at the top of this response would
+            // read as the close gate's answer, and this derived snapshot is not it.
             assertThat(response.body())
-                .contains("\"closeBlockers\":1")
-                .contains("\"quarantinedContracts\":[\"C-0003\"]")
-                .contains("CLOSE BLOCKED by 1 of 1 exception(s)");
+                .contains("\"closeBlockersOnThisQueue\":1")
+                .contains("\"blocksCloseOnThisQueue\":true")
+                .contains("\"quarantinedContractsOnThisQueue\":[\"C-0003\"]")
+                .contains("CLOSE BLOCKED by 1 of 1 exception(s)")
+                .contains("\"authoritativeCloseGate\":\"POST /api/close.");
         }
 
         @Test
@@ -174,8 +180,8 @@ class ExceptionsModuleTest {
                     + " nothing is wrong")
                 .contains("\"categoryFilter\":\"NO_SOLUTION\"")
                 .contains("\"returned\":0")
-                .contains("\"queued\":1")
-                .contains("\"blocksClose\":true")
+                .contains("\"queuedHere\":1")
+                .contains("\"blocksCloseOnThisQueue\":true")
                 .doesNotContain("\"id\":\"" + QUARANTINED_ID + "\"");
 
             assertThat(get("/api/exceptions?status=RESOLVED").body())
@@ -194,9 +200,26 @@ class ExceptionsModuleTest {
                     + " a caller who asked for a slice of it — the same defect as ignoring an"
                     + " unrecognised value")
                 .isEqualTo(400);
-            assertThat(response.body()).contains("'status' is required and arrived blank");
+            assertThat(response.body())
+                .contains("'status' is named in the query with no value");
 
             assertThat(get("/api/exceptions?category=").status()).isEqualTo(400);
+
+            Response noEquals = get("/api/exceptions?status");
+            assertThat(noEquals.status())
+                .as("a bare ?status names the filter as plainly as ?status= does, and one message"
+                    + " covers both — 'arrived absent' would contradict a query that names it")
+                .isEqualTo(400);
+            assertThat(noEquals.body())
+                .contains("'status' is named in the query with no value");
+
+            Response encodedName = get("/api/exceptions?%73tatus=RESOLVED");
+            assertThat(encodedName.body())
+                .as("the parameter NAME is percent-decoded before presence is decided; comparing"
+                    + " the raw form would drop the filter silently and answer the whole queue"
+                    + " labelled statusFilter:null, which is the defect this check exists for")
+                .contains("\"statusFilter\":\"RESOLVED\"")
+                .contains("\"returned\":0");
         }
 
         @Test
@@ -440,7 +463,7 @@ class ExceptionsModuleTest {
                 .as("recorded, not rejected: manufacturing the refusal here would leave"
                     + " PeriodCloseGate's SELF_APPROVED_ACCEPTANCE unreachable")
                 .contains("\"worked\":true")
-                .contains("\"status\":\"ACCEPTED_WITH_APPROVAL\"");
+                .contains("\"engine\":{\"ran\":true,\"accepted\":1");
             // The neighbouring key is part of the substring on purpose. This response nests the
             // engine's own answer, which carries its own selfApproved computed by its own call to
             // FourEyes — so a bare "selfApproved":true is satisfied by the nested object even when
@@ -451,10 +474,14 @@ class ExceptionsModuleTest {
             assertThat(accepted.body())
                 .as("this module's own four-eyes verdict, not the engine's nested one")
                 .contains("\"reason\":\"immaterial this month\",\"selfApproved\":true");
-            // Acceptance unblocks the close and changes nothing else: the input is still malformed
-            // and the contract still has no figure.
+            // The acceptance lives on the engine's queue and nowhere else. A copy here would have
+            // this module's queue reporting a clear close gate on a period where the engine had
+            // recorded nothing at all — see anAcceptanceBeforeAnyRunSaysSo.
             assertThat(accepted.body())
-                .contains("\"quarantinesContract\":true,\"defectFixed\":false");
+                .contains("\"recordedOn\":\"the engine's queue only.");
+            assertThat(get("/api/exceptions?status=OPEN").body())
+                .as("understating a worked row is safe; reporting a clear gate is not")
+                .contains("\"returned\":1");
             assertThat(accepted.body())
                 .as("the acceptance the gate weighs lives on the engine, so the engine's own"
                     + " answer comes back nested verbatim — and first, because engine.ran is the"
@@ -541,7 +568,7 @@ class ExceptionsModuleTest {
             assertThat(again.status()).isEqualTo(200);
             assertThat(again.body())
                 .contains("\"worked\":true")
-                .contains("\"replacedWorking\":\"ACCEPTED_WITH_APPROVAL by Ops.Analyst\"")
+                .contains("\"engine\":{\"ran\":true,\"accepted\":1")
                 .contains("\"reason\":\"second pass\",\"selfApproved\":true");
 
             assertThat(post("/api/close", "closedBy=financial.controller").body())
@@ -660,6 +687,46 @@ class ExceptionsModuleTest {
                 .hasMessageContaining("addresses 2 queued exceptions")
                 .hasMessageContaining("posting 11")
                 .hasMessageContaining("posting 12");
+        }
+
+        @Test
+        @DisplayName("a resolution refuses to write over an approval, and says how to mean it")
+        void aResolutionWillNotSilentlyEraseAnApproval() {
+            // The back door out of the four-eyes control, if it were open: accept with a colleague,
+            // then resolve over it alone. RESOLVED carries defectFixed = true, so the resolution
+            // would discard the approver's name — the row holds ONE signatory column and that is
+            // all the audit file will ever show — and lift the quarantine, claiming the contract
+            // back into the reported population on one unverified signature. ExceptionQueue.resolve
+            // refuses to re-work a worked row for exactly this reason; find() hands back the live
+            // record, so the queue's own guard cannot see it and the module's has to.
+            ExceptionQueue queue = new ExceptionQueue();
+            queue.raise(ExceptionRecord.raise("C-0007", "RUN-202805-01",
+                    ExceptionCategory.NO_SOLUTION, "solve ended NO_SOLUTION on the reset leg",
+                    "PAYLOAD-31")
+                .acceptWithApproval("fin.controller", "immaterial for May"));
+            RecordedRoutes routes = moduleOver(queue);
+
+            String refused = routes.post(ExceptionsModule.RESOLVE_PATH,
+                "id=C-0007:NO_SOLUTION&resolvedBy=ops.analyst&note=calling it fixed").toString();
+
+            assertThat(refused)
+                .contains("\"worked\":false")
+                .contains("is ACCEPTED_WITH_APPROVAL by fin.controller")
+                .contains("replacing=ACCEPTED_WITH_APPROVAL");
+            assertThat(queue.records().get(0).status())
+                .as("the approval stands and the quarantine with it")
+                .isEqualTo(ExceptionStatus.ACCEPTED_WITH_APPROVAL);
+            assertThat(queue.records().get(0).resolvedBy()).isEqualTo("fin.controller");
+
+            String acknowledged = routes.post(ExceptionsModule.RESOLVE_PATH,
+                "id=C-0007:NO_SOLUTION&resolvedBy=ops.analyst&note=schedule corrected at source"
+                    + "&replacing=ACCEPTED_WITH_APPROVAL").toString();
+
+            assertThat(acknowledged)
+                .as("a defect genuinely fixed after being accepted is a real sequence, so the"
+                    + " transition is available — deliberately, not silently")
+                .contains("\"worked\":true")
+                .contains("\"replacedWorking\":\"ACCEPTED_WITH_APPROVAL by fin.controller\"");
         }
 
         @Test

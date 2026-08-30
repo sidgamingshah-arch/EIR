@@ -152,10 +152,10 @@ public final class ExceptionWorkQueue {
         return queue.resolve(row, resolvedBy, note);
     }
 
-    /** Records 04 § 3's "explicitly accepted with approval" against {@code row}. */
-    public ExceptionRecord accept(ExceptionRecord row, String approvedBy, String reason) {
-        return queue.acceptWithApproval(row, approvedBy, reason);
-    }
+    // No accept(...) here, deliberately. An acceptance is recorded on the engine's queue and
+    // nowhere else — see ExceptionsModule.accept: a copy on this queue would report a clear close
+    // gate on a period where the engine had recorded nothing. A method here would be an invitation
+    // to keep that copy.
 
     /** Every id in the queue, in the order raised, for a refusal that has to name the choices. */
     public List<String> ids() {
