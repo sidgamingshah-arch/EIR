@@ -143,35 +143,42 @@ public final class EirService {
      * on a book the run got wrong. So this returns the run's own working papers, read-only, and
      * nothing that could change them.
      *
-     * <p><b>Why the book comes along.</b> A movement schedule is presented per product and a
+     * <p><b>Why the holdings come along.</b> A movement schedule is presented per product and a
      * product id lives on the holding, not on the computation. The alternative — copying the
      * product id onto {@code ContractComputation} — would widen the spine's vocabulary for one
      * report's benefit, which is the trade {@code ContractComputation}'s own javadoc refuses.
+     *
+     * <p><b>The holdings and not the {@link Book}, and the difference is the whole point of the
+     * word read-only above.</b> {@code Book} carries {@code put}, {@code postToGl} and
+     * {@code recordOnboarded}, so handing one to a report would document an incapability the type
+     * does not have — a reporting module could post to the general ledger through a seam whose
+     * javadoc promises it cannot. {@code Book.holdings()} is an immutable list of immutable records,
+     * so the promise is enforced by the type rather than by this sentence.
      */
     public Optional<RunSnapshot> lastRunFor(int periodId) {
         Completed completed = lastRun.get(periodId);
         return completed == null
             ? Optional.empty()
             : Optional.of(new RunSnapshot(completed.runId(), periodId, completed.aggregate(),
-                completed.computations(), book));
+                completed.computations(), book.holdings()));
     }
 
     /**
      * What a report needs of a finished run: the spine's per-contract results, the per-contract
-     * working papers, and the book the population came from. See {@link #lastRunFor}.
+     * working papers, and the holdings the population came from. See {@link #lastRunFor}.
      */
     public record RunSnapshot(
         String runId,
         int periodId,
         RunAggregate aggregate,
         Map<String, ContractComputation> computations,
-        Book book) {
+        List<Book.Holding> holdings) {
 
         public RunSnapshot {
             Objects.requireNonNull(runId, "runId");
             Objects.requireNonNull(aggregate, "aggregate");
             computations = Map.copyOf(Objects.requireNonNull(computations, "computations"));
-            Objects.requireNonNull(book, "book");
+            holdings = List.copyOf(Objects.requireNonNull(holdings, "holdings"));
         }
     }
 

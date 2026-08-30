@@ -6,7 +6,12 @@ import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.http.Json;
 import com.crisil.eir.api.http.Routes;
 import com.crisil.eir.api.modules.movement.MovementSchedule;
+import com.crisil.eir.domain.Money;
+import com.crisil.eir.domain.Precision;
 import com.sun.net.httpserver.HttpExchange;
+import java.math.BigDecimal;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -89,8 +94,18 @@ public final class MovementReportModule implements ApiModule {
      * through the same {@link FormBody.BadRequest}, as every POST in this API.
      */
     private Json.Obj movement(HttpExchange exchange) {
-        FormBody query = FormBody.parse(exchange.getRequestURI().getRawQuery());
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        FormBody query = FormBody.parse(rawQuery);
         int periodId = query.integer("period");
+        // A blank productId is refused rather than read as "every product". FormBody.has treats a
+        // blank value as absent, which is right for a body that omits a field and wrong here: a
+        // caller who sent productId= asked for a scope, and silently widening it to the whole book
+        // answers a question nobody asked. The same principle as requiring the period.
+        if (sent(rawQuery, "productId") && !query.has("productId")) {
+            throw new FormBody.BadRequest("'productId' arrived blank. A blank filter is not"
+                + " 'every product' — omit the parameter to ask for every product, because"
+                + " widening a scope the caller narrowed is worse than refusing.");
+        }
         String productId = query.has("productId") ? query.text("productId") : null;
 
         Optional<EirService.RunSnapshot> snapshot = service.lastRunFor(periodId);
@@ -107,7 +122,7 @@ public final class MovementReportModule implements ApiModule {
 
         EirService.RunSnapshot run = snapshot.get();
         MovementSchedule schedule = MovementSchedule.over(
-            run.runId(), run.periodId(), run.aggregate(), run.computations(), run.book(),
+            run.runId(), run.periodId(), run.aggregate(), run.computations(), run.holdings(),
             productId);
 
         List<Json.Obj> products = new ArrayList<>(schedule.rows().size());
@@ -123,19 +138,32 @@ public final class MovementReportModule implements ApiModule {
             .str("scope", productId == null ? "every product" : "product " + productId)
             .bool("filterMatched", schedule.filterMatched())
             .strings("productsOnFile", schedule.productsOnFile())
-            .count("contractsAccountedFor", run.aggregate().populationSize())
-            .count("contractsWithFigures", run.aggregate().computedCount())
+            // Two scopes, named so they cannot be read as one. The first pair is the RUN's, which
+            // is book-wide and does not narrow with the filter; the second pair is this SCOPE's.
+            // Publishing "3 accounted for, 2 with figures, 0 in schedule" beside a green check on a
+            // filter that matched nothing is the exact shape those counts exist to expose, and under
+            // the old names it was indistinguishable from a schedule short two contracts.
+            .count("runPopulation", run.aggregate().populationSize())
+            .count("runContractsWithFigures", run.aggregate().computedCount())
+            .count("contractsInScope", schedule.contractsInScope())
             .count("contractsInSchedule", schedule.total().contracts())
             .count("productRows", schedule.rows().size())
             .array("products", products)
             .obj("total", rowRow(schedule.total(), false))
             .obj("check", checkRow(schedule.check()))
-            // Lifted out of the check so a caller polling this endpoint reads one boolean. Named
-            // for the claim rather than for the outcome: "columnsSum": true over an empty scope
-            // would be a true statement about no figures, which is why proves() is separate.
-            .bool("columnsSum", schedule.check().satisfied())
-            .bool("columnsSumProven", schedule.check().proves())
-            .figure("deviation", schedule.check().deviation())
+            // THE narrow FR-805 claim and nothing else: leg 1, the arithmetic. It carries the same
+            // meaning here as on every row of the schedule, which is what lets a caller compare
+            // them. Deliberately NOT the whole check — a run whose working papers failed to
+            // write has columns that sum and is short a contract, and reporting that as "the columns
+            // do not sum" sends a reader to check arithmetic that is correct.
+            .bool("columnsSum", schedule.check().columnsSum())
+            // All four legs: arithmetic, rounding, aggregation, completeness.
+            .bool("scheduleReconciles", schedule.check().satisfied())
+            // Whether either boolean proves anything. False over an empty scope, where a pass is a
+            // true statement about no figures — ReplayVerification draws the same distinction
+            // between dtOneSatisfied() and provesReproduction().
+            .bool("reconciliationProven", schedule.check().proves())
+            .figure("deviation", presented(schedule.check().deviation()))
             .str("checkId", MovementSchedule.CHECK_NAME
                 + " (no InvariantId — see invariantIdRequested)")
             .str("invariantIdRequested", MovementSchedule.INVARIANT_ID_REQUESTED)
@@ -208,14 +236,51 @@ public final class MovementReportModule implements ApiModule {
                 + " carrying amount + EIR interest − cash received + rounding = closing gross"
                 + " carrying amount, on every product row and in total (FR-805)")
             .bool("satisfied", check.satisfied())
+            .bool("columnsSum", check.columnsSum())
             // The TOTAL absolute deviation across the four legs. Signed aggregation would let two
             // breaks in opposite directions report a reconciled schedule.
-            .figure("deviation", check.deviation())
+            .figure("deviation", presented(check.deviation()))
             .bool("proves", check.proves())
             .str("detail", check.detail())
             .count("legs", check.legs().size())
             .count("breaches", check.breaches().size())
             .array("legDetail", legs);
+    }
+
+    /**
+     * A deviation at the presentation scale every other figure in this response is at.
+     *
+     * <p>{@code Check.deviation()} is a {@code BigDecimal} because that is the shape
+     * {@code InvariantResult} publishes a deviation in, and it is seeded from
+     * {@code BigDecimal.ZERO}, whose scale is nought. Emitted raw, a clean schedule reports
+     * {@code "deviation":"0"} beside sibling money fields reporting {@code "0.00"}, and a UI that
+     * formats on the string as received gets two money formats out of one response.
+     */
+    private static BigDecimal presented(BigDecimal deviation) {
+        return Precision.round(deviation, Money.INR.getDefaultFractionDigits());
+    }
+
+    /**
+     * Whether a query string carried a key at all, whatever its value.
+     *
+     * <p>{@code FormBody.has} cannot answer this — it reports a blank value as absent, which
+     * is the right reading for an omitted field and the wrong one for a filter the caller narrowed
+     * to nothing. Split the same way {@code FormBody.parse} splits, so the two cannot disagree about
+     * what a key is.
+     */
+    private static boolean sent(String rawQuery, String key) {
+        if (rawQuery == null) {
+            return false;
+        }
+        for (String pair : rawQuery.split("&")) {
+            int split = pair.indexOf('=');
+            String name = URLDecoder.decode(
+                split < 0 ? pair : pair.substring(0, split), StandardCharsets.UTF_8);
+            if (key.equals(name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<Json.Obj> excludedRows(List<MovementSchedule.Excluded> excluded) {

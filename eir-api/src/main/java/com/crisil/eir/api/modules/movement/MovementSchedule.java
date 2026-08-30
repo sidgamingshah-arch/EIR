@@ -94,22 +94,26 @@ import java.util.Objects;
  *       row is bounded by {@link #RESIDUE_BOUND_PER_CONTRACT} for each contract in it, and that
  *       bound is derived from the rounding rather than chosen. Red on anything larger, and red
  *       <em>even when two residues in opposite directions have netted the signed accounting column
- *       back to nil</em> — which is the whole reason the row carries both aggregations. Catches this
+ *       back to nil</em> — which is the whole reason the row carries both aggregations. It cannot
+ *       fail on figures reaching it through {@link #over}, and its javadoc says why; it catches this
  *       class summing the wrong field into the rounding column, and a future ledger that stops
  *       enforcing the working identity.</li>
- *   <li><b>Leg 3 — the total row ties to the product rows, column by column.</b> Red on a bucketing
- *       defect: a product row left out of the total, a column summed from the wrong field. Six
- *       columns, not seven — {@code ledgerClosingGca} is deliberately excluded, because the total's
- *       is the working sum presented once and the product rows' are each presented once, so they
- *       legitimately differ by rounding and asserting equality would be a control red by
- *       construction.</li>
+ *   <li><b>Leg 3 — the total row ties to the product rows, column by column.</b> The total is
+ *       summed from the contract lines and the leg re-sums the product rows, so these are two
+ *       independent reductions of one detail; red on a bucketing defect — a column dropped from a
+ *       product's sum, a line counted into two products. Six columns, not seven —
+ *       {@code ledgerClosingGca} is deliberately excluded, because the total's is the working sum
+ *       presented once and the product rows' are each presented once, so they legitimately differ by
+ *       rounding and asserting equality would be a control red by construction.</li>
  *   <li><b>Leg 4 — every contract with figures is placed exactly once, under a product on file.</b>
  *       The census is taken by walking the published rows and counting occurrences, which is
  *       independent of the loop that placed them. Deviation is the closing balance of every
- *       contract placed zero times, placed twice, or placed under no product id — in rupees,
- *       because "how much of the book is this schedule out by" is the question a reader has. Red on
+ *       contract placed zero times, placed twice, or carrying no product id at all — in rupees,
+ *       because "how much of this schedule is unaccounted for" is the question a reader has. Red on
  *       a contract that computed and reached no row, which is the failure a schedule cannot show
- *       you: the columns of what is present sum perfectly.</li>
+ *       you: the columns of what is present sum perfectly. Note this leg is about attribution and
+ *       completeness, not arithmetic, so a red leg 4 leaves {@code Check.columnsSum()} green — the
+ *       two claims are published separately for exactly that reason.</li>
  * </ul>
  *
  * <h2>What is deliberately NOT in the check</h2>
@@ -129,6 +133,9 @@ import java.util.Objects;
  * @param total          the TOTAL row; all-nil columns where nothing is in scope
  * @param excluded       contracts the run accounted for and published no figures for
  * @param productsOnFile every product id in the run's population, filtered or not
+ * @param contractsInScope how many contracts the run published a closing balance for and this
+ *                       scope covers — the denominator of the schedule, distinct from the run's own
+ *                       population, which is book-wide and does not narrow with the filter
  * @param check          the FR-805 columns-sum check, one result with a total absolute deviation
  */
 public record MovementSchedule(
@@ -139,6 +146,7 @@ public record MovementSchedule(
     Row total,
     List<Excluded> excluded,
     List<String> productsOnFile,
+    int contractsInScope,
     Check check) {
 
     /**
@@ -164,6 +172,9 @@ public record MovementSchedule(
     /** The name the columns-sum check publishes under. See {@link #INVARIANT_ID_REQUESTED}. */
     public static final String CHECK_NAME = "MOVEMENT-COLUMNS-SUM";
 
+    /** How many legs the check has. Fixed, because {@code Check.columnsSum()} reads leg 1. */
+    public static final int LEGS = 4;
+
     /**
      * The invariant id this check wants and does not have.
      *
@@ -184,9 +195,21 @@ public record MovementSchedule(
         excluded = List.copyOf(Objects.requireNonNull(excluded, "excluded"));
         productsOnFile = List.copyOf(Objects.requireNonNull(productsOnFile, "productsOnFile"));
         Objects.requireNonNull(check, "check");
+        if (contractsInScope < 0) {
+            throw new IllegalArgumentException(
+                "contractsInScope must be non-negative, got " + contractsInScope);
+        }
     }
 
-    /** The product id used for a computed contract with no holding on the book. */
+    /**
+     * The bucket a computed contract with no product id lands in.
+     *
+     * <p>Two conditions reach it and they are different facts: a contract in the run's population
+     * with no holding at all, and a holding whose {@code productId} is null —
+     * {@code Book.Holding}'s compact constructor requires the contract id, the state and the period,
+     * and not the product. Leg 4 reports which, because "the master does not carry this contract"
+     * and "the master carries it under no product" go to different desks.
+     */
     public static final String NO_PRODUCT_ON_FILE = "(no product on file)";
 
     /** The product id of the total row. */
@@ -328,11 +351,33 @@ public record MovementSchedule(
                     "the columns-sum check reported a negative total deviation "
                         + deviation.toPlainString() + "; deviations aggregate absolute");
             }
+            if (legs.size() != LEGS) {
+                // columnsSum() reads leg 1 by index, and a leg list of some other length would have
+                // it answering about whichever leg happened to be first.
+                throw new IllegalStateException(
+                    "the columns-sum check has " + LEGS + " legs, got " + legs.size());
+            }
         }
 
         /** The legs that broke; empty on a clean schedule. */
         public List<Leg> breaches() {
             return legs.stream().filter(leg -> !leg.satisfied()).toList();
+        }
+
+        /**
+         * Leg 1 alone: whether the published columns sum, which is the narrow FR-805 claim.
+         *
+         * <p>Separate from {@link #satisfied()} because they are different statements and a caller
+         * that conflates them publishes a false one. A schedule whose working papers failed to write
+         * has columns that sum perfectly and is short a contract: leg 1 green, leg 4 red,
+         * {@code satisfied()} false. Reporting that as "the columns do not sum" would send a reader
+         * to check arithmetic that is correct.
+         *
+         * <p>The index is safe because {@link #checkOver} builds the leg list positionally and this
+         * constructor refuses any other length.
+         */
+        public boolean columnsSum() {
+            return legs.get(0).satisfied();
         }
     }
 
@@ -348,12 +393,22 @@ public record MovementSchedule(
         int periodId,
         RunAggregate aggregate,
         Map<String, ContractComputation> computations,
-        Book book,
+        List<Book.Holding> holdings,
         String productFilter) {
         Objects.requireNonNull(runId, "runId");
         Objects.requireNonNull(aggregate, "aggregate");
         Objects.requireNonNull(computations, "computations");
-        Objects.requireNonNull(book, "book");
+        Objects.requireNonNull(holdings, "holdings");
+
+        // Two facts, kept apart on purpose: whether the master carries the contract at all, and
+        // what product it carries it under. Collapsing them into one nullable product id had leg 4
+        // reporting "no holding on the book" for a holding that exists and names no product —
+        // Book.Holding's compact constructor requires the contract id, the state and the period,
+        // and not the product. A true refusal with a false reason sends the wrong desk to look.
+        Map<String, Book.Holding> onFile = new LinkedHashMap<>();
+        for (Book.Holding holding : holdings) {
+            onFile.put(holding.contractId(), holding);
+        }
 
         List<String> productsOnFile = new ArrayList<>();
         Map<String, List<Line>> byProduct = new LinkedHashMap<>();
@@ -362,23 +417,45 @@ public record MovementSchedule(
         // balance for, whether or not it reached a row. Built in this loop and consumed by a walk
         // over the published rows, so that a placement defect between the two is visible.
         Map<String, Money> withFigures = new LinkedHashMap<>();
+        // The contracts the schedule cannot attribute to a product, with which of the two
+        // conditions each is. Leg 4 names them; a nullable product id could not tell them apart.
+        List<String> unattributed = new ArrayList<>();
 
         for (ContractResult result : aggregate.results()) {
             String contractId = result.contractId();
-            String product = book.holding(contractId)
-                .map(Book.Holding::productId)
-                .orElse(null);
+            Book.Holding holding = onFile.get(contractId);
+            String product = holding == null ? null : holding.productId();
             // Recorded before the filter, so that a filter matching nothing can say what it could
             // have matched instead of returning an empty page with no explanation.
             if (product != null && !productsOnFile.contains(product)) {
                 productsOnFile.add(product);
             }
+
             if (productFilter != null && !productFilter.equals(product)) {
+                // Out of scope — except for a computed contract carrying no product id at all,
+                // which no filter is entitled to exclude silently: a filter answers "is this
+                // contract's product the one you asked for", and for this contract there is no
+                // answer. Dropping it left a filtered schedule short exactly its balance with all
+                // four legs green, which is the failure leg 4 exists to catch, reached by the one
+                // route that ran before leg 4's census was taken.
+                if (result.isComputed() && product == null) {
+                    excluded.add(new Excluded(contractId, NO_PRODUCT_ON_FILE,
+                        "the run published a closing balance of "
+                            + result.closingGca().atPresentationScale() + " for it and "
+                            + (holding == null
+                                ? "the book carries no holding for it"
+                                : "its holding names no product")
+                            + ", so a filter on productId=" + productFilter + " cannot say whether"
+                            + " it belongs in this scope. Named here rather than dropped, because a"
+                            + " filtered schedule short one contract has columns that sum"
+                            + " perfectly."));
+                }
                 continue;
             }
             if (!result.isComputed()) {
                 excluded.add(new Excluded(contractId, product,
-                    "the run published no figures for it — " + result.exception().category().name()
+                    "the run published no figures for it — "
+                        + result.exception().category().name()
                         + ": " + result.exception().describe()));
                 continue;
             }
@@ -388,6 +465,11 @@ public record MovementSchedule(
             // of this schedule's columns. Recording it only on the happy path would have leg 4
             // taking its census from the same loop that dropped it.
             withFigures.put(contractId, result.closingGca().atPresentationScale());
+            if (product == null) {
+                unattributed.add(contractId + (holding == null
+                    ? " (the book carries no holding for it)"
+                    : " (its holding names no product)"));
+            }
 
             ContractComputation computation = computations.get(contractId);
             if (computation == null) {
@@ -424,8 +506,8 @@ public record MovementSchedule(
         Row total = totalOver(rows);
 
         return new MovementSchedule(runId, periodId, productFilter, List.copyOf(rows), total,
-            List.copyOf(excluded), List.copyOf(productsOnFile),
-            checkOver(rows, total, withFigures));
+            List.copyOf(excluded), List.copyOf(productsOnFile), withFigures.size(),
+            checkOver(rows, total, withFigures, List.copyOf(unattributed)));
     }
 
     /** One product's row: the columns are the sum of its lines'. */
@@ -452,13 +534,22 @@ public record MovementSchedule(
     }
 
     /**
-     * The total row: the sum of the product rows, except for the ledger closing total.
+     * The total row, summed from the contract LINES rather than from the product rows.
      *
-     * <p>{@code ledgerClosingGca} is re-derived from the lines' WORKING balances rather than summed
-     * from the product rows' presented ledger totals, because summing those would round twice —
-     * once per product and once again here — and 03 § 1.3's rule is that a figure is reduced where
-     * it is persisted, once. On a two-product book the double rounding is worth up to a paise per
-     * product, and the total is the figure a reader ties to the general ledger.
+     * <p><b>Two aggregation paths, on purpose, and this is the one thing that keeps leg 3 from
+     * being a tautology.</b> A total summed from the rows would be the same arithmetic leg 3 then
+     * re-performs to check it, so no input could ever make them disagree — the exact shape of
+     * control this repository has recorded seventeen of. Summed from the lines, the total and the
+     * product rows are two independent reductions of the same detail, and a defect in
+     * {@link #rowOver} — a column left out of a product's sum, a line counted twice into one
+     * product — makes them differ. {@code ContractPipeline} states the same reasoning for deriving
+     * a period's accrual length twice.
+     *
+     * <p>{@code ledgerClosingGca} is likewise re-derived from the lines' WORKING balances rather
+     * than summed from the product rows' presented ledger totals, because summing those would round
+     * twice — once per product and once again here — and 03 § 1.3's rule is that a figure is reduced
+     * where it is persisted, once. On a two-product book the double rounding is worth up to a paise
+     * per product, and the total is the figure a reader ties to the general ledger.
      */
     public static Row totalOver(List<Row> rows) {
         Money nil = Money.zero(Money.INR);
@@ -471,14 +562,14 @@ public record MovementSchedule(
         Money working = nil;
         int contracts = 0;
         for (Row row : rows) {
-            contracts += row.contracts();
-            opening = opening.plus(row.openingGca());
-            interest = interest.plus(row.eirInterest());
-            cash = cash.plus(row.cashReceived());
-            residue = residue.plus(row.roundingResidue());
-            absoluteResidue = absoluteResidue.plus(row.absoluteRoundingResidue());
-            closing = closing.plus(row.closingGca());
             for (Line line : row.lines()) {
+                contracts += 1;
+                opening = opening.plus(line.openingGca());
+                interest = interest.plus(line.eirInterest());
+                cash = cash.plus(line.cashReceived());
+                residue = residue.plus(line.roundingResidue());
+                absoluteResidue = absoluteResidue.plus(line.roundingResidue().abs());
+                closing = closing.plus(line.closingGca());
                 working = working.plus(line.workingClosingGca());
             }
         }
@@ -501,13 +592,20 @@ public record MovementSchedule(
      * @param rows        the product rows as published
      * @param total       the total row as published — passed in rather than re-derived from
      *                    {@code rows}, because leg 3's whole job is to compare the two
-     * @param withFigures every contract in scope the run published a closing balance for, contract
-     *                    id to presented balance; leg 4's census
+     * @param withFigures  every contract in scope the run published a closing balance for, contract
+     *                     id to presented balance; leg 4's census
+     * @param unattributed the contracts in that census the schedule cannot put under a product,
+     *                     each already carrying which of the two conditions it is — no holding at
+     *                     all, or a holding naming no product. Supplied rather than inferred from
+     *                     the rows, because the two conditions are indistinguishable by the time a
+     *                     line has been bucketed and they go to different desks.
      */
-    public static Check checkOver(List<Row> rows, Row total, Map<String, Money> withFigures) {
+    public static Check checkOver(
+        List<Row> rows, Row total, Map<String, Money> withFigures, List<String> unattributed) {
         Objects.requireNonNull(rows, "rows");
         Objects.requireNonNull(total, "total");
         Objects.requireNonNull(withFigures, "withFigures");
+        Objects.requireNonNull(unattributed, "unattributed");
         List<Row> published = new ArrayList<>(rows);
         published.add(total);
 
@@ -515,7 +613,7 @@ public record MovementSchedule(
             columnsSum(published),
             roundingIsOnlyRounding(published),
             totalTiesToProducts(rows, total),
-            everyContractPlacedOnce(rows, withFigures));
+            everyContractPlacedOnce(rows, withFigures, unattributed));
 
         // Total ABSOLUTE deviation, the Stage3Reconciliation.fourWay idiom. Signed would let two
         // legs in opposite directions report a clean schedule.
@@ -575,11 +673,18 @@ public record MovementSchedule(
      * to keep this quiet: the presented row admits exactly one rounding step per figure, so a
      * contract cannot be out by two paise for a rounding reason.
      *
-     * <p><b>This is the leg that fails on bad figures.</b> A contract whose accrual is wrong by
-     * ₹1,000 puts ₹1,000 in its residue, and the row's five columns still tie because the residue
-     * column absorbs it — leg 1 stays green and this one goes red. And because the aggregation is
-     * absolute, a contract ₹500 light and a contract ₹500 heavy do not cancel: the signed accounting
-     * column reads nil and this leg reads ₹1,000.
+     * <p><b>What this leg does and does not catch, stated plainly.</b> It cannot fail on figures
+     * reaching it through {@link #over}: {@code Line.roundingResidue} is
+     * {@code AmortisationRow.presentedRoundingResidue()}, computed from that row's own four figures,
+     * and the row's constructor already refuses any row where {@code opening + interest - cash}
+     * differs from {@code closing} at working precision — so the presented residue is bounded at two
+     * paise by construction and a wrong accrual leaves this leg green and trips <b>leg 1</b>
+     * instead. What it does catch is this class assembling the rounding column from the wrong field,
+     * and a future ledger that stops enforcing the working identity, at which point it is the only
+     * leg that would notice.
+     *
+     * <p>The absolute aggregation is what makes it worth having at all: a contract ₹500 light and a
+     * contract ₹500 heavy net the signed accounting column back to nil, and this leg reads ₹1,000.
      */
     private static Leg roundingIsOnlyRounding(List<Row> published) {
         Money total = Money.zero(Money.INR);
@@ -608,6 +713,12 @@ public record MovementSchedule(
 
     /**
      * Leg 3. The total row ties to the product rows, column by column.
+     *
+     * <p><b>Not a tautology, and {@link #totalOver} is why.</b> The total is summed from the
+     * contract lines and this leg re-sums the product rows, so the two are independent reductions of
+     * the same detail: a column dropped in {@link #rowOver}, or a line counted into two products,
+     * makes them differ. A total summed from the rows would make this leg re-perform the arithmetic
+     * it is checking, and no input could fail it.
      *
      * <p>Six columns. {@code ledgerClosingGca} is excluded on purpose — see {@link #totalOver} for
      * why the total's is not the sum of the rows'.
@@ -671,17 +782,14 @@ public record MovementSchedule(
      * the one failure a movement schedule cannot show a reader: the columns of what is present sum
      * perfectly, and the schedule is simply short.
      */
-    private static Leg everyContractPlacedOnce(List<Row> rows, Map<String, Money> withFigures) {
+    private static Leg everyContractPlacedOnce(
+        List<Row> rows, Map<String, Money> withFigures, List<String> unattributed) {
         Map<String, Integer> placements = new LinkedHashMap<>();
-        List<String> underNoProduct = new ArrayList<>();
         Money deviation = Money.zero(Money.INR);
         List<String> breaks = new ArrayList<>();
         for (Row row : rows) {
             for (Line line : row.lines()) {
                 placements.merge(line.contractId(), 1, Integer::sum);
-                if (NO_PRODUCT_ON_FILE.equals(row.productId())) {
-                    underNoProduct.add(line.contractId());
-                }
                 if (!withFigures.containsKey(line.contractId())) {
                     breaks.add("contract " + line.contractId() + " is on the " + row.productId()
                         + " row carrying " + line.closingGca().atPresentationScale()
@@ -699,12 +807,17 @@ public record MovementSchedule(
                     + " and appears on " + placed + " product row(s), not exactly one");
                 deviation = deviation.plus(closing.abs());
             }
-            if (underNoProduct.contains(contractId)) {
-                breaks.add("contract " + contractId + " carries " + closing.atPresentationScale()
-                    + " and has no holding on the book, so the schedule cannot say which product"
-                    + " its movement belongs to");
-                deviation = deviation.plus(closing.abs());
-            }
+        }
+        for (String contract : unattributed) {
+            // Reported with the balance at risk, and the message says which of the two conditions
+            // it is. The deviation is that balance because the question a reader has is how much of
+            // the schedule is not attributable to a product, and the answer is in rupees.
+            String contractId = contract.split(" ")[0];
+            Money closing = withFigures.getOrDefault(contractId, Money.zero(Money.INR));
+            breaks.add("contract " + contract + " carries " + closing.atPresentationScale()
+                + " and cannot be attributed to a product, so the schedule presents it under "
+                + NO_PRODUCT_ON_FILE + " rather than under a product a reader can reconcile");
+            deviation = deviation.plus(closing.abs());
         }
         return new Leg("every contract with figures is placed exactly once, under a product on file",
             breaks.isEmpty(),
@@ -745,6 +858,15 @@ public record MovementSchedule(
                 + " populates both from one figure — so on this book leg 1 only fails if this"
                 + " report mis-assembles a row or a run record pairs a contract's result with"
                 + " another contract's working papers.",
+            "Leg 2 cannot fail on figures reaching it through this report's own path. The rounding"
+                + " column is AmortisationRow.presentedRoundingResidue(), and that row's"
+                + " constructor already refuses a roll-forward that does not tie at working"
+                + " precision, which bounds the presented residue at two paise. It is retained"
+                + " because it is the only leg that would notice a ledger that stopped enforcing"
+                + " that identity, and because the absolute aggregation is what stops two"
+                + " opposite-direction breaks netting to a clean rounding column. Stated here"
+                + " rather than left to be discovered: a control that cannot fail is worse than an"
+                + " absent one, and the honest remedy is to say which one it is.",
             "Quarantined contracts carry no figures at all and are absent from every column. This"
                 + " schedule is the movement of the contracts that computed, not of the book;"
                 + " 'excluded' names the rest, and refusing over them is PeriodCloseGate's job,"

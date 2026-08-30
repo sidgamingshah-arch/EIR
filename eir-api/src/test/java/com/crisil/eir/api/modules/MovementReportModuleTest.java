@@ -6,6 +6,7 @@ import com.crisil.eir.api.EirServer;
 import com.crisil.eir.api.EirService;
 import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.modules.movement.MovementSchedule;
+import com.crisil.eir.api.store.Book;
 import com.crisil.eir.api.store.Seed;
 import com.crisil.eir.application.run.ContractComputation;
 import com.crisil.eir.domain.Money;
@@ -186,8 +187,12 @@ class MovementReportModuleTest {
                 .as("the arithmetic is published, not merely trusted")
                 .contains("\"derivedClosingGca\":\"1020754.75\"")
                 .contains("\"columnsSum\":true")
-                .contains("\"columnsSumProven\":true")
-                .contains("\"deviation\":\"0\"");
+                .contains("\"scheduleReconciles\":true")
+                .contains("\"reconciliationProven\":true");
+            assertThat(body)
+                .as("the deviation is a money figure and arrives at the scale every other one is at")
+                .contains("\"deviation\":\"0.00\"")
+                .doesNotContain("\"deviation\":\"0\"");
 
             // The sub-ledger figure, a paise higher, and the difference named.
             assertThat(body)
@@ -223,8 +228,10 @@ class MovementReportModuleTest {
             // Three contracts accounted for, two with figures, two in the schedule. A schedule
             // short one contract sums perfectly, which is why the counts are published beside it.
             assertThat(body)
-                .contains("\"contractsAccountedFor\":3")
-                .contains("\"contractsWithFigures\":2")
+                .as("the run's counts are book-wide and the scope's are not, and the names say so")
+                .contains("\"runPopulation\":3")
+                .contains("\"runContractsWithFigures\":2")
+                .contains("\"contractsInScope\":2")
                 .contains("\"contractsInSchedule\":2")
                 .contains("\"productRows\":1");
             assertThat(body)
@@ -261,11 +268,17 @@ class MovementReportModuleTest {
             assertThat(body)
                 .contains("\"filterMatched\":false")
                 .contains("\"productRows\":0")
+                .contains("\"contractsInScope\":0")
                 .contains("\"contractsInSchedule\":0")
                 .contains("\"productsOnFile\":[\"HL\"]");
             assertThat(body)
+                .as("the run's own population does not narrow with the filter, and must not read as"
+                    + " a schedule short two contracts")
+                .contains("\"runPopulation\":3")
+                .contains("\"runContractsWithFigures\":2");
+            assertThat(body)
                 .as("a green check over no figures is a true statement about nothing")
-                .contains("\"columnsSumProven\":false");
+                .contains("\"reconciliationProven\":false");
         }
 
         @Test
@@ -321,6 +334,19 @@ class MovementReportModuleTest {
         }
 
         @Test
+        @DisplayName("a blank productId is a 400, not silently widened to the whole book")
+        void aBlankProductIdIsRefused() throws IOException {
+            Response response = get("/api/reports/movement?period=202805&productId=");
+
+            // FormBody.has reads a blank value as absent, which is right for an omitted body field
+            // and wrong for a filter: the caller narrowed the scope and got the whole book back.
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body())
+                .contains("'productId' arrived blank")
+                .contains("omit the parameter to ask for every product");
+        }
+
+        @Test
         @DisplayName("the wrong verb is a 405, not a silent 404")
         void theWrongVerbIsRefused() throws IOException {
             Response response = post("/api/reports/movement?period=202805", "");
@@ -352,7 +378,7 @@ class MovementReportModuleTest {
             // rows failed to write — the sub-ledger total is right and the movement schedule is
             // empty, and the columns of an empty schedule sum perfectly.
             MovementSchedule schedule = MovementSchedule.over(
-                run.runId(), Seed.PERIOD_ID, run.aggregate(), Map.of(), run.book(), null);
+                run.runId(), Seed.PERIOD_ID, run.aggregate(), Map.of(), run.holdings(), null);
 
             assertThat(schedule.check().satisfied())
                 .as("two contracts with balances and no rows must not read as a clean schedule")
@@ -383,7 +409,7 @@ class MovementReportModuleTest {
             partial.remove("C-0002");
 
             MovementSchedule schedule = MovementSchedule.over(
-                run.runId(), Seed.PERIOD_ID, run.aggregate(), partial, run.book(), null);
+                run.runId(), Seed.PERIOD_ID, run.aggregate(), partial, run.holdings(), null);
 
             assertThat(schedule.total().contracts()).isEqualTo(1);
             assertThat(schedule.total().closingGca()).isEqualTo(Money.inr("486840.64"));
@@ -392,6 +418,10 @@ class MovementReportModuleTest {
                 .isEqualTo(schedule.total().derivedClosingGca());
 
             assertThat(schedule.check().satisfied()).isFalse();
+            assertThat(schedule.check().columnsSum())
+                .as("the narrow FR-805 claim is TRUE here, and conflating it with the whole check"
+                    + " would send a reader to check arithmetic that is correct")
+                .isTrue();
             assertThat(schedule.check().deviation().toPlainString())
                 .as("C-0002's closing balance, the amount the schedule is short")
                 .isEqualTo("533914.11");
@@ -420,7 +450,7 @@ class MovementReportModuleTest {
             crossed.put("C-0002", cTwo);
 
             MovementSchedule schedule = MovementSchedule.over(
-                run.runId(), Seed.PERIOD_ID, run.aggregate(), crossed, run.book(), null);
+                run.runId(), Seed.PERIOD_ID, run.aggregate(), crossed, run.holdings(), null);
 
             assertThat(schedule.check().satisfied()).isFalse();
             // Two published rows are out by 47,073.47 each — the HL row and the total — and the
@@ -470,7 +500,7 @@ class MovementReportModuleTest {
             withFigures.put("C-A", Money.inr("110.50"));
             withFigures.put("C-B", Money.inr("219.50"));
             MovementSchedule.Check check =
-                MovementSchedule.checkOver(rows, total, withFigures);
+                MovementSchedule.checkOver(rows, total, withFigures, List.of());
 
             assertThat(check.satisfied())
                 .as("a schedule whose rounding column is a rupee is not a rounding column")
@@ -513,7 +543,7 @@ class MovementReportModuleTest {
 
             Map<String, Money> withFigures = Map.of("C-A", Money.inr("110.00"));
             MovementSchedule.Check check =
-                MovementSchedule.checkOver(rows, wrong, withFigures);
+                MovementSchedule.checkOver(rows, wrong, withFigures, List.of());
 
             assertThat(check.satisfied()).isFalse();
             // opening out by 1.00 and closing out by 1.00, absolute: 2.00.
@@ -522,6 +552,133 @@ class MovementReportModuleTest {
             assertThat(check.breaches().get(0).detail())
                 .contains("total openingGca")
                 .contains("total closingGca");
+        }
+    }
+
+    @Nested
+    @DisplayName("a contract the schedule cannot attribute to a product")
+    class Unattributable {
+
+        /**
+         * The seed book with C-0001's holding rewritten to carry no product id.
+         *
+         * <p>{@code Book.Holding}'s compact constructor requires the contract id, the state and the
+         * period, and not the product — so this is a data condition a real master produces, and the
+         * seed book never does.
+         */
+        private EirService.RunSnapshot runWithAProductlessHolding() {
+            Book book = Seed.book();
+            Book.Holding original = book.holding("C-0001").orElseThrow();
+            book.put(Book.Holding.onFile("C-0001", null, original.entityId(),
+                original.description(), original.state(), original.period()));
+            EirService service = new EirService(book);
+            service.run(FormBody.parse(""));
+            return service.lastRunFor(Seed.PERIOD_ID).orElseThrow();
+        }
+
+        @Test
+        @DisplayName("its columns still sum, and leg 4 names the condition without misnaming it")
+        void theArithmeticStandsAndTheAttributionDoesNot() {
+            EirService.RunSnapshot run = runWithAProductlessHolding();
+
+            MovementSchedule schedule = MovementSchedule.over(
+                run.runId(), Seed.PERIOD_ID, run.aggregate(), run.computations(),
+                run.holdings(), null);
+
+            // The columns are untouched: the whole book is still 1,056,814.64 + 11,013.58
+            // - 47,073.47 = 1,020,754.75. Only the attribution is missing.
+            assertThat(schedule.total().closingGca()).isEqualTo(Money.inr("1020754.75"));
+            assertThat(schedule.check().columnsSum())
+                .as("an unattributable contract is not an arithmetic break")
+                .isTrue();
+
+            assertThat(schedule.check().satisfied()).isFalse();
+            assertThat(schedule.check().deviation().toPlainString())
+                .as("C-0001's closing balance is the amount the schedule cannot attribute")
+                .isEqualTo("486840.64");
+            assertThat(schedule.check().breaches().get(0).detail())
+                .as("the master DOES carry this contract; reporting 'no holding on the book' would"
+                    + " be a true refusal with a false reason, and it sends the wrong desk")
+                .contains("its holding names no product")
+                .doesNotContain("carries no holding for it");
+        }
+
+        @Test
+        @DisplayName("over HTTP the two booleans disagree, and the response keeps them apart")
+        void theResponseKeepsTheTwoClaimsApart() throws IOException {
+            // The one book where the narrow claim and the whole check differ, driven over the wire.
+            // Without it nothing at the HTTP boundary could tell "columnsSum" from
+            // "scheduleReconciles": on the seed book both are true, so a handler that published the
+            // whole check under the narrow name would pass every other test in this file.
+            Book book = Seed.book();
+            Book.Holding original = book.holding("C-0001").orElseThrow();
+            book.put(Book.Holding.onFile("C-0001", null, original.entityId(),
+                original.description(), original.state(), original.period()));
+            EirServer own = new EirServer(0, new EirService(book));
+            own.start();
+            try {
+                String ownBase = "http://localhost:" + own.port();
+                HttpURLConnection start = (HttpURLConnection)
+                    URI.create(ownBase + "/api/run").toURL().openConnection();
+                start.setRequestMethod("POST");
+                start.setDoOutput(true);
+                start.getOutputStream().write(new byte[0]);
+                assertThat(start.getResponseCode()).isEqualTo(200);
+                start.getInputStream().close();
+
+                HttpURLConnection report = (HttpURLConnection) URI
+                    .create(ownBase + "/api/reports/movement?period=" + Seed.PERIOD_ID)
+                    .toURL().openConnection();
+                String body;
+                try (var stream = report.getInputStream()) {
+                    body = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+                }
+
+                // Asserted as the adjacent PAIR, because "columnsSum":true also appears on every
+                // product row and inside the check; a substring assertion on it alone cannot tell
+                // which one it matched.
+                assertThat(body)
+                    .as("the arithmetic holds and the schedule does not reconcile, and a response"
+                        + " that published one boolean for both claims would state one of them"
+                        + " falsely")
+                    .contains("\"columnsSum\":true,\"scheduleReconciles\":false");
+                assertThat(body)
+                    .as("the check object keeps the same distinction")
+                    .contains("\"satisfied\":false,\"columnsSum\":true");
+                assertThat(body)
+                    .contains("\"deviation\":\"486840.64\"")
+                    .contains("its holding names no product");
+                // And the columns themselves are untouched: the whole book still sums.
+                assertThat(body).contains("\"closingGca\":\"1020754.75\"");
+            } finally {
+                own.stop();
+            }
+        }
+
+        @Test
+        @DisplayName("a productId filter cannot drop it silently")
+        void aFilterCannotDropItSilently() {
+            EirService.RunSnapshot run = runWithAProductlessHolding();
+
+            // Filtering to HL asks "is this contract's product HL", and for C-0001 there is no
+            // answer. Dropped, the filtered schedule would be short 486,840.64 with all four legs
+            // green — the failure leg 4 exists to catch, reached by the one route that runs before
+            // leg 4's census is taken.
+            MovementSchedule schedule = MovementSchedule.over(
+                run.runId(), Seed.PERIOD_ID, run.aggregate(), run.computations(),
+                run.holdings(), "HL");
+
+            assertThat(schedule.rows()).hasSize(1);
+            assertThat(schedule.total().closingGca())
+                .as("only C-0002 is attributable to HL")
+                .isEqualTo(Money.inr("533914.11"));
+            assertThat(schedule.excluded())
+                .as("C-0001 and C-0003 are both named, neither dropped")
+                .hasSize(2);
+            assertThat(schedule.excluded().stream().map(MovementSchedule.Excluded::contractId))
+                .contains("C-0001", Seed.CONTRACT_WITHOUT_STATE);
+            assertThat(schedule.excluded().get(0).reason())
+                .contains("cannot say whether it belongs in this scope");
         }
     }
 
@@ -562,6 +719,11 @@ class MovementReportModuleTest {
                 .contains("What the check does NOT prove")
                 .contains("AmortisationRow's constructor refuses a row")
                 .contains("Leg 4 is the one that catches the disclosure failure");
+            assertThat(body)
+                .as("leg 2 cannot fail through this report's own path, and the response says so"
+                    + " rather than leaving it to be discovered")
+                .contains("Leg 2 cannot fail on figures reaching it through this report's own path")
+                .contains("a control that cannot fail is worse than an absent one");
         }
     }
 
