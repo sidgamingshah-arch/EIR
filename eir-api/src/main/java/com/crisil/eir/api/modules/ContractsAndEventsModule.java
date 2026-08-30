@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Contract onboarding, contract reads, and the event submission where the driver tag is required
@@ -35,53 +36,41 @@ import java.util.Objects;
  * afterwards — both readings publish a rate and a balance that reconcile — so the discrimination
  * has to be structural, at the boundary, and it is. See {@link EventSubmission}.
  *
- * <p><b>What the endpoints are, and why two of the paths are not the ones 06 § 2 writes.</b>
+ * <p><b>The surface, at 06 § 2 and § 3's own URLs.</b>
  *
- * <table border="1">
- *   <caption>this module's HTTP surface</caption>
- *   <tr><th>06 § 2/3</th><th>here</th><th>note</th></tr>
- *   <tr><td>{@code POST /contracts}</td><td>{@code POST /api/contracts}</td><td>as specified</td></tr>
- *   <tr><td>{@code POST /contracts/{id}/events}</td><td>{@code POST /api/contracts/{id}/events}</td>
- *       <td>as specified, except that the id is read from the form body — see below</td></tr>
- *   <tr><td>{@code GET /contracts/{id}}</td><td>{@code GET /api/contract/{id}}</td>
- *       <td>singular, because the plural prefix is claimed by the POST context</td></tr>
- *   <tr><td>{@code GET /contracts/{id}/versions}</td><td>{@code GET /api/contract/{id}/versions}</td>
- *       <td>same reason</td></tr>
- * </table>
+ * <ul>
+ *   <li>{@code POST /api/contracts} — onboard, through {@code EirService.onboard}
+ *   <li>{@code POST /api/contracts/{id}/events} — the event submission
+ *   <li>{@code GET /api/contracts/{id}} — current state
+ *   <li>{@code GET /api/contracts/{id}/versions} — version history
+ * </ul>
  *
- * <p><b>Both deviations come from one gap in the route seam, and it is worth stating precisely
- * because several other modules in {@code ApiModules} hit the same wall.</b>
+ * <p><b>All four are one {@code Routes.route} registration, and that is what makes the path
+ * parameter readable at all.</b> An earlier version of this module had to deviate from two of these
+ * URLs, because {@code Routes} offered only {@code get} and {@code post}: a POST handler received a
+ * {@code FormBody} and no path, so {@code {id}} was unreadable and had to travel in the form; and
+ * the JDK's server matches the longest path prefix with one handler per context, so
+ * {@code GET /api/contracts/{id}} and {@code POST /api/contracts/{id}/events} could not both be
+ * served for any arrangement of context paths — the second path extends the first and no literal
+ * context can sit between them. The reads lived at a singular {@code /api/contract/{id}} sibling as
+ * a result. {@code Routes.route} hands over the exchange and lets several modules share one prefix,
+ * so both deviations are gone and the documented URLs are restored.
  *
- * <ol>
- *   <li>{@code Routes.post} hands a handler a parsed {@code FormBody} and <em>nothing else</em>, so
- *       a POST handler cannot read {@code {id}} out of its own request path. Every POST in 06 whose
- *       path carries an id — this one, {@code /runs/{id}/replay}, {@code /periods/{id}/close},
- *       {@code /exceptions/{id}/resolve}, {@code /policy-versions/{id}/approve} — needs the id in
- *       the body until the seam can pass a path. Guessing the contract from anything else would
- *       apply an event to the wrong instrument and restate the wrong balance, so this module
- *       requires {@code contractId} in the form and says so in the refusal.
- *   <li>{@code com.sun.net.httpserver} routes on the <em>longest matching path prefix</em> and
- *       {@code Routes} registers one verb per path. So the paths under {@code /api/contracts/}
- *       belong entirely to one verb: whichever context is the longest prefix answers, and the other
- *       verb gets a 405. {@code GET /api/contracts/{id}} and {@code POST /api/contracts/{id}/events}
- *       cannot both be served, for any arrangement of context paths, because the second path
- *       extends the first and no literal context can sit between them. The POST subtree wins here —
- *       the FR-504 refusal has to live at the documented URL — and the reads move to the singular
- *       sibling {@code /api/contract/…}, which is not a prefix of the plural one.
- * </ol>
+ * <p><b>What this module declines.</b> {@code GET /api/contracts/{id}/trace} is 06 § 2's audit
+ * endpoint (FR-808) and belongs to {@code TraceModule}, which registers on this same prefix. This
+ * handler returns {@code null} for it — and for any other suffix or verb it does not recognise — so
+ * the next module registered on the prefix is tried and an unclaimed request becomes a 404 naming
+ * the path. Declining is only ever for a path this module does not recognise; a request it
+ * recognises and refuses comes back as an {@link Routes.Answer} carrying the whole reason, because
+ * a refusal is a value in this engine.
  *
- * <p>Both are seam limitations rather than design choices, and both are one method on
- * {@code Routes} away from disappearing: a POST registration that hands the handler the exchange
- * (or the path suffix) alongside the body would let this module serve 06's paths exactly. The
- * deviations are documented rather than papered over, because an integrator reading 06 and getting
- * a 405 needs to know it is the seam and not their request.
- *
- * <p><b>Status codes.</b> {@code EirServer} maps outcomes onto 200 for every engine answer including
- * every refusal, 400 for a malformed request, 500 for a defect. Two consequences worth naming:
- * a missing driver tag <em>is</em> a malformed event, so it is a 400 and not a refusal value; and
- * there is no 404 available, so a reference to a contract the book does not hold comes back as a
- * 400 naming it — which is what {@code EirService.onboard} already does for the mirror-image
- * condition of a contract that is already on the book.
+ * <p><b>Status codes.</b> 200 for every answer the engine gives, including every refusal, because
+ * the reasons are the answer. 400 for a malformed request — and a missing driver tag <em>is</em> a
+ * malformed event, so it is a 400 and not a refusal value. 404 for a contract that is not there,
+ * which is the one thing a REST client has no other way to ask: a 200 carrying
+ * {@code onFile: false} makes "no such contract" indistinguishable from "a contract holding
+ * nothing" for any caller that reads the status line, and integration clients read the status line.
+ * The 404 body still names the contract and the reason.
  *
  * <p><b>Not thread-safe, deliberately and visibly</b>, exactly as {@code EirService} is not:
  * {@code EirServer} runs a single-threaded executor and says why. The event log below is a plain
@@ -89,13 +78,14 @@ import java.util.Objects;
  */
 public final class ContractsAndEventsModule implements ApiModule {
 
-    /** The POST context: onboarding, and — by prefix — the event submission. */
+    /** The prefix all four endpoints hang off, shared with {@code TraceModule}. */
     static final String CONTRACTS = "/api/contracts";
 
-    /** The GET context. Singular, so it is not a prefix of {@link #CONTRACTS}. */
-    static final String CONTRACT = "/api/contract";
-
     private static final String VERSIONS = "versions";
+    private static final String EVENTS = "events";
+
+    /** {@code TraceModule}'s suffix on this prefix (06 § 2, FR-808). Declined, never claimed. */
+    private static final String TRACE = "trace";
 
     /**
      * The date the opening position every holding carries is struck at.
@@ -133,8 +123,7 @@ public final class ContractsAndEventsModule implements ApiModule {
     @Override
     public void register(Routes routes) {
         Objects.requireNonNull(routes, "routes");
-        routes.post(CONTRACTS, this::post);
-        routes.get(CONTRACT, this::read);
+        routes.route(CONTRACTS, this::dispatch);
     }
 
     @Override
@@ -142,58 +131,113 @@ public final class ContractsAndEventsModule implements ApiModule {
         return "06 §§ 2, 3";
     }
 
+    // ================================================================ dispatch
+
+    /**
+     * Reads the method and the remaining path segments, and answers or declines.
+     *
+     * <p>Dispatch is on the <b>path</b>, which is what the seam now provides. An earlier version had
+     * to tell an onboarding from an event submission by which form fields were present, because one
+     * POST context served the whole subtree and the handler could not see its own URL. That worked
+     * and was uncomfortable — this engine's whole discipline is that nothing is inferred — and it is
+     * gone.
+     *
+     * @return the answer, or null for a suffix or verb this module does not recognise
+     */
+    private Routes.Answer dispatch(HttpExchange exchange, FormBody body) {
+        List<String> segments = segmentsBelow(exchange.getRequestURI().getPath());
+        String method = exchange.getRequestMethod();
+
+        if (segments.isEmpty()) {
+            // The collection itself. 06 § 2 specifies POST here and no GET; the book's own listing
+            // is GET /api/book, and a second way to ask for it would be surface with no purpose.
+            return "POST".equals(method) ? Routes.Answer.ok(onboard(body)) : null;
+        }
+
+        String contractId = segments.get(0);
+        if (segments.size() == 1) {
+            return "GET".equals(method) ? read(contractId) : null;
+        }
+        if (segments.size() == 2) {
+            String suffix = segments.get(1);
+            if (EVENTS.equals(suffix) && "POST".equals(method)) {
+                return submitEvent(contractId, body);
+            }
+            if (VERSIONS.equals(suffix) && "GET".equals(method)) {
+                return versions(contractId);
+            }
+            // Everything else below a contract — TRACE above all, which is 06 § 2's audit endpoint
+            // and TraceModule's to answer — is declined so the next module on this prefix is tried.
+            return null;
+        }
+        return null;
+    }
+
+    /** The path segments below {@link #CONTRACTS}, blanks dropped. */
+    private static List<String> segmentsBelow(String path) {
+        String remainder = path.length() > CONTRACTS.length()
+            ? path.substring(CONTRACTS.length()) : "";
+        List<String> segments = new ArrayList<>();
+        for (String segment : remainder.split("/")) {
+            if (!segment.isBlank()) {
+                segments.add(segment);
+            }
+        }
+        return segments;
+    }
+
     // ================================================================ POST /api/contracts
 
     /**
-     * The POST subtree: an onboarding, or an event submission.
+     * Onboarding, through the entry point the console already drives.
      *
-     * <p><b>Why one handler serves two resources.</b> The seam gives this module one POST context
-     * for the whole {@code /api/contracts} subtree (see the class javadoc), and a handler with no
-     * path cannot tell {@code /api/contracts} from {@code /api/contracts/{id}/events}. So the two
-     * request shapes are told apart on their own fields, by {@link EventSubmission#looksLikeEvent}.
-     *
-     * <p><b>That is not the engine inferring treatment, and the discriminator is chosen so that it
-     * cannot become one.</b> It keys off {@code driver} <em>or</em> {@code eventDate}, so an event
-     * carrying a date and no driver still arrives at the event handler and is still refused there
-     * on FR-504's own terms. Keying off {@code driver} alone would have sent precisely the untagged
-     * event — the one case that matters — to the onboarding handler, where it would have come back
-     * as a complaint about a missing principal.
+     * <p>Forking it would give one bank two initial-recognition paths — 05 § 3.1's ordered pipeline
+     * with its SPPI gate, fee lookup and tier gate, and a copy — and the copy would be the one that
+     * drifts. The response is what the console shows, plus where to read the contract back.
      */
-    private Json.Obj post(FormBody body) {
-        if (EventSubmission.looksLikeEvent(body)) {
-            return submitEvent(body);
-        }
-        // Onboarding goes through EirService.onboard, which the console already drives. Forking it
-        // would give one bank two initial-recognition paths — 05 § 3.1's ordered pipeline with its
-        // SPPI gate, fee lookup and tier gate, and a copy — and the copy would be the one that
-        // drifts. The response is what the console shows, plus where to read the contract back.
-        Json.Obj recognised = service.onboard(body);
-        return recognised.str("reads", CONTRACT + "/" + body.text("contractId"));
+    private Json.Obj onboard(FormBody body) {
+        return service.onboard(body).str("reads", CONTRACTS + "/" + body.text("contractId"));
     }
+
+    // ================================================ POST /api/contracts/{id}/events
 
     /**
      * {@code POST /api/contracts/{id}/events} — 06 § 3.
      *
-     * <p>Every refusal here is a 400 and every engine answer, including the refusal that no
-     * approved routing table governs the event's date, is a 200. The one that matters is the first
+     * <p>The contract id comes from the path, which is where 06 § 3 puts it. Every refusal is a 400,
+     * a contract that is not there is a 404, and every engine answer — including the refusal that no
+     * approved routing table governs the event's date — is a 200. The one that matters is the first
      * check {@link EventSubmission#parse} makes.
      */
-    private Json.Obj submitEvent(FormBody body) {
-        EventSubmission submission = EventSubmission.parse(body);
-        Book.Holding holding = require(submission.contractId());
-        requireNotAlreadyRecorded(holding.contractId(), submission);
+    private Routes.Answer submitEvent(String contractId, FormBody body) {
+        EventSubmission submission = EventSubmission.parse(body, contractId);
+        Optional<Book.Holding> found = service.holding(contractId);
+        if (found.isEmpty()) {
+            return notFound(contractId, "NOT_ON_BOOK",
+                "no contract " + contractId + " on the book. Onboard it with POST " + CONTRACTS
+                    + " first; an event against a contract the master does not carry has no"
+                    + " instrument to route against, and this layer will not invent one.");
+        }
+        Book.Holding holding = found.get();
+        if (!holding.stateOnFile()) {
+            return noOpeningState(contractId);
+        }
+        Routes.Answer duplicate = alreadyRecorded(contractId, submission);
+        if (duplicate != null) {
+            return duplicate;
+        }
 
         EventRouting.Routed routed =
             EventRouting.route(holding, service.routingTables(), submission);
         RecordedEvent recorded = routed.recorded();
         if (recorded != null) {
-            events.computeIfAbsent(holding.contractId(), id -> new ArrayList<>()).add(recorded);
+            events.computeIfAbsent(contractId, id -> new ArrayList<>()).add(recorded);
         }
-        List<RecordedEvent> onRecord = eventsFor(holding.contractId());
+        List<RecordedEvent> onRecord = eventsFor(contractId);
         Json.Obj response = routed.response()
             .bool("accepted", recorded != null)
             .count("eventsOnRecord", onRecord.size())
-            .str("versions", CONTRACT + "/" + holding.contractId() + "/" + VERSIONS)
+            .str("versions", CONTRACTS + "/" + contractId + "/" + VERSIONS)
             .str("carryingAmountBasis", "OPENING_POSITION_ON_FILE")
             .str("appliedToBook", "no — routing and evidence only. The balance moves in the"
                 + " month-end roll-forward, which is the only place the roll-forward invariants are"
@@ -205,12 +249,12 @@ public final class ContractsAndEventsModule implements ApiModule {
             // independent readings of the same starting balance, not a chain. A version series
             // whose figures did not compose and did not say so would be read as one that did.
             response.str("compositionCaveat", "this is event " + onRecord.size() + " on "
-                + holding.contractId() + " and its figures are measured from the OPENING position on"
-                + " file, not from the balance the previous event restated — nothing here is applied"
-                + " to the book. The events do not compose into a running balance; the month-end run"
-                + " is what applies them in order.");
+                + contractId + " and its figures are measured from the OPENING position on file, not"
+                + " from the balance the previous event restated — nothing here is applied to the"
+                + " book. The events do not compose into a running balance; the month-end run is"
+                + " what applies them in order.");
         }
-        return response;
+        return Routes.Answer.ok(response);
     }
 
     /**
@@ -223,78 +267,52 @@ public final class ContractsAndEventsModule implements ApiModule {
      * {@code validTo} equalled its own {@code validFrom}. A duplicate identifier in a version series
      * makes anything resolving a figure by event id get whichever row comes first.
      *
-     * <p>Refused rather than answered idempotently from the stored result, because this module keeps
-     * no stored response and replaying the computation could differ if the revised flows differ —
-     * which is exactly what the caller has done wrong. docs/06 § 1's {@code Idempotency-Key} is the
-     * proper mechanism and belongs in the seam.
+     * <p>A 409, not a 400: the request is well formed and names a real contract, and what is wrong
+     * is the state of the resource it would create. docs/06 § 1's {@code Idempotency-Key} is the
+     * proper mechanism and belongs in the seam; until it exists, refusing is better than appending.
+     *
+     * @return the refusal, or null where this event is new
      */
-    private void requireNotAlreadyRecorded(String contractId, EventSubmission submission) {
+    private Routes.Answer alreadyRecorded(String contractId, EventSubmission submission) {
         String candidate = RecordedEvent.idFor(
             contractId, submission.eventDate(), submission.driver());
         for (RecordedEvent prior : events.getOrDefault(contractId, List.of())) {
             if (prior.eventId().equals(candidate)) {
-                throw new FormBody.BadRequest(
-                    "event " + candidate + " is already on record for " + contractId
-                        + ": one contract, one date, one driver is one event. Accepting it again"
-                        + " would open a second version under the same event id, and the first of"
-                        + " the two would be a zero-length version whose validTo equals its own"
+                return Routes.Answer.of(409, Json.object()
+                    .str("error", "event already on record")
+                    .str("contractId", contractId)
+                    .str("eventId", candidate)
+                    .str("detail", "one contract, one date, one driver is one event. Accepting it"
+                        + " again would open a second version under the same event id, and the first"
+                        + " of the two would be a zero-length version whose validTo equals its own"
                         + " validFrom. Change the event date or the driver if this is a different"
-                        + " event.");
+                        + " event.")
+                    .str("versions", CONTRACTS + "/" + contractId + "/" + VERSIONS));
             }
         }
+        return null;
     }
 
-    // ================================================================ GET /api/contract/…
+    // ================================================================ GET /api/contracts/{id}
 
-    /** {@code GET /api/contract/{id}} and {@code GET /api/contract/{id}/versions} — 06 § 2. */
-    private Json.Obj read(HttpExchange exchange) {
-        String path = exchange.getRequestURI().getPath();
-        String remainder = path.length() > CONTRACT.length()
-            ? path.substring(CONTRACT.length()) : "";
-        List<String> segments = new ArrayList<>();
-        for (String segment : remainder.split("/")) {
-            if (!segment.isBlank()) {
-                segments.add(segment);
-            }
+    /** {@code GET /api/contracts/{id}} — the contract as the book holds it now (06 § 2). */
+    private Routes.Answer read(String contractId) {
+        Optional<Book.Holding> found = service.holding(contractId);
+        if (found.isEmpty()) {
+            return notFound(contractId, "NOT_ON_BOOK",
+                "no contract " + contractId + " on the book. Onboard it with POST " + CONTRACTS
+                    + " first.");
         }
-        String contractId = segments.isEmpty()
-            ? queryParameter(exchange.getRequestURI().getQuery(), "id") : segments.get(0);
-        if (contractId == null) {
-            throw new FormBody.BadRequest(
-                "a contract id is required: GET " + CONTRACT + "/{id} or " + CONTRACT
-                    + "/{id}/versions. It is not defaulted to the first contract on the book — a"
-                    + " read that answers about some other contract than the one asked about is"
-                    + " worse than one that refuses.");
+        Book.Holding holding = found.get();
+        if (!holding.stateOnFile()) {
+            return noOpeningState(contractId);
         }
-        if (segments.size() > 2) {
-            // The guard below only inspected segments.get(1), so anything past it was silently
-            // ignored and GET /api/contract/{id}/versions/whatever answered the full payload. A
-            // module that refuses /api/contract/{id}/foo by name must not accept a longer path it
-            // does not implement.
-            throw new FormBody.BadRequest(
-                "no route " + path + "; this module serves " + CONTRACT + "/{id} and " + CONTRACT
-                    + "/{id}/" + VERSIONS + ", and nothing below them.");
-        }
-        if (segments.size() > 1 && !VERSIONS.equals(segments.get(1))) {
-            throw new FormBody.BadRequest(
-                "no view '" + segments.get(1) + "' on a contract; this module serves " + CONTRACT
-                    + "/{id} and " + CONTRACT + "/{id}/" + VERSIONS
-                    + ". The trace view is GET /api/contracts/{id}/trace and belongs to"
-                    + " TraceModule (06 § 2, FR-808).");
-        }
-        Book.Holding holding = require(contractId);
-        return segments.size() > 1 ? versions(holding) : current(holding);
-    }
-
-    /** The contract as the book holds it now. */
-    private Json.Obj current(Book.Holding holding) {
         ContractStateSource.OpeningState state = holding.state();
         ContractTerms terms = state.terms();
-        List<RecordedEvent> recorded = eventsFor(holding.contractId());
-        return Json.object()
+        return Routes.Answer.ok(Json.object()
             .str("contractId", holding.contractId())
             .bool("onFile", true)
-            .bool("openingStateOnFile", holding.stateOnFile())
+            .bool("openingStateOnFile", true)
             .str("product", holding.productId())
             .str("entity", holding.entityId())
             .str("description", holding.description())
@@ -326,17 +344,18 @@ public final class ContractsAndEventsModule implements ApiModule {
             .str("contractualMaturityDate", terms.maturityDate().toString())
             .str("dayCountConvention", terms.dayCount().name())
             .str("scheduleShape", terms.shape().name())
-            .count("eventsOnRecord", recorded.size())
+            .count("eventsOnRecord", eventsFor(contractId).size())
             // 06 § 1: every response carries the versions that produced its figures. The routing
             // series is the one this module's own answers depend on; the fee and tier policy
             // versions belong to the computation that recognised the contract and travel on the
             // onboarding response.
             .strings("routingTableVersionIds", service.routingTables().versionIds())
-            .str("versions", CONTRACT + "/" + holding.contractId() + "/" + VERSIONS);
+            .str("versions", CONTRACTS + "/" + contractId + "/" + VERSIONS)
+            .str("trace", CONTRACTS + "/" + contractId + "/" + TRACE));
     }
 
     /**
-     * {@code GET /api/contract/{id}/versions} — the version history, and an explicit statement of
+     * {@code GET /api/contracts/{id}/versions} — the version history, and an explicit statement of
      * what this book can and cannot evidence.
      *
      * <p>06 § 2 asks for "full bitemporal version history with validFrom/validTo and
@@ -364,8 +383,18 @@ public final class ContractsAndEventsModule implements ApiModule {
      * that runs backwards is not a caveat, it is a wrong answer, and the sort is what makes the
      * series monotonic whatever order the events arrived in.
      */
-    private Json.Obj versions(Book.Holding holding) {
-        List<RecordedEvent> submitted = eventsFor(holding.contractId());
+    private Routes.Answer versions(String contractId) {
+        Optional<Book.Holding> found = service.holding(contractId);
+        if (found.isEmpty()) {
+            return notFound(contractId, "NOT_ON_BOOK",
+                "no contract " + contractId + " on the book, so it has no version history.");
+        }
+        Book.Holding holding = found.get();
+        if (!holding.stateOnFile()) {
+            return noOpeningState(contractId);
+        }
+
+        List<RecordedEvent> submitted = eventsFor(contractId);
         // Stable sort on the event date, so events submitted out of order still produce a monotonic
         // series and two events on one date keep the order they arrived in.
         List<RecordedEvent> recorded = new ArrayList<>(submitted);
@@ -397,7 +426,7 @@ public final class ContractsAndEventsModule implements ApiModule {
         }
 
         Json.Obj response = Json.object()
-            .str("contractId", holding.contractId())
+            .str("contractId", contractId)
             .count("versionCount", rows.size())
             .array("versions", rows)
             .bool("bitemporalityDemonstrated", false)
@@ -426,67 +455,58 @@ public final class ContractsAndEventsModule implements ApiModule {
                 + " the rows below are sorted by event date so the validity intervals do not run"
                 + " backwards, which means row order is not submission order.");
         }
-        return response;
+        return Routes.Answer.ok(response);
     }
 
     // ================================================================ shared
 
     /**
-     * The holding, or a 400 naming the contract.
+     * A 404 naming the contract and the reason it cannot be answered.
      *
-     * <p>A 404 is what this deserves and the route seam cannot emit one — {@code EirServer} maps a
-     * handler's outcome onto 200, 400 or 500. So the closest honest code is used, and it follows
-     * {@code EirService.onboard}'s own precedent: a request whose contract id contradicts the
-     * book's state is treated there as a malformed request rather than as an engine refusal. The
-     * alternative — a 200 carrying {@code onFile: false} — would make "no such contract"
-     * indistinguishable from "a contract with nothing in it" for any caller that reads the status
-     * line, and integration clients read the status line.
+     * <p>Genuinely a 404 now that {@link Routes.Answer} can carry one. It used to be a 400, which
+     * was the closest honest code the old seam could express and was wrong about what had happened:
+     * the request was well formed and the resource was absent. The body still carries the whole
+     * explanation, because a status with no reasons is not an answer — and {@code reason} is a
+     * machine-readable field precisely so that the two ways a contract can be unanswerable stay
+     * distinguishable to a client.
      */
-    private Book.Holding require(String contractId) {
-        Book.Holding holding = service.holding(contractId).orElseThrow(() -> new FormBody.BadRequest(
-            "no contract " + contractId + " on the book. Onboard it with POST " + CONTRACTS
-                + " first; an event or a read against a contract the master does not carry has no"
-                + " instrument to route against, and this layer will not invent one."));
-        if (!holding.stateOnFile()) {
-            // FR-905's data condition, refused rather than read. Book.Holding.movementsOnly carries
-            // a PLACEHOLDER state so that the period movements have somewhere to live, and its own
-            // javadoc says that state "is never read" — the contractState() port filters on
-            // stateOnFile and answers Optional.empty(), which is what a real master does for a row
-            // it does not carry. EirService.holding() returns the raw holding, so this module has to
-            // apply the same filter or it reads the placeholder.
-            //
-            // Reading it is not a cosmetic defect. In the seeded book C-0003's placeholder is a COPY
-            // OF C-0001's performing state, so the read served C-0001's EIR, principal and
-            // 528,407.32 balance as C-0003's, and an event against C-0003 published a restated
-            // balance and a clean CU-1 for a contract the master carries no balance for. That is the
-            // precise failure this contract exists to expose, wearing a green control result.
-            throw new FormBody.BadRequest(
-                "contract " + contractId + " has period movements on file and no opening balance"
-                    + " recorded, so there is no position to read and nothing to route an event"
-                    + " against. The contract master does not carry the row (FR-905); the run"
-                    + " isolates it into the exception queue and the close gates on the count."
-                    + " Answering from the placeholder state the book parks alongside the movements"
-                    + " would publish another contract's figures under this id.");
-        }
-        return holding;
+    private static Routes.Answer notFound(String contractId, String reason, String detail) {
+        return Routes.Answer.of(404, Json.object()
+            .str("error", "no such contract")
+            .str("contractId", contractId)
+            .str("reason", reason)
+            .bool("onFile", false)
+            .str("detail", detail));
+    }
+
+    /**
+     * FR-905's data condition: period movements on file and no opening balance recorded.
+     *
+     * <p>Refused rather than read, and this is the highest-value check in the module after the
+     * driver tag. {@code Book.Holding.movementsOnly} carries a <b>placeholder</b> state so that the
+     * period movements have somewhere to live, and its own javadoc says that state "is never read" —
+     * the {@code contractState()} port filters on {@code stateOnFile} and answers
+     * {@code Optional.empty()}, which is what a real master does for a row it does not carry.
+     * {@code EirService.holding()} returns the raw holding, so this module has to apply the same
+     * filter or it reads the placeholder.
+     *
+     * <p>Reading it is not a cosmetic defect. In the seeded book C-0003's placeholder is a <b>copy
+     * of C-0001's performing state</b>, so the read served C-0001's EIR, principal and 528,407.32
+     * balance under C-0003's id, and an event against C-0003 published a restated balance and a
+     * satisfied CU-1 for a contract the master carries no balance for. That is the precise failure
+     * this contract exists to expose, wearing a green control result.
+     */
+    private static Routes.Answer noOpeningState(String contractId) {
+        return notFound(contractId, "NO_OPENING_STATE_ON_FILE",
+            "contract " + contractId + " has period movements on file and no opening balance"
+                + " recorded, so there is no position to read and nothing to route an event"
+                + " against. The contract master does not carry the row (FR-905); the run isolates"
+                + " it into the exception queue and the close gates on the count. Answering from"
+                + " the placeholder state the book parks alongside the movements would publish"
+                + " another contract's figures under this id.");
     }
 
     private List<RecordedEvent> eventsFor(String contractId) {
         return List.copyOf(events.getOrDefault(contractId, List.of()));
-    }
-
-    /** One query parameter, or null. Enough for {@code ?id=}; no general query parser needed. */
-    private static String queryParameter(String query, String key) {
-        if (query == null || query.isBlank()) {
-            return null;
-        }
-        for (String pair : query.split("&")) {
-            int split = pair.indexOf('=');
-            if (split > 0 && key.equals(pair.substring(0, split))) {
-                String value = pair.substring(split + 1).strip();
-                return value.isEmpty() ? null : value;
-            }
-        }
-        return null;
     }
 }

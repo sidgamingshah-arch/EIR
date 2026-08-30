@@ -50,12 +50,12 @@ import java.util.Objects;
  * future cash flow has nothing for the routing table to route, and a reset solved against an empty
  * vector would report a rate for a contract with no remaining flows.
  *
- * <p><b>The contract id arrives in the form, not in the path, and that is a seam limitation rather
- * than a design choice.</b> {@code Routes.post} hands a handler a {@code FormBody} and nothing else,
- * so a POST handler cannot read {@code {id}} out of {@code /api/contracts/{id}/events}. The path
- * segment is accepted and ignored; the id that is actually used is the form field, and the refusal
- * below says so rather than letting a caller believe the path was read. See
- * {@code ContractsAndEventsModule}'s class javadoc for what the seam would need.
+ * <p><b>The contract id is a path parameter, as 06 § 3 specifies.</b> {@code Routes.route} hands the
+ * handler its own exchange, so {@code {id}} in {@code /api/contracts/{id}/events} is read from the
+ * path and passed in here. It briefly had to travel in the form, because the older seam gave a POST
+ * handler a {@code FormBody} and nothing else; a form field naming the contract is still <em>accepted</em>
+ * so an existing caller is not silently redirected, but it must agree with the path — see
+ * {@link #contractId(FormBody, String)} for why a disagreement is refused rather than resolved.
  */
 public final class EventSubmission {
 
@@ -65,7 +65,12 @@ public final class EventSubmission {
     /** The event's own date, which selects the routing table version in force. */
     public static final String EVENT_DATE = "eventDate";
 
-    /** The instrument. In the form because the seam gives a POST handler no path. */
+    /**
+     * Optional echo of the path's contract id.
+     *
+     * <p>The id itself comes from the path. This field exists only so that a caller who sends it as
+     * well is told about a disagreement instead of having one of the two silently preferred.
+     */
     public static final String CONTRACT_ID = "contractId";
 
     private static final String REVISED_FLOWS = "revisedFlows";
@@ -109,31 +114,16 @@ public final class EventSubmission {
     }
 
     /**
-     * Whether this POST is an event submission rather than an onboarding.
-     *
-     * <p>Told apart on {@code driver} or {@code eventDate}, neither of which an onboarding request
-     * carries and one of which an event always does. <b>This is not the engine inferring
-     * treatment.</b> It tells two resources apart because the route seam cannot — one POST context
-     * serves the whole {@code /api/contracts} subtree — and the treatment of an event that lands
-     * here is still routed strictly on its explicit driver tag. Critically, an event carrying
-     * {@code eventDate} and <em>no</em> driver still arrives here, and is refused here, which is
-     * the case that matters: the alternative discriminator ({@code driver} alone) would have sent
-     * exactly the untagged event to the onboarding handler and buried FR-504's refusal under a
-     * complaint about a missing principal.
-     */
-    public static boolean looksLikeEvent(FormBody body) {
-        Objects.requireNonNull(body, "body");
-        return body.has(DRIVER) || body.has(EVENT_DATE);
-    }
-
-    /**
      * Reads and validates one submission, refusing in the order the controls matter.
      *
+     * @param body           the parsed form body
+     * @param contractIdFromPath the {@code {id}} segment of {@code /api/contracts/{id}/events}
      * @throws FormBody.BadRequest on any incomplete or unreadable submission — a 400, because a
      *     missing driver tag is a malformed event and not an engine refusal
      */
-    public static EventSubmission parse(FormBody body) {
+    public static EventSubmission parse(FormBody body, String contractIdFromPath) {
         Objects.requireNonNull(body, "body");
+        Objects.requireNonNull(contractIdFromPath, "contractIdFromPath");
 
         // ---- FR-504. First, and never defaulted. See the class javadoc. --------------------
         if (!body.has(DRIVER)) {
@@ -151,7 +141,7 @@ public final class EventSubmission {
         RateDriver driver = driver(body.text(DRIVER));
 
         LocalDate eventDate = date(body, EVENT_DATE);
-        String contractId = contractId(body);
+        String contractId = contractId(body, contractIdFromPath);
 
         FlowVector revised = flows(body, eventDate, REVISED_FLOWS, REVISED_INSTALMENT,
             REVISED_PERIODS, "revised");
@@ -258,18 +248,31 @@ public final class EventSubmission {
 
     // ---- parsing ---------------------------------------------------------------------------
 
-    private static String contractId(FormBody body) {
-        if (!body.has(CONTRACT_ID)) {
+    /**
+     * The contract the event belongs to: the path's id, and a refusal if the form contradicts it.
+     *
+     * <p>The path is authoritative because 06 § 3 puts the id there and because the URL is what an
+     * integrator, a log line and an access-control rule all see. Preferring the path silently would
+     * be the worse behaviour: a caller who sent both and got them different has a bug that the
+     * engine would resolve on their behalf, and the way it resolves determines <em>which
+     * instrument's balance gets restated</em>. Two sources for one identifier is the same defect as
+     * two sources for one figure, and it is refused for the same reason.
+     */
+    private static String contractId(FormBody body, String fromPath) {
+        if (fromPath.isBlank()) {
             throw new FormBody.BadRequest(
-                "'contractId' is required in the form body. The route seam hands a POST handler the"
-                    + " parsed body and nothing else, so the '{id}' segment of"
-                    + " /api/contracts/{id}/events cannot be read here; the path segment is accepted"
-                    + " and ignored, and the id that is used is this field. Reading the id from a"
-                    + " path this layer cannot see would mean guessing which contract the event"
-                    + " belongs to, and an event applied to the wrong instrument restates the wrong"
-                    + " balance.");
+                "the path carries no contract id; an event is submitted to"
+                    + " /api/contracts/{id}/events");
         }
-        return body.text(CONTRACT_ID);
+        if (body.has(CONTRACT_ID) && !body.text(CONTRACT_ID).equals(fromPath)) {
+            throw new FormBody.BadRequest(
+                "the path names contract " + fromPath + " and the form names "
+                    + body.text(CONTRACT_ID) + ". One event belongs to one contract, and this engine"
+                    + " will not choose between two identifiers on the caller's behalf: whichever it"
+                    + " preferred would decide which instrument's balance is restated. Send them"
+                    + " matching, or send only the path.");
+        }
+        return fromPath;
     }
 
     private static RateDriver driver(String raw) {

@@ -32,4 +32,76 @@ public interface Routes {
      * tokeniser, a number grammar and a string-escape state machine.
      */
     void post(String path, Function<FormBody, Json.Obj> handler);
+
+    /**
+     * A route over a path subtree that chooses its own status code and reads its own path.
+     *
+     * <p><b>Added because three units needed it and one reflected into this interface to get it.</b>
+     * {@link #get} and {@link #post} cover the console's shape — one verb, one fixed path, always
+     * 200 — and {@code docs/06} does not have that shape. Section 4's period close is specified to
+     * answer <b>409</b> with the failing gates enumerated; section 5 puts {@code GET} and
+     * {@code POST} on the same {@code /policy-versions} path and a path parameter on
+     * {@code POST .../{id}/approve}; section 8 needs a genuine 404 for an unknown contract rather
+     * than a 200 carrying {@code found: false}. None of that is expressible above.
+     *
+     * <p>The handler receives the exchange — so it can read the method, the remaining path segments
+     * and the query — and the parsed body, which is empty for a GET. It returns an {@link Answer}
+     * carrying the status it wants.
+     *
+     * <p><b>Several modules may register on one path, and one of them must claim each request.</b>
+     * {@code docs/06} puts {@code POST /contracts/{id}/events} and
+     * {@code GET /contracts/{id}/trace} under one prefix, and they belong to different modules;
+     * the JDK's server allows one handler per context and throws on a duplicate, so without this
+     * the two cannot coexist and the server fails at construction. A handler returns {@code null}
+     * to mean "not mine", and the next one registered on that path is tried. If none claims it the
+     * answer is 404 naming the path — never a silent 200.
+     *
+     * <p><b>This does not licence a 4xx for an engine refusal.</b> The rule this API is built on
+     * still holds: 200 for every answer the engine gives, including every refusal, because a
+     * refusal is a value here and the whole list comes back. The status codes this primitive exists
+     * to express are the ones {@code docs/06} specifies for a REST client that has no other way to
+     * ask — a close that did not happen, a resource that is not there — and each one must still
+     * carry the complete refusal list in its body.
+     */
+    void route(String path, PathHandler handler);
+
+    /** A handler that reads the exchange and chooses its own status. */
+    @FunctionalInterface
+    interface PathHandler {
+        /**
+         * Answers the request, or returns {@code null} to decline it so a sibling can try.
+         *
+         * <p>Declining is for a path this handler does not recognise — a different suffix, a
+         * different verb. It is <em>not</em> for a request this handler recognises and refuses:
+         * that is an {@link Answer}, because a refusal is a value in this engine and the whole
+         * list comes back.
+         */
+        Answer handle(HttpExchange exchange, FormBody body);
+    }
+
+    /**
+     * A status and a body.
+     *
+     * @param status the HTTP status; the body is still the engine's complete answer
+     * @param body   the response object, never null — a status with no explanation is not an answer
+     */
+    record Answer(int status, Json.Obj body) {
+        public Answer {
+            if (body == null) {
+                throw new IllegalArgumentException(
+                    "status " + status + " with no body; a caller told only a number cannot act on"
+                        + " it, and this API's whole discipline is that the reasons come back");
+            }
+        }
+
+        /** 200 — the ordinary case, including every engine refusal. */
+        public static Answer ok(Json.Obj body) {
+            return new Answer(200, body);
+        }
+
+        /** Any other status {@code docs/06} specifies, with the reasons still in the body. */
+        public static Answer of(int status, Json.Obj body) {
+            return new Answer(status, body);
+        }
+    }
 }

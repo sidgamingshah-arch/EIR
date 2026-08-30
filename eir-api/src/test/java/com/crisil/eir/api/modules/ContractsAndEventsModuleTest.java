@@ -46,6 +46,13 @@ import org.junit.jupiter.api.Test;
  * routed answer — and a test that calls the module directly misses all three. Port 0 lets the OS
  * pick, so this never collides with a developer's own server.
  *
+ * <p><b>The URLs are 06 § 2 and § 3's own.</b> An earlier version of this test drove the reads at a
+ * singular {@code /api/contract/{id}} and sent the contract id in the event form, because the route
+ * seam gave a POST handler no path and allowed one verb per path prefix. {@code Routes.route} removed
+ * both limitations, and the test that pinned the resulting 405 is deleted rather than kept: a test
+ * asserting a limitation that has been removed is worse than no test, because it reads as a
+ * documented behaviour.
+ *
  * <p><b>The test that matters most is {@link TheDriverTag#anUntaggedEventIsRefused}.</b> Everything
  * else here is a figure or a path; that one is the control. An untagged event must be refused at the
  * boundary (FR-504) rather than defaulted, because routing on the observation that the rate moved
@@ -192,9 +199,14 @@ class ContractsAndEventsModuleTest {
         return found;
     }
 
-    /** The event form for a contract, minus whatever the test is proving the absence of. */
-    private static String event(String contractId, String driver, String extra) {
-        return "contractId=" + contractId + "&eventDate=" + EVENT_DATE
+    /**
+     * The event form, minus whatever the test is proving the absence of.
+     *
+     * <p>No {@code contractId}: it is a path parameter, which is where 06 § 3 puts it and where
+     * {@code Routes.route} lets this module read it from.
+     */
+    private static String event(String driver, String extra) {
+        return "eventDate=" + EVENT_DATE
             + (driver == null ? "" : "&driver=" + driver)
             + (extra.isEmpty() ? "" : "&" + extra);
     }
@@ -242,7 +254,7 @@ class ContractsAndEventsModuleTest {
         void anUnknownDriverIsRefused() throws IOException {
             // CREDIT_RISK_MARKET and CREDIT_RATCHET_PREDETERMINED differ by one word and route to a
             // reset and a catch-up respectively, so a near-miss must not be resolved by proximity.
-            Response response = post(eventsPath("C-0001"), event("C-0001", "CREDIT_RISK", ""));
+            Response response = post(eventsPath("C-0001"), event("CREDIT_RISK", ""));
 
             assertThat(response.status()).isEqualTo(400);
             assertThat(response.body())
@@ -255,7 +267,7 @@ class ContractsAndEventsModuleTest {
         @DisplayName("a tagged event carrying no revised flows has nothing to route")
         void anEventWithNoRevisedFlowsIsRefused() throws IOException {
             Response response =
-                post(eventsPath("C-0001"), event("C-0001", "STEP_UP_PREDETERMINED", ""));
+                post(eventsPath("C-0001"), event("STEP_UP_PREDETERMINED", ""));
 
             assertThat(response.status()).isEqualTo(400);
             assertThat(response.body())
@@ -264,17 +276,23 @@ class ContractsAndEventsModuleTest {
         }
 
         @Test
-        @DisplayName("the contract id is required in the form, and the refusal says why")
-        void theContractIdIsRequiredInTheForm() throws IOException {
+        @DisplayName("a form contract id that contradicts the path is refused, never resolved")
+        void aContradictoryContractIdIsRefused() throws IOException {
             Response response = post(eventsPath("C-0001"),
-                "eventDate=" + EVENT_DATE + "&driver=STEP_UP_PREDETERMINED");
+                "contractId=C-0002&eventDate=" + EVENT_DATE
+                    + "&driver=STEP_UP_PREDETERMINED&revisedFlows=2028-06-30:500000.00");
 
             assertThat(response.status()).isEqualTo(400);
-            // Not a design choice, and the message must not let a caller believe the path was read.
+            // Two sources for one identifier is the same defect as two sources for one figure.
+            // Whichever the engine preferred would decide WHICH INSTRUMENT'S BALANCE gets restated,
+            // so it decides neither and names both.
             assertThat(response.body())
-                .contains("'contractId' is required")
-                .contains("the '{id}' segment of")
-                .contains("cannot be read here");
+                .contains("path names contract C-0001")
+                .contains("form names C-0002")
+                .contains("will not choose between two identifiers");
+            assertThat(response.body())
+                .as("nothing may be routed while it is unclear which contract this is")
+                .doesNotContain("routedMechanism");
         }
     }
 
@@ -288,7 +306,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("a market driver on a FIXED instrument is overridden to a modification test")
         void aMarketDriverOnAFixedInstrumentIsAModification() throws IOException {
-            Response response = post(eventsPath("C-0001"), event("C-0001", "TIME_VALUE_OF_MONEY",
+            Response response = post(eventsPath("C-0001"), event("TIME_VALUE_OF_MONEY",
                 REVISED + "&side=ASSET&triggers=NONE"));
 
             assertThat(response.status()).isEqualTo(200);
@@ -310,7 +328,7 @@ class ContractsAndEventsModuleTest {
         @DisplayName("the same driver on a FLOATING instrument resets, and the balance holds still")
         void theSameDriverOnAFloatingInstrumentResets() throws IOException {
             Response response = post(eventsPath(FLOATING),
-                event(FLOATING, "TIME_VALUE_OF_MONEY", REVISED));
+                event("TIME_VALUE_OF_MONEY", REVISED));
 
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
@@ -383,7 +401,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("the restated balance and the catch-up are case 1's arithmetic")
         void theRestatementTiesToHandArithmetic() throws IOException {
-            Response response = post(eventsPath("C-0001"), event("C-0001", "STEP_UP_PREDETERMINED",
+            Response response = post(eventsPath("C-0001"), event("STEP_UP_PREDETERMINED",
                 "revisedFlows=2028-06-30:500000.00"));
 
             assertThat(response.status()).isEqualTo(200);
@@ -414,7 +432,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("eirUnchanged is CU-1's own result, and CU-2 ties the published balances")
         void theInvariantsAreReportedNotAsserted() throws IOException {
-            Response response = post(eventsPath("C-0001"), event("C-0001", "ESG_LINKED",
+            Response response = post(eventsPath("C-0001"), event("ESG_LINKED",
                 "revisedFlows=2028-06-30:500000.00"));
 
             assertThat(response.status()).isEqualTo(200);
@@ -451,7 +469,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("on the asset side a ratio inside the band is PENDING_APPROVAL, with no figures")
         void theAssetSideDefersToAPerson() throws IOException {
-            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            Response response = post(eventsPath("C-0001"), event("NEGOTIATED",
                 LEGS_AT_NINE_AND_A_HALF + "&side=ASSET&triggers=NONE"));
 
             assertThat(response.status()).isEqualTo(200);
@@ -484,7 +502,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("on the liability side the same evidence is decided, because B3.3.6 is a line")
         void theLiabilitySideIsDecidedByTheRatio() throws IOException {
-            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            Response response = post(eventsPath("C-0001"), event("NEGOTIATED",
                 LEGS_AT_NINE_AND_A_HALF + "&side=LIABILITY&triggers=NONE"));
 
             assertThat(response.status()).isEqualTo(200);
@@ -501,7 +519,7 @@ class ContractsAndEventsModuleTest {
         @DisplayName("a liability breaching the threshold concludes SUBSTANTIAL")
         void aBreachOnALiabilityIsSubstantial() throws IOException {
             // |440,000 − 500,000| / 500,000 = 0.12, above the 11% top of the band, so no review.
-            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            Response response = post(eventsPath("C-0001"), event("NEGOTIATED",
                 "originalFlows=2028-06-30:500000.00&revisedFlows=2028-06-30:440000.00"
                     + "&side=LIABILITY&triggers=NONE"));
 
@@ -521,7 +539,7 @@ class ContractsAndEventsModuleTest {
             // |490,000 − 500,000| / 500,000 = 0.02 — nowhere near the line — but the obligor
             // changed, which is an IASB February 2025 indicative factor and not answerable by a
             // present-value ratio.
-            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            Response response = post(eventsPath("C-0001"), event("NEGOTIATED",
                 "originalFlows=2028-06-30:500000.00&revisedFlows=2028-06-30:490000.00"
                     + "&side=ASSET&triggers=CHANGE_OF_OBLIGOR,REVOLVING_TO_TERM_CONVERSION"));
 
@@ -540,7 +558,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("a modification test with no qualitative statement at all is refused")
         void anUnassessedModificationIsRefused() throws IOException {
-            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            Response response = post(eventsPath("C-0001"), event("NEGOTIATED",
                 LEGS_AT_NINE_AND_A_HALF + "&side=ASSET"));
 
             assertThat(response.status()).isEqualTo(400);
@@ -554,7 +572,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("a modification test with no side is refused rather than defaulted")
         void anUnsidedModificationIsRefused() throws IOException {
-            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            Response response = post(eventsPath("C-0001"), event("NEGOTIATED",
                 LEGS_AT_NINE_AND_A_HALF + "&triggers=NONE"));
 
             assertThat(response.status()).isEqualTo(400);
@@ -566,7 +584,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("the counterfactual leg comes from the contract's own schedule by default")
         void theOriginalLegIsDerivedFromTheSchedule() throws IOException {
-            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            Response response = post(eventsPath("C-0001"), event("NEGOTIATED",
                 "revisedInstalment=45000.00&revisedPeriods=11&side=ASSET&triggers=NONE"));
 
             assertThat(response.status()).isEqualTo(200);
@@ -600,9 +618,9 @@ class ContractsAndEventsModuleTest {
                 .contains("\"measuredAt\":\"AMORTISED_COST\"")
                 .contains("MEASUREMENT_GATE").contains("FEE_CLASSIFICATION")
                 .contains("TIER_ASSIGNMENT").contains("PROJECTION").contains("SOLVE")
-                .contains("/api/contract/C-0300");
+                .contains("/api/contracts/C-0300");
 
-            Response read = get("/api/contract/C-0300");
+            Response read = get("/api/contracts/C-0300");
             assertThat(read.status()).isEqualTo(200);
             assertThat(read.body())
                 .contains("\"contractId\":\"C-0300\"")
@@ -637,7 +655,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("case 1 reads back at its month-13 position, to twelve places and two paise")
         void caseOneReadsBackIntact() throws IOException {
-            Response response = get("/api/contract/C-0001");
+            Response response = get("/api/contracts/C-0001");
 
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
@@ -648,31 +666,40 @@ class ContractsAndEventsModuleTest {
         }
 
         @Test
-        @DisplayName("a read of a contract the book does not hold names the contract")
-        void anUnknownContractIsNamed() throws IOException {
-            Response response = get("/api/contract/C-9999");
+        @DisplayName("a read of a contract the book does not hold is a genuine 404")
+        void anUnknownContractIsANotFound() throws IOException {
+            Response response = get("/api/contracts/C-9999");
 
-            // 404 is what this deserves and the route seam cannot emit one; 400 follows
-            // EirService.onboard's precedent for the mirror-image condition. What matters is that
-            // it is NOT a 200 carrying empty figures, which a caller reading the status line would
-            // take for a contract that exists and holds nothing.
-            assertThat(response.status()).isEqualTo(400);
-            assertThat(response.body()).contains("C-9999").contains("no contract");
+            // A real 404 now that Routes.Answer can carry one. This was a 400 under the old seam,
+            // which was the closest honest code available and was wrong about what had happened:
+            // the request was well formed and the resource was absent. What has never been
+            // acceptable is a 200 carrying onFile:false — it makes "no such contract"
+            // indistinguishable from "a contract holding nothing" to any caller that reads the
+            // status line, and integration clients read the status line.
+            assertThat(response.status()).isEqualTo(404);
+            assertThat(response.body())
+                .contains("C-9999")
+                .contains("no such contract")
+                .contains("\"reason\":\"NOT_ON_BOOK\"")
+                .contains("\"onFile\":false");
         }
 
         @Test
-        @DisplayName("a read with no contract id refuses instead of answering about another contract")
-        void aReadWithNoIdRefuses() throws IOException {
-            Response response = get("/api/contract");
+        @DisplayName("a GET on the collection is not this module's, and nobody else claims it")
+        void theCollectionIsNotRead() throws IOException {
+            // 06 § 2 specifies POST on the collection and no GET; the book's own listing is
+            // GET /api/book. Declined rather than answered, so the server's own 404 names the path
+            // instead of this module inventing a second way to ask for the book.
+            Response response = get("/api/contracts");
 
-            assertThat(response.status()).isEqualTo(400);
-            assertThat(response.body()).contains("a contract id is required");
+            assertThat(response.status()).isEqualTo(404);
+            assertThat(response.body()).contains("no handler claimed");
         }
 
         @Test
-        @DisplayName("the id may also arrive as a query parameter")
-        void theIdMayBeAQueryParameter() throws IOException {
-            Response response = get("/api/contract?id=C-0002");
+        @DisplayName("the Stage 3 contract reads back at the documented URL")
+        void theStageThreeContractReadsBack() throws IOException {
+            Response response = get("/api/contracts/C-0002");
 
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
@@ -689,7 +716,7 @@ class ContractsAndEventsModuleTest {
         @DisplayName("the sole version is the opening position on file, and does not claim to be"
             + " the position at initial recognition")
         void aContractWithNoEventsHasOneVersion() throws IOException {
-            Response response = get("/api/contract/C-0001/versions");
+            Response response = get("/api/contracts/C-0001/versions");
 
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
@@ -714,9 +741,9 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("each routed event opens a version, carrying the table that routed it")
         void eachRoutedEventOpensAVersion() throws IOException {
-            post(eventsPath("C-0001"), event("C-0001", "STEP_UP_PREDETERMINED",
+            post(eventsPath("C-0001"), event("STEP_UP_PREDETERMINED",
                 "revisedFlows=2028-06-30:500000.00"));
-            Response response = get("/api/contract/C-0001/versions");
+            Response response = get("/api/contracts/C-0001/versions");
 
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
@@ -734,10 +761,10 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("a pending assessment opens a version carrying no rate and no balance")
         void aPendingAssessmentPublishesNoPosition() throws IOException {
-            post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            post(eventsPath("C-0001"), event("NEGOTIATED",
                 "originalFlows=2028-06-30:500000.00&revisedFlows=2028-06-30:452500.00"
                     + "&side=ASSET&triggers=NONE"));
-            Response response = get("/api/contract/C-0001/versions");
+            Response response = get("/api/contracts/C-0001/versions");
 
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
@@ -754,7 +781,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("the response refuses to claim a bitemporality this book does not have")
         void bitemporalityIsNotClaimed() throws IOException {
-            Response response = get("/api/contract/C-0001/versions");
+            Response response = get("/api/contracts/C-0001/versions");
 
             assertThat(response.body())
                 .contains("\"bitemporalityDemonstrated\":false")
@@ -767,51 +794,60 @@ class ContractsAndEventsModuleTest {
     }
 
     @Nested
-    @DisplayName("what the route seam cannot serve, pinned so a seam fix breaks this loudly")
-    class SeamLimits {
+    @DisplayName("the path parameter is read, and a suffix that is not ours is declined")
+    class ThePathParameter {
 
         @Test
-        @DisplayName("GET on the plural path is a 405, because the POST context owns that subtree")
-        void theGetOnThePluralPathIsRefused() throws IOException {
-            // com.sun.net.httpserver routes on the longest matching path prefix and Routes
-            // registers one verb per path, so /api/contracts/{id} and /api/contracts/{id}/events
-            // cannot be served by different verbs — the second path extends the first and no
-            // literal context can sit between them. The POST subtree wins, because the FR-504
-            // refusal has to live at the documented URL, and the reads live at /api/contract/{id}.
-            //
-            // Asserted rather than left implicit: when Routes gains a path-aware POST this test is
-            // the thing that fails, which is exactly when the reads should move to 06 § 2's path.
-            Response response = get("/api/contracts/C-0001");
-
-            assertThat(response.status()).isEqualTo(405);
-            assertThat(response.body()).contains("POST only");
-        }
-
-        @Test
-        @DisplayName("a path below the two views this module serves is refused, not ignored")
-        void aPathBelowTheViewsIsRefused() throws IOException {
-            // The view guard inspected only the second segment, so anything past it was silently
-            // dropped and this URL answered the full versions payload. A module that refuses
-            // /api/contract/{id}/foo by name must not accept a longer path it does not implement.
-            Response response = get("/api/contract/C-0001/versions/anything-at-all");
-
-            assertThat(response.status()).isEqualTo(400);
-            assertThat(response.body()).contains("no route").contains("anything-at-all");
-        }
-
-        @Test
-        @DisplayName("the events path is served, and the trailing segment is accepted and ignored")
-        void theEventsPathIsServedByPrefix() throws IOException {
-            // Any suffix under /api/contracts reaches the POST handler, which is why the refusal in
-            // EventSubmission.contractId says the path segment is not read rather than letting a
-            // caller believe it was.
-            Response response = post("/api/contracts/whatever-the-caller-typed/events",
-                event("C-0001", "STEP_UP_PREDETERMINED", "revisedFlows=2028-06-30:500000.00"));
+        @DisplayName("the contract acted on is the one named in the path")
+        void theContractComesFromThePath() throws IOException {
+            // This nested class replaces one called SeamLimits, which asserted that
+            // GET /api/contracts/{id} answered 405 because a POST context owned the whole subtree.
+            // Routes.route removed that limitation, so the test that pinned it is deleted rather
+            // than left asserting a constraint that no longer exists — which would be worse than no
+            // test, because it would read as a documented behaviour.
+            Response response = post(eventsPath("C-0001"),
+                event("STEP_UP_PREDETERMINED", "revisedFlows=2028-06-30:500000.00"));
 
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
-                .as("the contract acted on is the form field, not the path segment")
-                .contains("\"contractId\":\"C-0001\"");
+                .as("no contractId was sent in the form at all")
+                .contains("\"contractId\":\"C-0001\"")
+                .contains("\"routedMechanism\":\"CATCH_UP\"");
+        }
+
+        @Test
+        @DisplayName("the trace suffix is declined, so unit 1's module can claim it")
+        void theTraceSuffixIsDeclined() throws IOException {
+            // 06 § 2's audit endpoint (FR-808) is TraceModule's, and it registers on this same
+            // prefix. This module returns null for the suffix so the next handler on the prefix is
+            // tried; with no TraceModule registered in this fixture nobody claims it and the
+            // server's own 404 names the path. Claiming it — with a 404 or a refusal of our own —
+            // would make the collision silent and TraceModule unreachable.
+            Response response = get("/api/contracts/C-0001/trace?period=2028-05");
+
+            assertThat(response.status()).isEqualTo(404);
+            assertThat(response.body())
+                .contains("no handler claimed")
+                .contains("/api/contracts/C-0001/trace");
+        }
+
+        @Test
+        @DisplayName("a suffix nobody serves is a 404 naming the path, never a silent 200")
+        void anUnknownSuffixIsNotFound() throws IOException {
+            Response response = get("/api/contracts/C-0001/versions/anything-at-all");
+
+            assertThat(response.status()).isEqualTo(404);
+            assertThat(response.body()).contains("no handler claimed");
+        }
+
+        @Test
+        @DisplayName("a verb this module does not serve on a path it owns is declined, not answered")
+        void anUnservedVerbIsDeclined() throws IOException {
+            Response response = post("/api/contracts/C-0001",
+                "eventDate=" + EVENT_DATE + "&driver=STEP_UP_PREDETERMINED");
+
+            assertThat(response.status()).isEqualTo(404);
+            assertThat(response.body()).contains("no handler claimed");
         }
     }
 
@@ -828,13 +864,16 @@ class ContractsAndEventsModuleTest {
             // placeholder is a COPY OF C-0001's performing state, so a read that trusted it served
             // C-0001's EIR, principal and 528,407.32 balance under C-0003's id — with one boolean
             // among twenty fields to say so.
-            Response response = get("/api/contract/" + Seed.CONTRACT_WITHOUT_STATE);
+            Response response = get("/api/contracts/" + Seed.CONTRACT_WITHOUT_STATE);
 
-            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.status()).isEqualTo(404);
             assertThat(response.body())
                 .contains(Seed.CONTRACT_WITHOUT_STATE)
                 .contains("no opening balance")
-                .contains("FR-905");
+                .contains("FR-905")
+                // A distinct machine-readable reason, so a client can tell "the master does not
+                // carry this row" from "there is no such contract" without parsing prose.
+                .contains("\"reason\":\"NO_OPENING_STATE_ON_FILE\"");
             assertThat(response.body())
                 .as("not one figure from the placeholder may reach the wire")
                 .doesNotContain("528407.32")
@@ -845,10 +884,10 @@ class ContractsAndEventsModuleTest {
         @DisplayName("an event against it publishes no restatement and no clean invariant")
         void anEventIsRefused() throws IOException {
             Response response = post(eventsPath(Seed.CONTRACT_WITHOUT_STATE),
-                event(Seed.CONTRACT_WITHOUT_STATE, "STEP_UP_PREDETERMINED",
+                event("STEP_UP_PREDETERMINED",
                     "revisedFlows=2028-06-30:500000.00"));
 
-            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.status()).isEqualTo(404);
             // The worst version of this defect: a restated balance and a satisfied CU-1 for a
             // contract with no balance on file — a wrong number wearing a green control result.
             assertThat(response.body())
@@ -874,7 +913,7 @@ class ContractsAndEventsModuleTest {
             post(eventsPath("C-0002"), "contractId=C-0002&eventDate=2028-05-31"
                 + "&driver=ESG_LINKED&revisedFlows=2028-06-30:500000.00");
 
-            Response response = get("/api/contract/C-0002/versions");
+            Response response = get("/api/contracts/C-0002/versions");
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body()).contains("\"versionCount\":3");
 
@@ -896,7 +935,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("two events on one contract do not compose, and the response says so")
         void successiveEventsDoNotCompose() throws IOException {
-            post(eventsPath("C-0001"), event("C-0001", "ESG_LINKED",
+            post(eventsPath("C-0001"), event("ESG_LINKED",
                 "revisedFlows=2028-06-30:500000.00"));
             Response second = post(eventsPath("C-0001"),
                 "contractId=C-0001&eventDate=2028-06-30&driver=STEP_UP_PREDETERMINED"
@@ -911,7 +950,7 @@ class ContractsAndEventsModuleTest {
                 .contains("\"carryingAmountBefore\":\"528407.32\"")
                 .contains("\"carryingAmountBasis\":\"OPENING_POSITION_ON_FILE\"")
                 .contains("compositionCaveat");
-            assertThat(get("/api/contract/C-0001/versions").body())
+            assertThat(get("/api/contracts/C-0001/versions").body())
                 .contains("\"figuresCompose\":false")
                 .contains("compositionCaveat");
         }
@@ -919,7 +958,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("resubmitting one event is refused, not appended under a duplicate id")
         void aResubmissionIsRefused() throws IOException {
-            String form = event("C-0001", "CREDIT_RATCHET_PREDETERMINED",
+            String form = event("CREDIT_RATCHET_PREDETERMINED",
                 "revisedFlows=2028-06-30:500000.00");
             assertThat(post(eventsPath("C-0001"), form).status()).isEqualTo(200);
 
@@ -928,11 +967,13 @@ class ContractsAndEventsModuleTest {
             // to its own validFrom — and anything resolving a figure by event id would get
             // whichever row came first.
             Response again = post(eventsPath("C-0001"), form);
-            assertThat(again.status()).isEqualTo(400);
+            // A 409, not a 400: the request is well formed and names a real contract, and what is
+            // wrong is the state of the resource it would create.
+            assertThat(again.status()).isEqualTo(409);
             assertThat(again.body())
                 .contains("EV-C-0001-2028-05-31-CREDIT_RATCHET_PREDETERMINED")
                 .contains("already on record");
-            assertThat(get("/api/contract/C-0001/versions").body())
+            assertThat(get("/api/contracts/C-0001/versions").body())
                 .as("the log still holds one event, so the chain still has two versions")
                 .contains("\"versionCount\":2");
         }
@@ -949,7 +990,7 @@ class ContractsAndEventsModuleTest {
             // back with qualitativeAssessmentPerformed true and an empty trigger list — the exact
             // state the class javadoc says must be inexpressible, because it reports a clean
             // qualitative result nobody produced.
-            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            Response response = post(eventsPath("C-0001"), event("NEGOTIATED",
                 "originalFlows=2028-06-30:500000.00&revisedFlows=2028-06-30:452500.00"
                     + "&side=ASSET&triggers=,"));
 
@@ -968,7 +1009,7 @@ class ContractsAndEventsModuleTest {
             // asset leaving the book. Publishing the pre-event balance as carryingAmountAfter said
             // the carrying amount was unchanged for exactly that event, and disagreed with the
             // RecordedEvent for the same event, which stores null.
-            Response response = post(eventsPath("C-0001"), event("C-0001", "NEGOTIATED",
+            Response response = post(eventsPath("C-0001"), event("NEGOTIATED",
                 "originalFlows=2028-06-30:500000.00&revisedFlows=2028-06-30:440000.00"
                     + "&side=LIABILITY&triggers=NONE"));
 
@@ -990,7 +1031,7 @@ class ContractsAndEventsModuleTest {
             // NO_SOLUTION, and 03 § 4.3 names a defaulted rate here the most damaging failure
             // available to this engine, because it publishes a plausible figure and leaves no trace.
             Response response = post(eventsPath(FLOATING),
-                event(FLOATING, "TIME_VALUE_OF_MONEY", "revisedFlows=2028-06-30:-500000.00"));
+                event("TIME_VALUE_OF_MONEY", "revisedFlows=2028-06-30:-500000.00"));
 
             assertThat(response.status())
                 .as("a solver refusal is an engine answer, so it comes back on a 200")
@@ -1006,7 +1047,7 @@ class ContractsAndEventsModuleTest {
                 // branch that bypasses that guard.
                 .contains("\"accepted\":false")
                 .contains("\"eventsOnRecord\":0");
-            assertThat(get("/api/contract/" + FLOATING + "/versions").body())
+            assertThat(get("/api/contracts/" + FLOATING + "/versions").body())
                 .as("a refused reset changed nothing, so the history says nothing")
                 .contains("\"versionCount\":1");
         }
@@ -1025,7 +1066,7 @@ class ContractsAndEventsModuleTest {
             // flagged. Revert the requiresApproval() branch in EventRouting.reset to a plain
             // hasRate() check and this test fails on newEir being a figure.
             Response response = post(eventsPath(FLOATING),
-                event(FLOATING, "TIME_VALUE_OF_MONEY", "revisedFlows=2028-06-30:1.00"));
+                event("TIME_VALUE_OF_MONEY", "revisedFlows=2028-06-30:1.00"));
 
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
@@ -1036,7 +1077,7 @@ class ContractsAndEventsModuleTest {
                 .contains("\"newEir\":null")
                 .contains("\"candidateEir\":\"-0.999998107521\"");
             // The version the event opens carries no position, because none was approved.
-            assertThat(get("/api/contract/" + FLOATING + "/versions").body())
+            assertThat(get("/api/contracts/" + FLOATING + "/versions").body())
                 .contains("\"versionCount\":2")
                 .contains("\"pendingApproval\":true")
                 .contains("\"eir\":null")
@@ -1046,7 +1087,7 @@ class ContractsAndEventsModuleTest {
         @Test
         @DisplayName("rupee figures on the reads are at presentation scale, like every other figure")
         void figuresAreAtPresentationScale() throws IOException {
-            Response response = get("/api/contract/C-0001");
+            Response response = get("/api/contracts/C-0001");
 
             assertThat(response.status()).isEqualTo(200);
             // A nil allowance used to reach the wire as "0" beside a "528407.32" balance in the same
