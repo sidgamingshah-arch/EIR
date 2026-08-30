@@ -1,6 +1,7 @@
 package com.crisil.eir.api.modules;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.crisil.eir.api.EirServer;
 import com.crisil.eir.api.EirService;
@@ -567,6 +568,82 @@ class TransitionModuleTest {
         }
 
         @Test
+        @DisplayName("a deemed rate outside Rate's domain is a 400, not a 500")
+        void aDeemedRateOutsideTheDomainIsABadRequest() throws IOException {
+            Response response = post(
+                "/api/transition/legacy-cohorts/GOLD-REVOLVING/migrate",
+                "method=DEEMED_EIR&migratedBy=transition.lead"
+                    + "&deemedRate=-2&basis=ORIGINATION_PRICING_GRID"
+                    + "&infeasibilityReason=records+archived"
+                    + "&documentedBasis=pricing+grid&preparedBy=transition.analyst");
+
+            // Rate refuses a periodic rate at or below minus 100%. The first cut built the Rate
+            // above the try/catch, so this answered 500 with a domain message in it — this layer
+            // reporting a caller's mistake as an engine defect, which is exactly what EirServer's
+            // three-way status mapping exists to prevent.
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body()).contains("bad request").contains("-2");
+        }
+
+        @Test
+        @DisplayName("a derivation whose rate field is misspelled is a 400, never a silent drop")
+        void aDerivationWithAMisspelledRateFieldIsRefused() throws IOException {
+            Response response = post(
+                "/api/transition/legacy-cohorts/GOLD-REVOLVING/migrate",
+                "method=DEEMED_EIR&migratedBy=transition.lead"
+                    + "&deemedRAte=0.014500000000&basis=ORIGINATION_PRICING_GRID"
+                    + "&infeasibilityReason=the+source+system+was+retired+in+2019"
+                    + "&documentedBasis=FY19+renewal+pricing+grid"
+                    + "&preparedBy=transition.analyst"
+                    + "&approvedBy=transition.committee&approvedOn=2027-03-31");
+
+            // The worst possible outcome here is a 200. The first cut gated the derivation branch on
+            // deemedRate alone, so this request — a complete, APPROVED derivation with one field
+            // misspelled — was discarded whole and answered 200 reporting the old unsigned
+            // derivation as governing and DE-1 still red. An operator who came to sign off the rate
+            // would have been told the rate was unsigned, with nothing saying their input was
+            // dropped. Any derivation field now triggers the build, so the missing one is named.
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body()).contains("deemedRate").contains("absent");
+        }
+
+        @Test
+        @DisplayName("derivation fields on a full-reconstruction request are a 400, not ignored")
+        void derivationFieldsOnAReconstructionAreRefused() throws IOException {
+            Response response = post(
+                "/api/transition/legacy-cohorts/HL-PRE-2020/migrate",
+                "method=FULL_RECONSTRUCTION&migratedBy=transition.lead"
+                    + "&deemedRate=0.012000000000&basis=ORIGINATION_PRICING_GRID"
+                    + "&infeasibilityReason=x&documentedBasis=y&preparedBy=transition.analyst");
+
+            // Either the method is wrong or the derivation belongs to a working that was not used,
+            // and both are things a reader would take as the basis of the rate — the same argument
+            // TransitionFairValue makes for a discount rate on a quoted-price row.
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body())
+                .contains("FULL_RECONSTRUCTION")
+                .contains("a working that was not used");
+        }
+
+        @Test
+        @DisplayName("the cohort listing names who migrated the cohort, not merely that somebody did")
+        void theCohortListingNamesWhoMigratedIt() throws IOException {
+            assertThat(get("/api/transition/legacy-cohorts").body())
+                .as("nothing has been migrated yet")
+                .contains("\"migrationApplied\":false,\"migratedBy\":null");
+
+            post("/api/transition/legacy-cohorts/HL-PRE-2020/migrate",
+                "method=FULL_RECONSTRUCTION&migratedBy=transition.lead");
+
+            // migratedBy is required by the endpoint. The first cut echoed it back and recorded only
+            // that a migration had happened, so the listing reported migrationApplied: true with
+            // nobody's name against it — demanding an identity and discarding it, in a module whose
+            // every other record carries a maker and a checker.
+            assertThat(get("/api/transition/legacy-cohorts").body())
+                .contains("\"migrationApplied\":true,\"migratedBy\":\"transition.lead\"");
+        }
+
+        @Test
         @DisplayName("an unknown migration method is a 400 that lists the two that exist")
         void anUnknownMigrationMethodIsABadRequest() throws IOException {
             Response response = post("/api/transition/legacy-cohorts/HL-PRE-2020/migrate",
@@ -767,6 +844,19 @@ class TransitionModuleTest {
         }
 
         @Test
+        @DisplayName("an empty asOf is a 400, not a quiet fall back to the period end")
+        void anEmptyAsOfIsABadRequest() throws IOException {
+            Response response = get("/api/transition/coverage?asOf=");
+
+            // The dangerous case, and the one the first cut got wrong: ?asOf=next-tuesday answered
+            // 400 while ?asOf= answered 200 as at 2028-05-31. A caller whose date variable
+            // interpolated empty got a plausible control report for a date they did not ask about,
+            // and nothing in the response said so.
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body()).contains("asOf");
+        }
+
+        @Test
         @DisplayName("an unparseable asOf is a 400 rather than a silent fall back to today")
         void anUnparseableAsOfIsABadRequest() throws IOException {
             Response response = get("/api/transition/coverage?asOf=next-tuesday");
@@ -848,6 +938,47 @@ class TransitionModuleTest {
                 .contains("\"unvaluedContracts\":1")
                 .contains("\"completeOverTheBook\":false")
                 .contains("\"exitGateMet\":false");
+        }
+
+        @Test
+        @DisplayName("a contract the run never saw gets no fair-value route at all")
+        void aNeverPresentedContractGetsNoFairValueRoute() {
+            TransitionModule module = new TransitionModule(
+                new EirService(Seed.book()), TransitionBook.seeded(List.of("C-0010")));
+            CapturedRoutes routes = new CapturedRoutes();
+            module.register(routes);
+
+            // C-0010 is in the population and has no valuation, so this module has nothing to say
+            // about it. The first cut registered a route per POPULATION id, and that route's handler
+            // could only throw: GET /api/transition/fair-value/C-0010 answered 500 naming an
+            // internal invariant, where the honest answer is a 404 from the absence of a route.
+            assertThat(routes.gets)
+                .as("a route whose handler can only throw is worse than no route")
+                .doesNotContainKey("/api/transition/fair-value/C-0010");
+            // The seven valued contracts and the two below-market originations all keep theirs.
+            assertThat(routes.gets)
+                .containsKey("/api/transition/fair-value/C-0001")
+                .containsKey("/api/transition/fair-value/C-0007")
+                .containsKey("/api/transition/fair-value/C-0008")
+                .containsKey("/api/transition/fair-value/C-0009");
+        }
+
+        @Test
+        @DisplayName("a never-presented id colliding with a below-market origination is refused at"
+            + " construction, because the duplicate route would kill the whole server")
+        void aCollisionWithABelowMarketOriginationIsRefused() {
+            // C-0008 is the staff housing loan. Left unchecked, the module registered
+            // /api/transition/fair-value/C-0008 twice, HttpServer.createContext refused the
+            // duplicate path, and the IllegalArgumentException came out of the EirServer
+            // constructor — so /api/book and /api/run died too, for a transition seed mistake.
+            assertThatThrownBy(() -> TransitionBook.seeded(List.of("C-0008")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("C-0008")
+                .hasMessageContaining("already in the seeded transition book");
+            // And the ordinary collision, with a valued contract, is refused the same way.
+            assertThatThrownBy(() -> TransitionBook.seeded(List.of("C-0003")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("C-0003");
         }
 
         @Test

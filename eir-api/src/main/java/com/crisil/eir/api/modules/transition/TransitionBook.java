@@ -82,6 +82,12 @@ public final class TransitionBook {
     public static final LocalDate TRANSITION_DATE = LocalDate.of(2027, 4, 1);
 
     /**
+     * The below-market originations' contract ids, named here so {@link #seeded(List)} can refuse a
+     * collision with them before it becomes a duplicate HTTP route.
+     */
+    private static final Set<String> BELOW_MARKET_IDS = Set.of("C-0008", "C-0009");
+
+    /**
      * The Board position closing reference § 4's Silence 6 for staff loans.
      *
      * <p>{@link PolicyKind#POLICY_POSITION}, because ACPIR 19 and 20 give no guidance at all on the
@@ -111,8 +117,15 @@ public final class TransitionBook {
     /** Recorded ECL discount bases. One per contract; C-0007's is deliberately absent. */
     private final List<ContractMigrationState> migrationStates = new ArrayList<>();
 
-    /** Cohorts a migrate call has been applied to, for the cohort listing to report honestly. */
-    private final Set<String> migrationsApplied = new LinkedHashSet<>();
+    /**
+     * Who migrated each cohort, keyed by cohort name.
+     *
+     * <p>A map rather than a set of names. The endpoint requires {@code migratedBy} and the first cut
+     * recorded only that a migration had happened, so the cohort listing reported
+     * {@code migrationApplied: true} with no trace of who did it — demanding an identity and then
+     * discarding it, in a module whose every other record carries a maker and a checker.
+     */
+    private final Map<String, String> migratedBy = new LinkedHashMap<>();
 
     /** Evidence filed since the server started, newest last, for the run to report what changed. */
     private final List<String> evidenceFiled = new ArrayList<>();
@@ -154,10 +167,17 @@ public final class TransitionBook {
         List<String> population = new ArrayList<>(
             List.of("C-0001", "C-0002", "C-0003", "C-0004", "C-0005", "C-0006", "C-0007"));
         for (String contractId : contractsNeverPresented) {
-            if (population.contains(contractId)) {
+            // Checked against the below-market ids as well as the valued ones. The first cut checked
+            // only the valuation population, and a never-presented "C-0008" then collided with the
+            // staff loan: the module registered one HTTP path twice, HttpServer.createContext
+            // refused the duplicate, and the exception came out of the EirServer constructor — so
+            // the whole server failed to start, not just this module's routes.
+            if (population.contains(contractId) || BELOW_MARKET_IDS.contains(contractId)) {
                 throw new IllegalArgumentException(
-                    "contract " + contractId + " is already in the seeded population, so it cannot"
-                        + " also be a contract that was never presented");
+                    "contract " + contractId + " is already in the seeded transition book (valued"
+                        + " population " + population + ", below-market originations "
+                        + BELOW_MARKET_IDS + "), so it cannot also be a contract that was never"
+                        + " presented");
             }
             population.add(contractId);
         }
@@ -341,6 +361,25 @@ public final class TransitionBook {
         return new TransitionValuationRun(TRANSITION_DATE, List.copyOf(valuations.values()));
     }
 
+    /**
+     * The contracts this book can answer a fair value for: valued, or a below-market origination.
+     *
+     * <p><b>Not the population.</b> The population includes contracts the contract master carries
+     * that were never presented to the valuation run — that is the whole point of
+     * {@link #seeded(List)} — and this book has nothing to say about those. Registering a route for
+     * one produced a handler that could only throw, so a caller asking about a contract the engine
+     * legitimately knows nothing about got a 500 naming an internal invariant instead of a 404.
+     */
+    public List<String> answerableContractIds() {
+        List<String> ids = new ArrayList<>(valuations.keySet());
+        for (String contractId : originations.keySet()) {
+            if (!ids.contains(contractId)) {
+                ids.add(contractId);
+            }
+        }
+        return List.copyOf(ids);
+    }
+
     /** The valuation recorded for a contract, if this book carries one. */
     public Optional<TransitionFairValue> valuation(String contractId) {
         return Optional.ofNullable(valuations.get(contractId));
@@ -391,7 +430,12 @@ public final class TransitionBook {
 
     /** Whether a migrate call has been applied to this cohort since the server started. */
     public boolean migrationApplied(String cohortName) {
-        return migrationsApplied.contains(cohortName);
+        return migratedBy.containsKey(cohortName);
+    }
+
+    /** Who applied it, or null where no migrate call has been made against this cohort. */
+    public String migratedBy(String cohortName) {
+        return migratedBy.get(cohortName);
     }
 
     /** The ACPIR 21 and ACPIR 50 tracker over the legacy population. */
@@ -475,14 +519,16 @@ public final class TransitionBook {
      * @param cohortName the cohort, which must already be in the plan
      * @param method     how it is brought onto the EIR
      * @param derivation the deemed rate's derivation, or null to keep whatever is on file
+     * @param actor      who applied the migration; recorded, not merely required
      * @return the cohort in its new state
      * @throws IllegalArgumentException where the cohort is not in the plan, or a deemed migration
      *     has no derivation on file and none supplied
      */
     public LegacyCohort migrate(
-        String cohortName, MigrationMethod method, DeemedEirDerivation derivation) {
+        String cohortName, MigrationMethod method, DeemedEirDerivation derivation, String actor) {
         Objects.requireNonNull(cohortName, "cohortName");
         Objects.requireNonNull(method, "method");
+        Objects.requireNonNull(actor, "actor");
         int index = indexOf(cohortName);
         if (index < 0) {
             throw new IllegalArgumentException(
@@ -507,7 +553,7 @@ public final class TransitionBook {
             existing.expectedRunoffDate(), existing.migrationPriority(), method,
             existing.contractCount(), existing.approvedBy());
         cohorts.set(index, migrated);
-        migrationsApplied.add(cohortName);
+        migratedBy.put(cohortName, actor);
         return migrated;
     }
 

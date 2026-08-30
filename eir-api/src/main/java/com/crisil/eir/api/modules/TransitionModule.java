@@ -83,21 +83,46 @@ import java.util.Optional;
  *       one was taken.</li>
  * </ul>
  *
- * <p><b>Why the cohort id is bound at registration rather than parsed per request.</b>
- * {@link Routes#post} hands a handler the parsed {@link FormBody} and no exchange, so a POST handler
- * cannot read its own path. Rather than move the id into the request body — where a caller could
- * POST to {@code .../HL-PRE-2020/migrate} with a different cohort named in the body and migrate the
- * wrong 1.2 million contracts — this module registers one migrate route per cohort in the plan and
- * closes over the name. The cohorts are fixed at construction (no endpoint creates one), the URL is
- * exactly the one 06 § 8 specifies, and an unknown cohort falls through to the server's own handler
- * as a 404 naming the path, which is the right status for a resource that does not exist. The
- * per-contract fair-value route is registered the same way and for the same reason.
+ * <p><b>Why the ids are bound at registration rather than parsed per request.</b> Two different
+ * reasons, and they are worth separating because the first cut conflated them.
+ *
+ * <ul>
+ *   <li><b>The cohort id: because a POST handler cannot read its own path.</b> {@link Routes#post}
+ *       hands a handler the parsed {@link FormBody} and no exchange. Moving the id into the request
+ *       body would let a caller POST to {@code .../HL-PRE-2020/migrate} with a different cohort
+ *       named in the body and migrate the wrong 1,204,338 contracts, so the module registers one
+ *       migrate route per cohort in the plan and closes over the name.</li>
+ *   <li><b>The contract id: because an unknown resource has to be a 404.</b> A GET handler
+ *       <em>does</em> receive the exchange and could parse its own path — but a handler returns a
+ *       {@code Json.Obj}, so every answer it can give is a 200, and the honest status for a contract
+ *       this book has never valued is 404. Binding the ids means an unknown contract has no route
+ *       and falls through to the server's own handler, which 404s and names the path. A 200 carrying
+ *       {@code "found": false} would be indistinguishable, to a caller keying on the status, from a
+ *       contract whose fair value is genuinely nil.</li>
+ * </ul>
+ *
+ * <p><b>What that costs, and where it stops working.</b> One {@code HttpServer} context per
+ * answerable contract is fine for a transition book held in memory and would not be for the ten
+ * million exposures 07 sizes the engine for — {@code HttpServer} scans its context list per request.
+ * A production surface needs a {@code Routes} variant that hands a GET handler its path parameters
+ * and can express 404, which is a change to a shared seam this unit does not own. Recorded here
+ * rather than worked around, because a single prefix route would silently trade the correct status
+ * code for a scaling property this module does not yet need.
  *
  * <p><b>Status codes.</b> 200 for every answer including every refusal, per {@code EirServer}. 400
  * where the caller sent something the domain refuses to construct at all — an unknown migration
  * method, a self-approved derivation, an approver with no approval date — because those are
  * malformed requests rather than engine answers: the record throws, so there is no value to return,
  * and mapping them to 500 would report a caller's mistake as an engine defect.
+ *
+ * <p><b>Where an application-layer transition use case would arrive.</b> The five handlers read
+ * the programme's state through exactly one collaborator, {@link TransitionBook}, supplied by the
+ * two-argument constructor. So a use case in {@code eir-application} — which cannot depend on this
+ * module, the graph runs inward — replaces that one seam and no route, no rendering and no status
+ * mapping moves. Nothing here waits for it: the module works with its own store today, and the
+ * {@link EirService} it is handed by {@code ApiModules} is deliberately not read, because the
+ * transition dataset is a one-off valuation and a migration queue rather than anything a monthly
+ * run publishes.
  *
  * <p>Specification: {@code docs/06-api-spec.md} 06 § 8. Data model: {@code 04 § 6}. Controls TF-1,
  * BM-1, LC-1, DE-1 and TM-1 are the transition set, and {@code 07 § 4.1.1} records that they are
@@ -140,7 +165,14 @@ public final class TransitionModule implements ApiModule {
         this.transition = Objects.requireNonNull(transition, "transition");
     }
 
-    /** The engine this module reads through. The transition dataset is this module's own. */
+    /**
+     * The run engine, held and deliberately unread — see the class javadoc.
+     *
+     * <p>The constructor signature is fixed by {@code ApiModules.all(service)}, which hands every
+     * module the same collaborator. Kept rather than dropped because it is the seam an
+     * {@code eir-application} transition use case would be wired through, and because a module that
+     * quietly discarded its argument would read as a wiring mistake.
+     */
     protected EirService service() {
         return service;
     }
@@ -151,16 +183,13 @@ public final class TransitionModule implements ApiModule {
 
         routes.post(BASE + "/fair-value-run", this::fairValueRun);
 
-        // One route per valued contract and per below-market origination. See the class javadoc: it
-        // is what makes an unknown contract a 404 rather than a 200 carrying "found": false.
-        for (String contractId : transition.populationIds()) {
-            routes.get(BASE + "/fair-value/" + contractId,
-                exchange -> fairValue(contractId));
-        }
-        for (BelowMarketOrigination origination : transition.originations()) {
-            String contractId = origination.contractId();
-            routes.get(BASE + "/fair-value/" + contractId,
-                exchange -> fairValue(contractId));
+        // One route per contract this book can ANSWER for — not per contract in the population.
+        // See the class javadoc: it is what makes an unknown contract a 404. The first cut looped
+        // over populationIds(), which includes contracts the master carries and the valuation run
+        // never saw, so those got a route whose handler could only throw: a 500 naming an internal
+        // invariant where the engine's honest answer is "no such valuation".
+        for (String contractId : transition.answerableContractIds()) {
+            routes.get(BASE + "/fair-value/" + contractId, exchange -> fairValue(contractId));
         }
 
         routes.get(BASE + "/legacy-cohorts", exchange -> legacyCohorts());
@@ -484,6 +513,7 @@ public final class TransitionModule implements ApiModule {
                 .str("definitionApprovedBy", cohort.approvedBy())
                 .bool("reconstructionEffortIsWasted", cohort.reconstructionEffortIsWasted())
                 .bool("migrationApplied", transition.migrationApplied(cohort.cohortName()))
+                .str("migratedBy", transition.migratedBy(cohort.cohortName()))
                 .obj("deemedEirDerivation", derivation.map(TransitionModule::derivationRow)
                     .orElse(null))
                 .str("describe", cohort.describe()));
@@ -547,13 +577,25 @@ public final class TransitionModule implements ApiModule {
                 "route registered for cohort " + cohortName + " which the plan does not hold"));
 
         DeemedEirDerivation supplied = null;
-        if (method.restsOnAnAssumption() && body.has("deemedRate")) {
+        if (namesADerivation(body)) {
+            if (!method.restsOnAnAssumption()) {
+                // A derivation on a FULL_RECONSTRUCTION request is either the wrong method recorded
+                // or a working that was abandoned, and both are things a reader would take as the
+                // basis of the rate — the same argument TransitionFairValue makes for a discount
+                // rate on a quoted-price row.
+                throw new FormBody.BadRequest("this request names derivation fields and migrates"
+                    + " cohort " + cohortName + " by " + method + ", which rests on reconstructed"
+                    + " flows rather than on an assumption; either the method is wrong or the"
+                    + " derivation belongs to a working that was not used");
+            }
+            // Any derivation field triggers the whole build, so body.text() raises the 400 for
+            // whichever one is missing. See DERIVATION_FIELDS for what gating on one field cost.
             supplied = derivationFrom(cohortName, body);
         }
 
         LegacyCohort after;
         try {
-            after = transition.migrate(cohortName, method, supplied);
+            after = transition.migrate(cohortName, method, supplied, migratedBy);
         } catch (IllegalArgumentException refused) {
             throw new FormBody.BadRequest(refused.getMessage());
         }
@@ -615,22 +657,48 @@ public final class TransitionModule implements ApiModule {
     }
 
     private DeemedEirDerivation derivationFrom(String cohortName, FormBody body) {
-        Rate deemedRate = Rate.periodic(body.decimal("deemedRate"), 12);
         DeemedEirBasis basis = enumField(body, "basis", DeemedEirBasis.class);
         String approvedBy = body.textOr("approvedBy", null);
         LocalDate approvedOn = body.has("approvedOn")
             ? isoDate(body.text("approvedOn"), "approvedOn") : null;
         try {
+            // Inside the try, because Rate refuses a periodic rate at or below minus 100% and the
+            // first cut constructed it above: a caller sending deemedRate=-2 got a 500 naming a
+            // domain message, which is this layer reporting a caller's mistake as an engine defect.
+            Rate deemedRate = Rate.periodic(body.decimal("deemedRate"), 12);
             return new DeemedEirDerivation(cohortName, null, deemedRate, basis,
                 body.text("infeasibilityReason"), body.text("documentedBasis"),
                 body.textOr("evidenceRef", null), body.text("preparedBy"),
                 approvedBy, approvedOn);
         } catch (IllegalArgumentException refused) {
-            // Self-approval, or an approver with no date. The record refuses to exist, so there is
-            // no engine answer to return on a 200 — the caller sent a combination this system does
-            // not represent, which is what 400 means here.
+            // Self-approval, an approver with no date, or a rate outside Rate's domain. The record
+            // refuses to exist, so there is no engine answer to return on a 200 — the caller sent a
+            // combination this system does not represent, which is what 400 means here.
             throw new FormBody.BadRequest(refused.getMessage());
         }
+    }
+
+    /**
+     * Every field a supplied derivation is built from.
+     *
+     * <p>Named as a list because the derivation branch has to trigger on <em>any</em> of them. The
+     * first cut gated on {@code deemedRate} alone, so a caller who misspelled that one field had a
+     * complete, approved derivation silently discarded and got a 200 reporting the old unapproved
+     * one as governing — an operator who came to sign off a rate told the rate was unsigned, with
+     * nothing in the response saying their input had been dropped.
+     */
+    private static final List<String> DERIVATION_FIELDS = List.of(
+        "deemedRate", "basis", "infeasibilityReason", "documentedBasis", "evidenceRef",
+        "preparedBy", "approvedBy", "approvedOn");
+
+    /** Whether the caller sent any part of a derivation. */
+    private static boolean namesADerivation(FormBody body) {
+        for (String field : DERIVATION_FIELDS) {
+            if (body.has(field)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ============================================ GET /api/transition/coverage
@@ -748,8 +816,10 @@ public final class TransitionModule implements ApiModule {
         for (String pair : query.split("&")) {
             int split = pair.indexOf('=');
             if (split > 0 && key.equals(pair.substring(0, split))) {
-                String value = pair.substring(split + 1);
-                return value.isBlank() ? null : value.strip();
+                // The raw value, blank included. Mapping blank to null made ?asOf= answer 200
+                // as at the period end while ?asOf=next-tuesday answered 400 — so a caller whose
+                // date variable interpolated empty got a plausible answer for the wrong date.
+                return pair.substring(split + 1).strip();
             }
         }
         return null;
