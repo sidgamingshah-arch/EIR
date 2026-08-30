@@ -77,6 +77,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -541,24 +542,13 @@ public final class EirService {
         String closedBy = body.textOr("closedBy", CLOSED_BY_DEFAULT);
         Instant closedAt = Instant.parse(body.textOr("closedAt", "2028-06-05T09:00:00Z"));
 
-        List<ContractualLegInterest> engineLines = new ArrayList<>();
-        for (ContractResult result : completed.aggregate().results()) {
-            if (result.isComputed()) {
-                engineLines.add(new ContractualLegInterest(result.contractId(), Seed.PERIOD_ID,
-                    book.holding(result.contractId())
-                        .orElseThrow()
-                        .state()
-                        .contractualInterestBilled()));
-            }
-        }
-
         AccountingPeriod period = AccountingPeriod
             .open(Seed.PERIOD_ID, "FY2028-29", LocalDate.of(2028, 5, 1), Seed.PERIOD_END)
             .startClosing(Instant.parse("2028-06-02T09:00:00Z"));
 
         RunClose.ClosePresentation presentation = RunClose.present(
             request(completed.runId()), completed.aggregate(), Book.GCA_ACCOUNT,
-            engineLines, portfolioTies(completed), period, closedBy, closedAt,
+            contractualLegLines(completed), portfolioTies(completed), period, closedBy, closedAt,
             completed.exceptions(), acceptances);
 
         return Json.object()
@@ -581,6 +571,101 @@ public final class EirService {
             .figure("totalDeviation", presentation.totalDeviation())
             .bool("journalsPosted", book.posted())
             .strings("caveats", closeCaveats());
+    }
+
+    // ============================================= what a reporting module reads (06 § 7)
+
+    /**
+     * The figures a run published for one period, for the report modules of 06 § 7.
+     *
+     * <p><b>Why the reports read through this and not through the book.</b> A module is handed this
+     * service and nothing else, and a reconciliation report has to read the same run a close reads
+     * — otherwise the report and the close are two answers to one question, which is the defect
+     * this codebase has recorded finding three times. What comes back is the run's own working
+     * papers and the read ports it was assembled with; there is no write anywhere on it, so a
+     * report cannot post a journal or move a ledger balance on the way to rendering one.
+     *
+     * <p><b>{@link Optional#empty()} for a period no run has published,</b> and that is the whole
+     * reason this returns an Optional rather than an empty aggregate. A report over a period that
+     * never ran must say so: every total over an empty population is nil and every reconciliation
+     * over it ties, so "nothing ran" and "everything reconciled" render identically unless the
+     * absence is a distinct answer.
+     *
+     * @param periodId the accounting period, {@code YYYYMM} per 04 § 2.13
+     */
+    public Optional<PublishedFigures> publishedRun(int periodId) {
+        Completed completed = lastRun.get(periodId);
+        if (completed == null) {
+            return Optional.empty();
+        }
+        return Optional.of(new PublishedFigures(
+            completed.runId(), request(completed.runId()), completed.aggregate(),
+            completed.computations(), contractualLegLines(completed)));
+    }
+
+    /**
+     * One run's published figures, the ports it read, and the one input a caller has to supply.
+     *
+     * <p><b>{@code engineContractualLeg} is on this record rather than rebuilt by each reader,</b>
+     * because it is the engine's side of RC-1 and RC-1 must have exactly one engine side. It is
+     * assembled once, by {@link #contractualLegLines}, and both the close and the report read the
+     * same list — so a change to how the contractual leg is sourced cannot move one of them and
+     * leave the other where it was.
+     *
+     * @param runId                the run that published these figures
+     * @param request              the run as a value: its boundary, its book and its five read
+     *                             ports, so a report resolves the GL and the CBS feed exactly as
+     *                             the run did rather than at some later boundary of its own
+     * @param aggregate            the population accounting and the per-contract results
+     * @param computations         the per-contract working papers, by contract id; a quarantined
+     *                             contract has no entry, which is why a report has to publish the
+     *                             population counts alongside its figures
+     * @param engineContractualLeg the engine's contractual-leg interest per computed contract
+     */
+    public record PublishedFigures(
+        String runId,
+        RunRequest request,
+        RunAggregate aggregate,
+        Map<String, ContractComputation> computations,
+        List<ContractualLegInterest> engineContractualLeg) {
+
+        public PublishedFigures {
+            Objects.requireNonNull(runId, "runId");
+            Objects.requireNonNull(request, "request");
+            Objects.requireNonNull(aggregate, "aggregate");
+            computations = Map.copyOf(Objects.requireNonNull(computations, "computations"));
+            engineContractualLeg =
+                List.copyOf(Objects.requireNonNull(engineContractualLeg, "engineContractualLeg"));
+        }
+
+        /** The period these figures are for, taken from the request rather than restated. */
+        public int periodId() {
+            return request.periodId();
+        }
+    }
+
+    /**
+     * The engine's side of RC-1: what the contractual leg carries per computed contract.
+     *
+     * <p><b>Computed contracts only, and that is what lets RC-1 catch a dropped one.</b> A
+     * quarantined contract contributes no engine line, so a contract the CBS billed and the engine
+     * never projected shows up as a one-sided line worth the whole of the CBS figure — C-0003 on
+     * this book, 5,298.16. A loop that took its population from the CBS feed instead would present
+     * a line on both sides for every contract the feed carried and the presence break would be
+     * invisible.
+     */
+    private List<ContractualLegInterest> contractualLegLines(Completed completed) {
+        List<ContractualLegInterest> lines = new ArrayList<>();
+        for (ContractResult result : completed.aggregate().results()) {
+            if (result.isComputed()) {
+                lines.add(new ContractualLegInterest(result.contractId(), Seed.PERIOD_ID,
+                    book.holding(result.contractId())
+                        .orElseThrow()
+                        .state()
+                        .contractualInterestBilled()));
+            }
+        }
+        return List.copyOf(lines);
     }
 
     // =========================================================== stage 4: the replay
