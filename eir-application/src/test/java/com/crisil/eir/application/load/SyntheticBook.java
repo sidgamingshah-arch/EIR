@@ -257,25 +257,12 @@ public final class SyntheticBook
     }
 
     /**
-     * The archetype of every slot in a thousand, spread rather than blocked.
+     * The baseline mix with the reset share moved to {@code resetPermille}.
      *
-     * <p>Spread by the highest-averages (Sainte-Laguë) rule, in integers: at each slot the
-     * archetype furthest behind its target share takes it. Two properties matter and neither is
-     * cosmetic.
-     *
-     * <p><b>Every prefix of the population carries the mix.</b> Blocked assignment — the first 600
-     * contracts periodic, the next 320 actual-dated, and so on — would give a 10,000-contract run
-     * and a 1,000,000-contract run different mixes at any point short of the end, so the two
-     * timings could not be compared and the scaling question the gate turns on would be
-     * unanswerable. With the interleave, {@code size % 1000} contracts of drift is the whole error.
-     *
-     * <p><b>The expensive paths are not contiguous.</b> A thousand consecutive resets would let the
-     * JIT specialise the loop on one branch and would measure a book nobody has, in the direction
-     * that flatters the result.
-     *
-     * <p>Integer arithmetic throughout, per ADR-0002 — the comparison
-     * {@code share[a] * (taken[b] + 1)} against {@code share[b] * (taken[a] + 1)} is the
-     * highest-averages test with the division cleared, and it needs no floating point to be exact.
+     * <p>The slots the reset gains or loses come out of {@link Archetype#PERFORMING_PERIODIC}, so a
+     * sweep over this argument changes one thing: how many contracts reach a solver. That is what
+     * makes the sweep a measurement of the marginal cost of a B5.4.5 solve rather than of a
+     * different book.
      */
     private static int[] sharesWithResetAt(int resetPermille) {
         Archetype[] values = Archetype.values();
@@ -307,6 +294,27 @@ public final class SyntheticBook
         return share;
     }
 
+    /**
+     * The archetype of every slot in a thousand, spread rather than blocked.
+     *
+     * <p>Spread by the highest-averages (Sainte-Laguë) rule, in integers: at each slot the
+     * archetype furthest behind its target share takes it. Two properties matter and neither is
+     * cosmetic.
+     *
+     * <p><b>Every prefix of the population carries the mix.</b> Blocked assignment — the first 600
+     * contracts periodic, the next 320 actual-dated, and so on — would give a 10,000-contract run
+     * and a 1,000,000-contract run different mixes at any point short of the end, so the two
+     * timings could not be compared and the scaling question the gate turns on would be
+     * unanswerable. With the interleave, {@code size % 1000} contracts of drift is the whole error.
+     *
+     * <p><b>The expensive paths are not contiguous.</b> A thousand consecutive resets would let the
+     * JIT specialise the loop on one branch and would measure a book nobody has, in the direction
+     * that flatters the result.
+     *
+     * <p>Integer arithmetic throughout, per ADR-0002 — the comparison
+     * {@code share[a] * (taken[b] + 1)} against {@code share[b] * (taken[a] + 1)} is the
+     * highest-averages test with the division cleared, and it needs no floating point to be exact.
+     */
     private static Archetype[] interleave(int[] share) {
         Archetype[] values = Archetype.values();
         int total = 0;

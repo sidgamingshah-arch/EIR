@@ -213,7 +213,12 @@ public final class LoadHarness {
             say("PERFORMING_PERIODIC is the cost of one fractional power per contract, which is");
             say("the quantity ADR-0009 sized at 0.2 core-hours per 10M-contract close.");
             say("");
-            int attributionSize = Math.min(200_000, sizes.get(sizes.size() - 1));
+            // 20,000 and not the run's own size, for a reason that is itself the headline finding:
+            // a pure EVENT_RESET book has one solve per contract, and ContractPipeline calls
+            // SolveAudit.solveCountFor twice per contract while that method scans every record the
+            // audit holds — so a pure reset book costs O(n^2) string comparisons and a 200,000-row
+            // one would spend minutes inside an accessor. See RESULTS.md, "the hot spot".
+            int attributionSize = Math.min(20_000, sizes.get(sizes.size() - 1));
             Map<Archetype, Measurement> pure = new LinkedHashMap<>();
             for (Archetype archetype : Archetype.values()) {
                 Measurement measurement =
