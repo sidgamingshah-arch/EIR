@@ -48,6 +48,14 @@ public interface Routes {
      * and the query — and the parsed body, which is empty for a GET. It returns an {@link Answer}
      * carrying the status it wants.
      *
+     * <p><b>Several modules may register on one path, and one of them must claim each request.</b>
+     * {@code docs/06} puts {@code POST /contracts/{id}/events} and
+     * {@code GET /contracts/{id}/trace} under one prefix, and they belong to different modules;
+     * the JDK's server allows one handler per context and throws on a duplicate, so without this
+     * the two cannot coexist and the server fails at construction. A handler returns {@code null}
+     * to mean "not mine", and the next one registered on that path is tried. If none claims it the
+     * answer is 404 naming the path — never a silent 200.
+     *
      * <p><b>This does not licence a 4xx for an engine refusal.</b> The rule this API is built on
      * still holds: 200 for every answer the engine gives, including every refusal, because a
      * refusal is a value here and the whole list comes back. The status codes this primitive exists
@@ -60,6 +68,14 @@ public interface Routes {
     /** A handler that reads the exchange and chooses its own status. */
     @FunctionalInterface
     interface PathHandler {
+        /**
+         * Answers the request, or returns {@code null} to decline it so a sibling can try.
+         *
+         * <p>Declining is for a path this handler does not recognise — a different suffix, a
+         * different verb. It is <em>not</em> for a request this handler recognises and refuses:
+         * that is an {@link Answer}, because a refusal is a value in this engine and the whole
+         * list comes back.
+         */
         Answer handle(HttpExchange exchange, FormBody body);
     }
 

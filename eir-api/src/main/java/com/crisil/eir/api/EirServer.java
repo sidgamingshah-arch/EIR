@@ -13,7 +13,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
@@ -47,6 +50,9 @@ public final class EirServer {
 
     private final HttpServer server;
     private final EirService service;
+
+    /** Handlers per shared subtree, in registration order. See {@link #route}. */
+    private final Map<String, List<Routes.PathHandler>> subtreeHandlers = new LinkedHashMap<>();
 
     public EirServer(int port, EirService service) throws IOException {
         this.service = Objects.requireNonNull(service, "service");
@@ -140,10 +146,38 @@ public final class EirServer {
      * 500 with its own message, and anything the handler returns is written as it asked.
      */
     private void route(String path, Routes.PathHandler handler) {
+        // Several modules may share one prefix -- docs/06 puts POST /contracts/{id}/events and
+        // GET /contracts/{id}/trace under one, owned by different modules -- and the JDK's server
+        // throws on a duplicate createContext. So the context is created once per path and the
+        // handlers registered on it are tried in registration order until one claims the request.
+        List<Routes.PathHandler> chain =
+            subtreeHandlers.computeIfAbsent(path, key -> new ArrayList<>());
+        chain.add(handler);
+        if (chain.size() > 1) {
+            return;
+        }
         server.createContext(path, exchange -> {
             try {
                 String body = "POST".equals(exchange.getRequestMethod()) ? readBody(exchange) : "";
-                Routes.Answer answer = handler.handle(exchange, FormBody.parse(body));
+                FormBody parsed = FormBody.parse(body);
+                Routes.Answer answer = null;
+                for (Routes.PathHandler candidate : subtreeHandlers.get(path)) {
+                    answer = candidate.handle(exchange, parsed);
+                    if (answer != null) {
+                        break;
+                    }
+                }
+                if (answer == null) {
+                    // Nobody claimed it. A 404 naming the path, never a silent 200 -- an endpoint
+                    // that answers cleanly while doing nothing is the shape docs/06's own reader
+                    // cannot distinguish from one that works.
+                    respond(exchange, 404, Json.object()
+                        .str("error", "no handler claimed " + exchange.getRequestURI().getPath())
+                        .str("detail", "the path prefix " + path + " is registered, but no module"
+                            + " recognised this method and suffix")
+                        .toString());
+                    return;
+                }
                 respond(exchange, answer.status(), answer.body().toString());
             } catch (FormBody.BadRequest malformed) {
                 respond(exchange, 400, Json.object()
