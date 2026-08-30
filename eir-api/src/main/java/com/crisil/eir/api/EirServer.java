@@ -75,6 +75,11 @@ public final class EirServer {
             public void post(String path, Function<FormBody, Json.Obj> handler) {
                 EirServer.this.post(path, handler);
             }
+
+            @Override
+            public void route(String path, Routes.PathHandler handler) {
+                EirServer.this.route(path, handler);
+            }
         };
         for (ApiModule module : ApiModules.all(service)) {
             module.register(routes);
@@ -123,6 +128,35 @@ public final class EirServer {
                 return;
             }
             answer(exchange, () -> handler.apply(FormBody.parse(readBody(exchange))));
+        });
+    }
+
+    /**
+     * A subtree route whose handler picks its own status.
+     *
+     * <p>Registered with {@code createContext} on the path, so the handler also owns everything
+     * below it — which is how a path parameter is read at all. The three failure mappings are the
+     * same as everywhere else in this class: a malformed request is a 400, an engine defect is a
+     * 500 with its own message, and anything the handler returns is written as it asked.
+     */
+    private void route(String path, Routes.PathHandler handler) {
+        server.createContext(path, exchange -> {
+            try {
+                String body = "POST".equals(exchange.getRequestMethod()) ? readBody(exchange) : "";
+                Routes.Answer answer = handler.handle(exchange, FormBody.parse(body));
+                respond(exchange, answer.status(), answer.body().toString());
+            } catch (FormBody.BadRequest malformed) {
+                respond(exchange, 400, Json.object()
+                    .str("error", "bad request")
+                    .str("detail", malformed.getMessage())
+                    .toString());
+            } catch (RuntimeException defect) {
+                respond(exchange, 500, Json.object()
+                    .str("error", defect.getClass().getSimpleName())
+                    .str("detail", defect.getMessage() == null
+                        ? "(no message)" : defect.getMessage())
+                    .toString());
+            }
         });
     }
 

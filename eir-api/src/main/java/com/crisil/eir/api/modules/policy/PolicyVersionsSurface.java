@@ -2,6 +2,7 @@ package com.crisil.eir.api.modules.policy;
 
 import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.http.Json;
+import com.crisil.eir.api.http.Routes;
 import com.crisil.eir.api.store.Book;
 import com.crisil.eir.api.store.Seed;
 import com.crisil.eir.domain.InvariantResult;
@@ -18,11 +19,6 @@ import com.crisil.eir.policy.preview.ActivationGate;
 import com.crisil.eir.policy.preview.DraftFingerprint;
 import com.crisil.eir.policy.preview.ImpactPreview;
 import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -57,21 +53,20 @@ import java.util.Optional;
  * — a self-approval, a duplicate draft id, a version already approved — comes back on a
  * {@code 200} as a value, which is this engine's standing posture (see {@code EirServer}).
  *
- * <h2>Why this is an HttpHandler and not two Routes registrations</h2>
+ * <h2>One subtree route, and what this class no longer does</h2>
  *
- * <p>{@code Routes} offers a GET taking the exchange and a POST taking only a parsed form body,
- * and neither can express this section. Three things are missing: a status code other than
- * 200/400/500, since {@code EirServer.answer} hard-codes {@code 200} for every answer a handler
- * returns; a path parameter on a POST, since a POST handler never sees the request path, so
- * {@code /{id}/approve} and {@code /{id}/impact-preview} are indistinguishable from each other and
- * from each other's ids; and both verbs on one path, since each registration creates a JDK context
- * and a second context at the same path is rejected — {@code GET /api/policy-versions} and
- * {@code POST /api/policy-versions} are both in the specification table. So this class owns one
- * JDK context for the whole {@code /api/policy-versions} subtree and does its own method and path
- * dispatch. It mirrors {@code EirServer}'s own mapping exactly — 400 for a malformed request, 500
- * for a defect with the exception's own message, {@code application/json} and {@code no-store} —
- * so that the two halves of the surface behave the same way. See {@code PolicyVersionsModule} for
- * how it is attached and what the route seam would need in order to make this class unnecessary.
+ * <p>Registered through {@link Routes#route}, which hands over a whole path subtree: every request
+ * under {@link #BASE} arrives here whatever its verb, so {@code GET} and {@code POST} share the
+ * specification's one {@code /policy-versions} path and {@code {id}} is read from the remaining
+ * segments. {@link #handle} therefore dispatches on method and path, and returns a
+ * {@link Routes.Answer} carrying the status — which is how the {@code 409} is stated.
+ *
+ * <p><b>Everything below that is the seam's again.</b> This class used to own a JDK
+ * {@code HttpContext} directly, read the request body itself, and write the status line, the
+ * content type and the {@code no-store} header — duplicating {@code EirServer}'s mapping so the two
+ * halves of the surface would behave alike. All of it is deleted: {@code EirServer} reads the body,
+ * writes {@code answer.status()}, and maps a malformed request to 400 and a defect to 500 with its
+ * own message, once, for every module. What is left in this file is 06 § 5 and nothing else.
  *
  * <h2>Why this surface runs on the book's clock</h2>
  *
@@ -93,7 +88,7 @@ import java.util.Optional;
  * {@code eir-policy}'s own tests over a controlled clock. What this surface proves is the refusal
  * that a real operator meets: approval attempted with nothing on file.
  */
-public final class PolicyVersionsSurface implements HttpHandler {
+public final class PolicyVersionsSurface {
 
     /** The subtree this surface owns. 06 § 5's {@code /policy-versions} under this API's base. */
     public static final String BASE = "/api/policy-versions";
@@ -113,8 +108,6 @@ public final class PolicyVersionsSurface implements HttpHandler {
      */
     public static final Instant BOOK_AS_AT =
         BOOK_BUSINESS_DATE.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant();
-
-    private static final String JSON = "application/json; charset=utf-8";
 
     private final PolicyVersionsStore store;
     private final PortfolioImpactPreview previews;
@@ -141,46 +134,31 @@ public final class PolicyVersionsSurface implements HttpHandler {
             ActivationGate.withDefaultHorizon());
     }
 
-    /** One answer: the status code and the body. */
-    public record Answer(int status, Json.Obj body) {
-        public Answer {
-            Objects.requireNonNull(body, "body");
-        }
-    }
+    // ---- dispatch --------------------------------------------------------------------------
 
-    // ---- HTTP ------------------------------------------------------------------------------
-
-    @Override
-    public void handle(HttpExchange exchange) throws IOException {
-        Answer answer;
-        try {
-            String method = exchange.getRequestMethod();
-            // The body is only read for a POST. Reading it on a GET would block on clients that
-            // send no body and no content-length, and a GET on this surface takes no input.
-            FormBody body = FormBody.parse("POST".equals(method) ? readBody(exchange) : "");
-            answer = route(method, exchange.getRequestURI().getPath(), body);
-        } catch (FormBody.BadRequest malformed) {
-            answer = new Answer(400, Json.object()
-                .str("error", "bad request")
-                .str("detail", malformed.getMessage()));
-        } catch (RuntimeException defect) {
-            // Reported with its own message, exactly as EirServer does, because a defect swallowed
-            // at the edge becomes a data-quality ticket against a policy version that is fine.
-            answer = new Answer(500, Json.object()
-                .str("error", defect.getClass().getSimpleName())
-                .str("detail", defect.getMessage() == null ? "(no message)" : defect.getMessage()));
-        }
-        respond(exchange, answer);
+    /**
+     * The {@link Routes.PathHandler} this surface is registered as.
+     *
+     * <p>Nothing here reads the body or writes the response: {@code EirServer} has already parsed
+     * the form (empty on a GET) and will write {@code answer.status()}, and it maps a
+     * {@code FormBody.BadRequest} to 400 and any other runtime exception to a 500 carrying its own
+     * message. So a malformed request thrown out of the parsing below arrives at the caller as a
+     * 400 without this class catching anything.
+     */
+    public Routes.Answer handle(HttpExchange exchange, FormBody body) {
+        Objects.requireNonNull(exchange, "exchange");
+        Objects.requireNonNull(body, "body");
+        return route(exchange.getRequestMethod(), exchange.getRequestURI().getPath(), body);
     }
 
     /**
      * Method and path dispatch for the whole subtree.
      *
      * <p>Package-visible and separated from {@link #handle} so the routing table can be read
-     * without a socket in the way; the tests drive it over a real socket anyway, because a status
-     * code chosen correctly and then written after the body is a defect only a socket sees.
+     * without an exchange in the way; the tests drive it over a real socket anyway, because a
+     * status code chosen correctly and then written after the body is a defect only a socket sees.
      */
-    Answer route(String method, String path, FormBody body) {
+    Routes.Answer route(String method, String path, FormBody body) {
         Objects.requireNonNull(method, "method");
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(body, "body");
@@ -228,7 +206,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
      * refusal 06 § 5 is written for. Publishing the decision means the list cannot disagree with
      * what the approval endpoint will do.
      */
-    private Answer list() {
+    private Routes.Answer list() {
         List<Json.Obj> rows = new ArrayList<>();
         for (PolicyVersion version : store.all()) {
             DraftFingerprint draft = store.currentDraftOf(version.id());
@@ -257,7 +235,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
                 .strings("legalNextStatuses", names(version.status().legalSuccessors()))
                 .str("audit", version.describe()));
         }
-        return new Answer(200, Json.object()
+        return Routes.Answer.ok(Json.object()
             .str("specSection", SPEC_SECTION)
             .str("portfolioAsOf", BOOK_BUSINESS_DATE.toString())
             .count("count", rows.size())
@@ -279,7 +257,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
      * {@code 409}. Reserving the conflict code for the impact-preview gate is what lets a caller
      * treat {@code 409} on this surface as one condition with one remedy.
      */
-    private Answer draft(FormBody body) {
+    private Routes.Answer draft(FormBody body) {
         String id = body.text("id");
         PolicyKind kind = kindOf(body.text("kind"));
         String description = body.text("description");
@@ -293,7 +271,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
         // where the answer it needs is the ordinary refusal below.
         if (!store.draftIfAbsent(drafted, content)) {
             PolicyVersion held = store.find(id).orElseThrow();
-            return new Answer(200, Json.object()
+            return Routes.Answer.ok(Json.object()
                 .str("specSection", SPEC_SECTION)
                 .bool("drafted", false)
                 .str("id", id)
@@ -305,7 +283,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
         DraftFingerprint fingerprint = store.currentDraftOf(id);
         ActivationDecision decision =
             gate.decideFromRegister(drafted, fingerprint, store.previews(), BOOK_AS_AT);
-        return new Answer(200, Json.object()
+        return Routes.Answer.ok(Json.object()
             .str("specSection", SPEC_SECTION)
             .bool("drafted", true)
             .str("id", id)
@@ -324,7 +302,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
     // ---- POST /api/policy-versions/{id}/impact-preview --------------------------------------
 
     /** Runs and stores the mandatory preview, or says why it will not certify one. */
-    private Answer impactPreview(String id) {
+    private Routes.Answer impactPreview(String id) {
         Optional<PolicyVersion> held = store.find(id);
         if (held.isEmpty()) {
             return unknownVersion(id);
@@ -336,7 +314,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
         if (!outcome.produced()) {
             ActivationDecision decision =
                 gate.decideFromRegister(version, draft, store.previews(), BOOK_AS_AT);
-            return new Answer(200, Json.object()
+            return Routes.Answer.ok(Json.object()
                 .str("specSection", SPEC_SECTION)
                 .bool("previewed", false)
                 .str("policyVersionId", id)
@@ -351,7 +329,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
         store.store(preview);
         ActivationDecision decision =
             gate.decideFromRegister(version, draft, store.previews(), BOOK_AS_AT);
-        return new Answer(200, Json.object()
+        return Routes.Answer.ok(Json.object()
             .str("specSection", SPEC_SECTION)
             .bool("previewed", true)
             .str("policyVersionId", id)
@@ -410,7 +388,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
      * one audit line for two acts by two people, which is the whole thing a maker–checker control
      * is for.
      */
-    private Answer approve(String id, FormBody body) {
+    private Routes.Answer approve(String id, FormBody body) {
         Optional<PolicyVersion> held = store.find(id);
         if (held.isEmpty()) {
             return unknownVersion(id);
@@ -495,7 +473,7 @@ public final class PolicyVersionsSurface implements HttpHandler {
                 + " gate refused it: " + (submissionStands ? signed.describe()
                     : submission.describe()));
         }
-        return new Answer(status, out);
+        return Routes.Answer.of(status, out);
     }
 
     // ---- rendering -------------------------------------------------------------------------
@@ -576,15 +554,15 @@ public final class PolicyVersionsSurface implements HttpHandler {
      * caller with a typo read a body saying "not approved" and conclude their version had been
      * assessed and rejected.
      */
-    private static Answer unknownVersion(String id) {
-        return new Answer(404, Json.object()
+    private static Routes.Answer unknownVersion(String id) {
+        return Routes.Answer.of(404, Json.object()
             .str("error", "no such policy version")
             .str("policyVersionId", id)
             .str("detail", "no policy version " + id + " is held; draft it with POST " + BASE));
     }
 
-    private static Answer notFound(String path) {
-        return new Answer(404, Json.object()
+    private static Routes.Answer notFound(String path) {
+        return Routes.Answer.of(404, Json.object()
             .str("error", "no route " + path)
             .strings("routes", List.of(
                 "GET " + BASE,
@@ -593,8 +571,8 @@ public final class PolicyVersionsSurface implements HttpHandler {
                 "POST " + BASE + "/{id}/approve")));
     }
 
-    private static Answer methodNotAllowed(String method, String path, String allowed) {
-        return new Answer(405, Json.object()
+    private static Routes.Answer methodNotAllowed(String method, String path, String allowed) {
+        return Routes.Answer.of(405, Json.object()
             .str("error", allowed + " only")
             .str("detail", method + " " + path + " is not a route; " + path + " accepts "
                 + allowed));
@@ -658,24 +636,4 @@ public final class PolicyVersionsSurface implements HttpHandler {
         }
     }
 
-    // ---- socket ----------------------------------------------------------------------------
-
-    private static String readBody(HttpExchange exchange) {
-        try (InputStream body = exchange.getRequestBody()) {
-            return new String(body.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException unreadable) {
-            throw new FormBody.BadRequest(
-                "the request body could not be read: " + unreadable.getMessage());
-        }
-    }
-
-    private static void respond(HttpExchange exchange, Answer answer) throws IOException {
-        byte[] bytes = answer.body().toString().getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", JSON);
-        exchange.getResponseHeaders().add("Cache-Control", "no-store");
-        exchange.sendResponseHeaders(answer.status(), bytes.length);
-        try (OutputStream out = exchange.getResponseBody()) {
-            out.write(bytes);
-        }
-    }
 }

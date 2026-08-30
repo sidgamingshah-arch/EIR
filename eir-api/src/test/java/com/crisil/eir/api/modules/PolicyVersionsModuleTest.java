@@ -1,7 +1,6 @@
 package com.crisil.eir.api.modules;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.crisil.eir.api.EirServer;
 import com.crisil.eir.api.EirService;
@@ -21,12 +20,10 @@ import com.crisil.eir.policy.PolicyKind;
 import com.crisil.eir.policy.PolicyVersion;
 import com.crisil.eir.policy.PolicyVersionStatus;
 import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.net.HttpURLConnection;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
@@ -493,110 +490,56 @@ class PolicyVersionsModuleTest {
     }
 
     @Nested
-    @DisplayName("the route seam this section cannot be served through")
-    class TheSeam {
+    @DisplayName("how the section is registered on the seam")
+    class TheRegistration {
 
-        /**
-         * A {@code Routes} with nothing behind it — a static class, so it holds no reference to the
-         * enclosing test instance.
-         *
-         * <p>Static on purpose, and the reason is the control being tested. An anonymous or inner
-         * class declared here would capture this test object, which holds the {@code EirServer},
-         * which holds the shared {@code HttpServer} — so the recovery would <em>succeed</em>
-         * through the test's own field and this case would prove nothing.
-         */
-        private static final class BareRoutes implements Routes {
+        /** A {@code Routes} that records what a module asked it for, and serves nothing. */
+        private static final class RecordingRoutes implements Routes {
+            private final List<String> asked = new ArrayList<>();
+
             @Override
             public void get(String path, Function<HttpExchange, Json.Obj> handler) {
+                asked.add("get " + path);
             }
 
             @Override
             public void post(String path, Function<FormBody, Json.Obj> handler) {
-            }
-        }
-
-        @Test
-        @DisplayName("a seam hiding no server is fatal at construction, with the remedy in the message")
-        void anUnrecoverableSeamIsFatal() {
-            PolicyVersionsModule module =
-                new PolicyVersionsModule(new EirService(Seed.book()));
-
-            assertThat(PolicyVersionsModule.sharedServerBehind(new BareRoutes())).isEmpty();
-            assertThatThrownBy(() -> module.register(new BareRoutes()))
-                .as("registering nothing would 404 the approval endpoint, and a 404 there is"
-                    + " indistinguishable from an approval gate that is present and permissive")
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("409")
-                .hasMessageContaining("route(path")
-                .hasMessageContaining("FR-210");
-        }
-
-        /**
-         * A {@code Routes} that accepts every registration and writes to a server of its own.
-         *
-         * <p>Stands in for the accident the identity check exists for: a decorated or delegating
-         * seam, or a harness holding two servers, where the field walk reaches an
-         * {@code HttpServer} that is real but is not the one the seam registers on. Registering
-         * there would put 06 § 5 on a port nobody calls.
-         */
-        private static final class RoutesOverItsOwnServer implements Routes {
-
-            /**
-             * Declared first, so the breadth-first field walk finds this one — and it is not the
-             * server this seam registers on. That ordering is the whole scenario: a server that is
-             * reachable from the {@code Routes} object without being the one it writes to.
-             */
-            private final HttpServer reachableButUnused;
-
-            private final HttpServer whereTheSeamActuallyWrites;
-
-            RoutesOverItsOwnServer() throws IOException {
-                this.reachableButUnused = HttpServer.create(new InetSocketAddress(0), 0);
-                this.whereTheSeamActuallyWrites = HttpServer.create(new InetSocketAddress(0), 0);
+                asked.add("post " + path);
             }
 
             @Override
-            public void get(String path, Function<HttpExchange, Json.Obj> handler) {
-                whereTheSeamActuallyWrites.createContext(path, exchange -> {
-                });
-            }
-
-            @Override
-            public void post(String path, Function<FormBody, Json.Obj> handler) {
-                whereTheSeamActuallyWrites.createContext(path, exchange -> {
-                });
+            public void route(String path, Routes.PathHandler handler) {
+                asked.add("route " + path);
             }
         }
 
         @Test
-        @DisplayName("a seam that writes to a different server than the walk found is fatal too")
-        void bindingToTheWrongServerIsFatal() throws IOException {
-            PolicyVersionsModule module = new PolicyVersionsModule(new EirService(Seed.book()));
-            RoutesOverItsOwnServer seam = new RoutesOverItsOwnServer();
+        @DisplayName("one subtree route on /api/policy-versions, and neither get nor post")
+        void theSectionTakesOneSubtreeRoute() {
+            RecordingRoutes seam = new RecordingRoutes();
 
-            // The walk finds `elsewhere` — it is a real HttpServer one hop from the Routes object —
-            // so the recovery "succeeds". Without the collision probe the module would register
-            // there, return normally, and POST .../approve would 404 on the port the operator
-            // actually calls: the silent hole, reached through the recovery rather than around it.
-            assertThat(PolicyVersionsModule.sharedServerBehind(seam))
-                .as("the walk does reach a server here, which is exactly why reachability is not"
-                    + " identity")
-                .isPresent();
-            assertThatThrownBy(() -> module.register(seam))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("does not write to")
-                .hasMessageContaining("404");
+            new PolicyVersionsModule(new EirService(Seed.book())).register(seam);
+
+            // One registration, and it must be `route`. 06 § 5 puts GET and POST on the same
+            // /policy-versions path and a path parameter on POST .../{id}/approve; `get` and `post`
+            // each take a fixed path with a fixed verb and always answer 200, so a module that
+            // reached for either could not serve the section — and could not state the 409 at all.
+            assertThat(seam.asked)
+                .containsExactly("route " + PolicyVersionsSurface.BASE);
         }
 
         @Test
-        @DisplayName("the real seam does hide the shared server, so the section is actually served")
-        void theRealSeamIsRecovered() throws IOException {
-            // If the recovery had failed, EirServer's constructor would have thrown in @BeforeEach
-            // and every test here would error. Asserted directly as well, so the reason a failure
-            // appears is named rather than inferred from a stack trace in setup.
-            assertThat(get(PolicyVersionsSurface.BASE).status()).isEqualTo(200);
+        @DisplayName("the module names the specification section it implements")
+        void theModuleNamesItsSection() {
             assertThat(new PolicyVersionsModule(new EirService(Seed.book())).specSection())
+                .as("a module that drifts from its section should be visibly wrong, not renamed")
                 .isEqualTo("06 § 5");
+        }
+
+        @Test
+        @DisplayName("the route is live: the list answers on the running server")
+        void theRouteIsLive() throws IOException {
+            assertThat(get(PolicyVersionsSurface.BASE).status()).isEqualTo(200);
         }
     }
 
