@@ -32,4 +32,60 @@ public interface Routes {
      * tokeniser, a number grammar and a string-escape state machine.
      */
     void post(String path, Function<FormBody, Json.Obj> handler);
+
+    /**
+     * A route over a path subtree that chooses its own status code and reads its own path.
+     *
+     * <p><b>Added because three units needed it and one reflected into this interface to get it.</b>
+     * {@link #get} and {@link #post} cover the console's shape — one verb, one fixed path, always
+     * 200 — and {@code docs/06} does not have that shape. Section 4's period close is specified to
+     * answer <b>409</b> with the failing gates enumerated; section 5 puts {@code GET} and
+     * {@code POST} on the same {@code /policy-versions} path and a path parameter on
+     * {@code POST .../{id}/approve}; section 8 needs a genuine 404 for an unknown contract rather
+     * than a 200 carrying {@code found: false}. None of that is expressible above.
+     *
+     * <p>The handler receives the exchange — so it can read the method, the remaining path segments
+     * and the query — and the parsed body, which is empty for a GET. It returns an {@link Answer}
+     * carrying the status it wants.
+     *
+     * <p><b>This does not licence a 4xx for an engine refusal.</b> The rule this API is built on
+     * still holds: 200 for every answer the engine gives, including every refusal, because a
+     * refusal is a value here and the whole list comes back. The status codes this primitive exists
+     * to express are the ones {@code docs/06} specifies for a REST client that has no other way to
+     * ask — a close that did not happen, a resource that is not there — and each one must still
+     * carry the complete refusal list in its body.
+     */
+    void route(String path, PathHandler handler);
+
+    /** A handler that reads the exchange and chooses its own status. */
+    @FunctionalInterface
+    interface PathHandler {
+        Answer handle(HttpExchange exchange, FormBody body);
+    }
+
+    /**
+     * A status and a body.
+     *
+     * @param status the HTTP status; the body is still the engine's complete answer
+     * @param body   the response object, never null — a status with no explanation is not an answer
+     */
+    record Answer(int status, Json.Obj body) {
+        public Answer {
+            if (body == null) {
+                throw new IllegalArgumentException(
+                    "status " + status + " with no body; a caller told only a number cannot act on"
+                        + " it, and this API's whole discipline is that the reasons come back");
+            }
+        }
+
+        /** 200 — the ordinary case, including every engine refusal. */
+        public static Answer ok(Json.Obj body) {
+            return new Answer(200, body);
+        }
+
+        /** Any other status {@code docs/06} specifies, with the reasons still in the body. */
+        public static Answer of(int status, Json.Obj body) {
+            return new Answer(status, body);
+        }
+    }
 }
