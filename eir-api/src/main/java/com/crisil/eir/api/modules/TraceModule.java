@@ -61,24 +61,29 @@ import java.util.Optional;
  * forward twice from two independently sourced cash figures. Echoing the stored row back would make
  * this endpoint a mirror, and a mirror cannot be evidence.
  *
- * <p><b>The route is registered as a prefix, and that is a seam worth naming.</b>
- * {@code com.sun.net.httpserver} matches contexts by longest path prefix and the contract id is a
- * path segment, so a handler for {@code /api/contracts/{id}/trace} has to own the
- * {@code /api/contracts/} prefix and read the id out of the path itself. Any other module wanting
- * {@code /api/contracts/{id}} therefore has to register the shorter {@code /api/contracts} and will
- * be shadowed for sub-paths; {@link Routes} has no pattern facility to divide them properly. A
- * request under this prefix that is not a trace is answered 400 naming the shape this route serves,
- * rather than silently absorbed.
+ * <p><b>The route is a shared subtree, and this module claims only what is its own.</b> 06 § 2 and
+ * § 3 put {@code GET /contracts/{id}}, {@code POST /contracts/{id}/events} and
+ * {@code GET /contracts/{id}/trace} under one prefix, owned by different modules, and
+ * {@code com.sun.net.httpserver} allows one handler per context. So {@link Routes#route} registers a
+ * chain on {@code /api/contracts} and a handler returns {@code null} to decline a suffix that is not
+ * its own. This handler claims exactly the paths ending {@code /trace}: a GET is the trace, any
+ * other verb on that suffix is a 405 — a request it recognises and refuses, which the seam's own
+ * javadoc distinguishes from one it does not recognise — and every other suffix is declined so the
+ * contracts-and-events module gets it. Nothing here 404s on its own; the server does that when no
+ * module claims a request, and it names the path.
  *
  * <p>Specification: {@code docs/06-api-spec.md} 06 § 2.3.
  */
 public final class TraceModule implements ApiModule {
 
-    /** The context this module owns. See the class javadoc on why it is a prefix. */
-    static final String PREFIX = "/api/contracts/";
+    /** The subtree this module registers on, shared with the contracts-and-events module. */
+    static final String PREFIX = "/api/contracts";
 
-    /** The sub-path that makes a request under {@link #PREFIX} a trace request. */
+    /** The suffix that makes a request under {@link #PREFIX} this module's. */
     static final String SUFFIX = "/trace";
+
+    /** {@code YYYYMM}, or {@code YYYY-MM} — the two spellings 06 uses. Nothing else. */
+    private static final Pattern PERIOD = Pattern.compile("(\\d{4})-?(\\d{2})");
 
     private final EirService service;
 
@@ -94,7 +99,7 @@ public final class TraceModule implements ApiModule {
     @Override
     public void register(Routes routes) {
         Objects.requireNonNull(routes, "routes");
-        routes.get(PREFIX, this::trace);
+        routes.route(PREFIX, this::trace);
     }
 
     @Override
@@ -104,29 +109,48 @@ public final class TraceModule implements ApiModule {
 
     // ---- request ---------------------------------------------------------------------------
 
-    private Json.Obj trace(HttpExchange exchange) {
-        String contractId = contractIdIn(exchange.getRequestURI().getPath());
+    /**
+     * Claims a trace request, declines anything else on this subtree.
+     *
+     * <p>{@code null} means "not mine" and hands the request to the next module registered on the
+     * prefix. It is used only for a suffix this module does not serve — never for a trace request it
+     * refuses, because a refusal is a value here and comes back on a 200 with the whole reason.
+     */
+    private Routes.Answer trace(HttpExchange exchange, FormBody body) {
+        String path = exchange.getRequestURI().getPath();
+        if (!path.endsWith(SUFFIX)) {
+            // /api/contracts, /api/contracts/{id}, /api/contracts/{id}/events, /api/contracts/
+            // {id}/versions — all somebody else's. Declined, not refused.
+            return null;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            // Recognised and refused, so an Answer rather than a decline: a 404 here would tell an
+            // integrator the trace endpoint is not deployed, when it is and they used the wrong verb.
+            return Routes.Answer.of(405, Json.object()
+                .str("error", "GET only")
+                .str("detail", "the trace is a read: GET " + PREFIX + "/{contractId}" + SUFFIX
+                    + "?period=YYYYMM (06 § 2.3). Got " + exchange.getRequestMethod() + "."));
+        }
+        String contractId = contractIdIn(path);
         int periodId = periodIn(exchange.getRequestURI().getRawQuery());
-        return render(contractId, periodId);
+        return Routes.Answer.ok(render(contractId, periodId));
     }
 
     /**
      * The contract id out of {@code /api/contracts/{id}/trace}.
      *
-     * <p>A path under this prefix that is not a trace request is a 400 rather than a 404 or a 200
-     * with an empty body: the caller reached a route that exists and asked it for something it does
-     * not serve, and the message names what it does serve. A 404 here would send an integrator
-     * looking for a missing deployment.
+     * <p>A 400 rather than a decline where the shape is wrong past this point: the suffix already
+     * said this is a trace request, so a missing or multi-segment id is the caller having sent a
+     * malformed one, and handing it on would have the next module answering a question about a
+     * contract nobody named.
      */
     private static String contractIdIn(String path) {
-        if (!path.startsWith(PREFIX) || !path.endsWith(SUFFIX)) {
-            throw new FormBody.BadRequest("'" + path + "' is not a trace request; this route serves"
-                + " GET " + PREFIX + "{contractId}" + SUFFIX + "?period=YYYYMM (06 § 2.3)");
-        }
-        String id = path.substring(PREFIX.length(), path.length() - SUFFIX.length());
+        String remainder = path.substring(
+            Math.min(PREFIX.length(), path.length()), path.length() - SUFFIX.length());
+        String id = remainder.startsWith("/") ? remainder.substring(1) : remainder;
         if (id.isBlank() || id.contains("/")) {
             throw new FormBody.BadRequest("a trace names exactly one contract; got '" + id
-                + "' between " + PREFIX + " and " + SUFFIX);
+                + "' between " + PREFIX + "/ and " + SUFFIX);
         }
         return id.strip();
     }
@@ -138,22 +162,27 @@ public final class TraceModule implements ApiModule {
      * everything on the {@code YYYYMM} integer {@code Book.periodIdOf} derives. Accepting one and
      * rejecting the other would make the specification and the implementation disagree in public.
      *
+     * <p><b>Matched rather than stripped.</b> The first version deleted every hyphen and then
+     * counted digits, which accepted {@code --202805}, {@code 2028-05-} and {@code 2-0-2-8-0-5} as
+     * period 202805. A validator that normalises before it validates is not a validator; it accepts
+     * a superset of what its own message promises, and on an audit endpoint the period is the one
+     * input whose interpretation must be beyond argument.
+     *
      * <p>Required, and not defaulted to the current period. A trace is evidence about a stated
      * period, and an endpoint that quietly answers about a different one than the caller typed is
      * the worst possible behaviour for this particular response.
      */
     private static int periodIn(String rawQuery) {
         String raw = FormBody.parse(rawQuery).text("period");
-        String digits = raw.replace("-", "");
-        if (digits.length() != 6 || !digits.chars().allMatch(Character::isDigit)) {
+        Matcher matched = PERIOD.matcher(raw);
+        if (!matched.matches()) {
             throw new FormBody.BadRequest("'period' must be YYYYMM or YYYY-MM, got '" + raw + "'");
         }
-        int periodId = Integer.parseInt(digits);
-        int month = periodId % 100;
+        int month = Integer.parseInt(matched.group(2));
         if (month < 1 || month > 12) {
             throw new FormBody.BadRequest("'period' names month " + month + " in '" + raw + "'");
         }
-        return periodId;
+        return Integer.parseInt(matched.group(1)) * 100 + month;
     }
 
     // ---- response --------------------------------------------------------------------------
@@ -161,7 +190,19 @@ public final class TraceModule implements ApiModule {
     private Json.Obj render(String contractId, int periodId) {
         Json.Obj response = Json.object()
             .str("contractId", contractId)
-            .str("period", Integer.toString(periodId));
+            .str("period", Integer.toString(periodId))
+            // The figures come from the run's own papers; the inputs — terms, opening balances, the
+            // flow vector, the cash book's split — come from the book as it stands now, because
+            // that is the only place this in-memory implementation holds them. Those can differ:
+            // POST /api/repair and POST /api/onboard both move the book without re-running the
+            // period. Stamped rather than glossed, because an audit response that presents current
+            // inputs as as-at-run inputs is the specific way a trace stops being evidence. A
+            // production deployment reads both sides from eir-persistence at the run's recorded_at,
+            // and then this field says AS_AT_RUN.
+            .str("inputsAsAt", "CURRENT_BOOK")
+            .str("inputsAsAtNote", "figures are the run's; inputs are the book's current ones. This"
+                + " book is a map rather than a bitemporal store, so it cannot answer what it held"
+                + " when the run read it (05 § 2).");
 
         Optional<Book.Holding> holding = service.holdingOnFile(contractId);
         Optional<EirService.RunPapers> papers = service.runPapers(periodId);
@@ -174,10 +215,15 @@ public final class TraceModule implements ApiModule {
                 .bool("answered", false)
                 .str("reason", "NO_RUN_FOR_PERIOD")
                 .bool("contractOnBook", holding.isPresent())
+                // No claim here about which period the book is positioned at. The first version
+                // said "this book is positioned at period Seed.PERIOD_ID", a compile-time constant
+                // from the demonstration seed, while EirService takes any Book — so on any other
+                // book the audit endpoint stated a position it had never read. An endpoint that
+                // asserts an unread fact is exactly what this one exists not to be.
                 .str("detail", "no run for period " + periodId + " in this process, so no figure has"
-                    + " been published for it and there is nothing to resolve to inputs. This book"
-                    + " is positioned at period " + Seed.PERIOD_ID + "; POST /api/run to roll it"
-                    + " forward, then ask again."
+                    + " been published for it and there is nothing to resolve to inputs. POST"
+                    + " /api/run to roll the book's current period forward, then ask again for that"
+                    + " period."
                     + (holding.isPresent() ? "" : " Separately, contract " + contractId
                         + " is not on the book at all."))
                 .str("note", "an in-memory book holds only what this process ran. A production"
@@ -212,7 +258,7 @@ public final class TraceModule implements ApiModule {
             // a contract per contract; the run carried on and published figures for the others, and
             // for this one there is a reason rather than a figure. Reporting the reason under a 200
             // with answered:false is what lets an operator tell "quarantined" from "endpoint down".
-            ExceptionRecord raised = result.orElseThrow().exception();
+            ExceptionRecord raised = liveExceptionFor(run, result.orElseThrow());
             response
                 .bool("answered", false)
                 .str("reason", "CONTRACT_QUARANTINED")
@@ -221,9 +267,11 @@ public final class TraceModule implements ApiModule {
                 .str("exceptionStatus", raised.status().name())
                 .bool("blocksClose", raised.blocksClose())
                 .str("exceptionDetail", raised.describe())
+                .str("acceptedOrResolvedBy", raised.resolvedBy())
                 .str("detail", "run " + run.runId() + " isolated " + contractId + " and published"
                     + " no figure for it, so there is no figure to resolve to inputs. The inputs"
-                    + " that exist are below; the exception above is why they produced none.");
+                    + " below are the book's CURRENT ones, not necessarily the ones the run read —"
+                    + " see inputsAsAt.");
             holding.ifPresent(held -> inputsOnly(held, response));
             return response;
         }
@@ -258,14 +306,54 @@ public final class TraceModule implements ApiModule {
                     && fromRunRecord.contains(PolicyKind.ROUTING_TABLE + "=" + stampedRouting));
     }
 
-    /** What the book carries for a contract the run published nothing for. */
+    /**
+     * The exception as it now stands, not as the run froze it.
+     *
+     * <p><b>Why the live queue and not {@code ContractResult.exception()}.</b> {@code POST
+     * /api/accept} records a four-eyes acceptance by rebuilding the run's queue; it leaves
+     * {@code RunAggregate}'s own copy of each result untouched, because the aggregate is the run's
+     * published arithmetic and an acceptance does not change a figure. So the frozen record still
+     * reads {@code OPEN} and {@code BLOCKS CLOSE} after a valid acceptance, while
+     * {@code PeriodCloseGate} weighs the accepted one and lets the close proceed. An audit endpoint
+     * that contradicted the close gate on the single control that governs closing over an exception
+     * would be worse than absent: it is the field an auditor would quote.
+     *
+     * <p>Falls back to the frozen record where the queue does not carry the contract, which is the
+     * honest answer rather than a null — the run isolated it, so a record exists somewhere.
+     */
+    private static ExceptionRecord liveExceptionFor(EirService.RunPapers run, ContractResult result) {
+        for (ExceptionRecord queued : run.exceptions()) {
+            if (queued.contractId().equals(result.contractId())) {
+                return queued;
+            }
+        }
+        return result.exception();
+    }
+
+    /**
+     * What the book carries for a contract the run published nothing for.
+     *
+     * <p><b>Named {@code Now}, because that is what it is.</b> These come from the live book, and
+     * {@code POST /api/repair} can put an opening balance on file after the run that quarantined the
+     * contract for not having one. Reported as {@code openingStateOnFile} the response would have
+     * said "the run found no opening state" beside "the opening state is 528,407.32", which is a
+     * self-contradicting audit answer. Reported as {@code Now}, with
+     * {@code inputsRepairedSinceRun}, it is the most useful thing the endpoint can say: the input
+     * has been fixed and the period has not been re-run.
+     */
     private static void inputsOnly(Book.Holding holding, Json.Obj response) {
-        response.bool("openingStateOnFile", holding.stateOnFile());
+        response.bool("openingStateOnFileNow", holding.stateOnFile());
         if (holding.stateOnFile()) {
             ContractStateSource.OpeningState state = holding.state();
             response
-                .str("stage", state.stage().name())
-                .figure("openingGca", state.openingGca().atPresentationScale().amount());
+                .bool("inputsRepairedSinceRun", true)
+                .str("inputsRepairedNote", "the book now carries an opening balance for this"
+                    + " contract and the run that quarantined it did not see one. Roll the period"
+                    + " forward again: the contract will compute and the exception will clear.")
+                .str("stageNow", state.stage().name())
+                .figure("openingGcaNow", state.openingGca().atPresentationScale().amount());
+        } else {
+            response.bool("inputsRepairedSinceRun", false);
         }
         response.array("flowVector", flowRows(holding.period()))
             .str("flowVectorAnchor", holding.period().periodFlows().anchorDate().toString());
@@ -304,21 +392,23 @@ public final class TraceModule implements ApiModule {
 
         response.obj("rollForward", rollForward(holding, computation, row, stored));
 
-        if (computation.suspense().hasBalance()
-            || !computation.suspense().chargedToSuspense().isZero()) {
-            response.obj("suspense", Json.object()
-                .figure("openingBalance",
-                    computation.suspense().openingBalance().atPresentationScale().amount())
-                .figure("chargedToSuspense",
-                    computation.suspense().chargedToSuspense().atPresentationScale().amount())
-                .figure("recovered",
-                    computation.suspense().recovered().atPresentationScale().amount())
-                .figure("writtenOff",
-                    computation.suspense().writtenOff().atPresentationScale().amount())
-                .figure("closingBalance",
-                    computation.suspense().closingBalance().atPresentationScale().amount())
-                .str("detail", computation.suspense().describe()));
-        }
+        // Unconditional. The first version gated this on hasBalance() || charged != 0, and
+        // hasBalance() is closingBalance.isPositive() — so a period whose only movements were a
+        // recovery and a write-off (opening 5,000, recovered 5,000, closing nil, reachable through
+        // ContractPeriod.withSuspense on a cured account) emitted no suspense block at all, and an
+        // auditor asking why cash applied to interest does not tie to recognised income would find
+        // the recovery leg nowhere on the response. Five figures is not worth a condition, and a
+        // block that is sometimes absent is a block a caller has to guess about.
+        SuspenseLedger suspense = computation.suspense();
+        response.obj("suspense", Json.object()
+            .figure("openingBalance", suspense.openingBalance().atPresentationScale().amount())
+            .figure("chargedToSuspense",
+                suspense.chargedToSuspense().atPresentationScale().amount())
+            .figure("recovered", suspense.recovered().atPresentationScale().amount())
+            .figure("writtenOff", suspense.writtenOff().atPresentationScale().amount())
+            .figure("closingBalance", suspense.closingBalance().atPresentationScale().amount())
+            .figure("netMovement", suspense.netMovement().atPresentationScale().amount())
+            .str("detail", suspense.describe()));
 
         Stage3Reconciliation reconciliation = computation.reconciliation();
         if (reconciliation != null) {

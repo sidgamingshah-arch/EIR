@@ -17,3 +17,4 @@ build/checkstyle-*.cache
 # NOTE: only the worktrees path is ignored. .claude/ itself may legitimately
 # carry committed project settings, skills and agent definitions.
 .claude/worktrees/
+eir-api/cp.txt
