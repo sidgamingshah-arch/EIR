@@ -5,13 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.crisil.eir.api.EirServer;
 import com.crisil.eir.api.EirService;
-import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.http.Json;
-import com.crisil.eir.api.http.Routes;
-import com.crisil.eir.api.modules.runs.ExchangeRoutes;
 import com.crisil.eir.api.modules.runs.JsonView;
 import com.crisil.eir.api.store.Seed;
-import com.sun.net.httpserver.HttpExchange;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -20,7 +16,6 @@ import java.net.HttpURLConnection;
 import java.net.Socket;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Function;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -131,7 +126,7 @@ class RunsAndPeriodsModuleTest {
     }
 
     private static String runOf(int sequence) {
-        return "/api/runs/RUN-" + Seed.PERIOD_ID + "-0" + sequence;
+        return "/api/runs/API-RUN-" + Seed.PERIOD_ID + "-0" + sequence;
     }
 
     private static final String RUNS = "/api/runs";
@@ -156,7 +151,7 @@ class RunsAndPeriodsModuleTest {
                 .isEqualTo(200);
             assertThat(response.body())
                 .contains("\"started\":true")
-                .contains("\"runId\":\"RUN-" + Seed.PERIOD_ID + "-01\"")
+                .contains("\"runId\":\"API-RUN-" + Seed.PERIOD_ID + "-01\"")
                 .contains("\"status\":\"COMPLETED\"");
             // The seed book is three contracts: C-0001 performing, C-0002 Stage 3 with recognition
             // suppressed, C-0003 with period movements and no opening state. The third cannot be
@@ -219,7 +214,7 @@ class RunsAndPeriodsModuleTest {
             assertThat(response.body())
                 .contains("\"contractsProcessed\":2")
                 .contains("\"exceptionCount\":1")
-                .contains("\"replayable\":true");
+                .contains("\"latestOfThisResource\":true");
             // Three distinct invariant ids, and the derivation is the pipeline's: SL-2 (journals
             // balance) and ST-2 (suppressed recognition against the ledger) are published for every
             // contract that computes, and S3-1 (the Stage 3 four-way) by the one whose recognition
@@ -285,7 +280,7 @@ class RunsAndPeriodsModuleTest {
                 // DT-1 passes over a period that published nothing, correctly, because nothing
                 // failed. Coverage is what says the comparison had anything in it.
                 .contains("\"readThisOne\":\"provesReproduction\"");
-            assertThat(response.body()).contains("\"shadowRunId\":\"SHADOW-RUN-"
+            assertThat(response.body()).contains("\"shadowRunId\":\"SHADOW-API-RUN-"
                 + Seed.PERIOD_ID + "-01\"");
         }
 
@@ -306,7 +301,7 @@ class RunsAndPeriodsModuleTest {
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
                 .contains("\"replayed\":false")
-                .contains("\"latestRunId\":\"RUN-" + Seed.PERIOD_ID + "-02\"")
+                .contains("\"latestRunId\":\"API-RUN-" + Seed.PERIOD_ID + "-02\"")
                 .contains("is not the latest run for its period");
             assertThat(response.body())
                 .as("no byte comparison may be reported for a run that was not compared")
@@ -319,15 +314,65 @@ class RunsAndPeriodsModuleTest {
             post(RUNS, START);
             Response second = post(RUNS, START);
 
-            assertThat(second.body()).contains("\"runId\":\"RUN-" + Seed.PERIOD_ID + "-02\"");
+            assertThat(second.body()).contains("\"runId\":\"API-RUN-" + Seed.PERIOD_ID + "-02\"");
             assertThat(get(runOf(1)).status()).isEqualTo(200);
             assertThat(get(runOf(2)).status()).isEqualTo(200);
+        }
 
-            Response duplicate = post(RUNS, START + "&runId=RUN-" + Seed.PERIOD_ID + "-01");
-            assertThat(duplicate.status()).isEqualTo(200);
-            assertThat(duplicate.body())
+        @Test
+        @DisplayName("the resource assigns the run id and refuses to be handed one")
+        void theResourceAssignsTheRunId() throws IOException {
+            // The failing input, measured: runId=RUN-202805-01 — which is exactly what the console's
+            // own POST /api/run mints when nobody names a run. With that id in this register, a
+            // console run published under the same id, and the replay's replayOf check could not
+            // tell the two runs apart: it reported dtOneSatisfied for a comparison of a run with
+            // three computed contracts under the id of a run that had two. 06 § 4's request is
+            // {periodId, bookId} and the id comes back in the response, so there is nothing to
+            // accept here.
+            Response supplied = post(RUNS, START + "&runId=RUN-" + Seed.PERIOD_ID + "-01");
+
+            assertThat(supplied.status()).isEqualTo(200);
+            assertThat(supplied.body())
                 .contains("\"started\":false")
-                .contains("is already on file");
+                .contains("this resource assigns run ids and does not accept one");
+            assertThat(get(PERIOD).body())
+                .as("and no run was started, so nothing is on file under a colliding id")
+                .contains("\"runs\":[]");
+
+            // The ids it does mint are in a namespace the console cannot produce.
+            assertThat(post(RUNS, START).body())
+                .contains("\"runId\":\"API-RUN-" + Seed.PERIOD_ID + "-01\"");
+        }
+
+        @Test
+        @DisplayName("a console run cannot masquerade as this resource's run in a replay")
+        void aConsoleRunCannotMasqueradeInAReplay() throws IOException {
+            // The whole scenario, measured: start a run here (two computed, one quarantined), repair
+            // C-0003, then run the CONSOLE's own POST /api/run, which replaces the engine's working
+            // papers with a run of three computed contracts under an id this resource never saw.
+            post(RUNS, START);
+            post("/api/repair", "");
+            post("/api/run", "");
+
+            Response replay = post(runOf(1) + "/replay", "");
+
+            // The register still holds run 01 and it is still this period's latest here, so the
+            // first guard passes. The second one — the engine's own replayOf against the id asked
+            // for — is what refuses, and it must, because the byte comparison the engine just
+            // performed is of a different run's figures.
+            assertThat(replay.status()).isEqualTo(200);
+            assertThat(replay.body())
+                .contains("\"replayed\":false")
+                .contains("\"engineReplayed\":\"RUN-" + Seed.PERIOD_ID + "-01\"")
+                .contains("published a run this resource never saw");
+            assertThat(replay.body())
+                .as("no DT-1 may be reported under the id of a run that was not the one compared")
+                .doesNotContain("\"dtOneSatisfied\"");
+
+            // And the run resource does not claim to be the engine's current run either.
+            assertThat(get(runOf(1)).body())
+                .contains("\"latestOfThisResource\":true")
+                .doesNotContain("\"replayable\"");
         }
     }
 
@@ -366,7 +411,7 @@ class RunsAndPeriodsModuleTest {
             post(RUNS, START);
 
             assertThat(get(PERIOD).body())
-                .contains("\"runs\":[\"RUN-" + Seed.PERIOD_ID + "-01\",\"RUN-"
+                .contains("\"runs\":[\"API-RUN-" + Seed.PERIOD_ID + "-01\",\"API-RUN-"
                     + Seed.PERIOD_ID + "-02\"]");
         }
 
@@ -412,6 +457,7 @@ class RunsAndPeriodsModuleTest {
             // RC-1 is red and its tie does not tie; and C-0003's exception is neither cleared nor
             // accepted. Two INVARIANT_BREACH, two RECONCILIATION_NOT_TIED, one exception refusal.
             assertThat(response.body())
+                .contains("\"gateRefused\":true")
                 .contains("\"gateRefusalCount\":5")
                 .contains("CLOSE REFUSED by 5 gate(s)")
                 .contains("INVARIANT_BREACH")
@@ -425,8 +471,17 @@ class RunsAndPeriodsModuleTest {
             // RunAggregate.blockingReasons and passed through untouched.
             assertThat(response.body())
                 .as("both lists come back and neither is collapsed into the other")
+                .contains("\"runRefused\":true")
                 .contains("\"runRefusals\":[\"1 contract(s) were quarantined")
                 .contains("C-0003");
+
+            // And the body says which of the two lists is the reason, because either alone can
+            // refuse a close: mayClose() is runRefusals.isEmpty() && !decision.isRefused(). A
+            // client that read only the gate's count would see 0 on a 409 where the gate permitted
+            // and the run did not — the case RunClose documents for an empty population.
+            assertThat(response.body())
+                .contains("\"refusalSources\":[\"the close gate")
+                .contains("the run's own verdict — close.runRefusals");
 
             // And the size of the problem, not just its existence: SL-1 is out by 36,059.88 and
             // RC-1 by 5,298.16 — C-0002's billed interest, the contract the CBS billed and the
@@ -450,7 +505,8 @@ class RunsAndPeriodsModuleTest {
             assertThat(period.body())
                 .contains("\"status\":\"OPEN\"")
                 .contains("\"closeAttempts\":1")
-                .contains("\"lastCloseOutcome\":\"refused by 5 gate(s)\"");
+                .contains("\"lastCloseOutcome\":\"refused by the close gate and the run's own"
+                    + " verdict\"");
         }
 
         @Test
@@ -465,6 +521,43 @@ class RunsAndPeriodsModuleTest {
                 .contains("\"mayClose\":false")
                 .contains("a close reads the figures a run published");
             assertThat(get(PERIOD).body()).contains("\"status\":\"OPEN\"");
+        }
+
+        @Test
+        @DisplayName("a close that fails part-way is a 400 and does not leave the period CLOSING")
+        void aFailedCloseDoesNotStrandThePeriod() throws IOException {
+            post(RUNS, START);
+
+            // The failing input, measured: EirService parses closedAt itself, so this throws
+            // DateTimeParseException from inside the close. Two defects came out of that one input.
+            // The period had already been moved to CLOSING to put it to the gate and nothing put it
+            // back — status CLOSING, lastCloseOutcome "in progress", no close under way, and runs
+            // still publishing into a period that had stopped taking postings. And the exception
+            // reached the caller as a 500, telling an operator the engine was broken when the
+            // request was.
+            Response malformed = post(PERIOD + "/close", "closedAt=not-an-instant");
+
+            assertThat(malformed.status())
+                .as("a caller's malformed field is a 400 here as everywhere else in this API")
+                .isEqualTo(400);
+            assertThat(malformed.body())
+                .contains("bad request")
+                .contains("closedAt")
+                .contains("ISO-8601");
+
+            Response period = get(PERIOD);
+            assertThat(period.body())
+                .as("a status must not outlive the operation it describes")
+                .contains("\"status\":\"OPEN\"")
+                .contains("\"lastCloseOutcome\":\"abandoned: the close failed with"
+                    + " DateTimeParseException\"");
+
+            // And the period is closeable again, rather than needing a restart to get out of
+            // CLOSING: the arc still works afterwards.
+            post("/api/repair", "");
+            post(RUNS, START);
+            post("/api/post", "");
+            assertThat(post(PERIOD + "/close", "").status()).isEqualTo(200);
         }
 
         @Test
@@ -501,7 +594,12 @@ class RunsAndPeriodsModuleTest {
                 .contains("\"mayClose\":true")
                 .contains("\"closed\":true")
                 .contains("\"periodStatus\":\"CLOSED\"")
+                // The same two flags the refusal carries, both false — a field that appears on only
+                // one branch is one a client learns to read as optional, and then its absence and
+                // its being false say the same thing.
+                .contains("\"gateRefused\":false")
                 .contains("\"gateRefusalCount\":0")
+                .contains("\"runRefused\":false")
                 .contains("CLOSE PERMITTED");
             // ck_accounting_period_closure_attested: a CLOSED period names who closed it, when, and
             // the system-time boundary a replay reads as at, or it is not closed.
@@ -718,32 +816,28 @@ class RunsAndPeriodsModuleTest {
     // ================================================================ the seam
 
     @Nested
-    @DisplayName("ExchangeRoutes: the registration this module needs, and its failure")
+    @DisplayName("the registration: two subtrees, and every path below them owned")
     class TheRegistrationSeam {
 
         @Test
-        @DisplayName("a registrar with no server behind it fails loudly, and names the fix")
-        void aRegistrarWithNoServerFailsLoudly() {
-            // The failing input: a Routes implementation that is not EirServer's — which is what a
-            // change to the shared seam would produce. The alternative to failing here is answering
-            // 200 on a refused close, silently, at the moment the seam changed.
-            Routes detached = new Routes() {
-                @Override
-                public void get(String path, Function<HttpExchange, Json.Obj> handler) {
-                    throw new UnsupportedOperationException("not registered");
-                }
+        @DisplayName("both resources register as subtrees, and each owns exactly its own paths")
+        void bothResourcesRegisterAsSubtrees() throws IOException {
+            // Routes.route registers a subtree and the JDK matches a context by string prefix, so
+            // /api/runsomething arrives at the /api/runs context. Read as a path parameter it would
+            // be the run named 'omething'; it is a 404 that says why.
+            Response nearMiss = get("/api/runsomething");
+            assertThat(nearMiss.status()).isEqualTo(404);
+            assertThat(nearMiss.body()).contains("only shares its opening characters");
 
-                @Override
-                public void post(String path, Function<FormBody, Json.Obj> handler) {
-                    throw new UnsupportedOperationException("not registered");
-                }
-            };
+            // And the console's own singular routes, which share the opening characters the other
+            // way, still answer for themselves.
+            assertThat(post("/api/run", "").status())
+                .as("/api/run is EirServer's own route and must not be swallowed by /api/runs")
+                .isEqualTo(200);
+            assertThat(post("/api/close", "").status()).isEqualTo(200);
 
-            assertThatThrownBy(() -> ExchangeRoutes.behind(detached))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("no com.sun.net.httpserver.HttpServer is reachable")
-                .hasMessageContaining("not an error path to route around")
-                .hasMessageContaining("status-carrying response");
+            // A trailing slash is the collection, not a child with a blank name.
+            assertThat(get("/api/periods/").status()).isEqualTo(200);
         }
 
         @Test

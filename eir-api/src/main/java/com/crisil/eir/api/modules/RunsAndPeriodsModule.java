@@ -5,9 +5,9 @@ import com.crisil.eir.api.http.ApiModule;
 import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.http.Json;
 import com.crisil.eir.api.http.Routes;
-import com.crisil.eir.api.modules.runs.ExchangeRoutes;
 import com.crisil.eir.api.modules.runs.JsonView;
 import com.crisil.eir.api.modules.runs.PeriodRegister;
+import com.crisil.eir.api.modules.runs.Resource;
 import com.crisil.eir.api.modules.runs.RunRegister;
 import com.crisil.eir.api.store.Seed;
 import com.crisil.eir.policy.close.AccountingPeriod;
@@ -16,6 +16,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -74,7 +75,21 @@ import java.util.Optional;
  * places that actually know". Collapsing them into one message at the edge would throw away
  * precisely that, so this module reports the engine's answer whole: {@code close.runRefusals} is the
  * first list, {@code gateVerdict} and {@code close.gateVerdict} enumerate the second one gate to a
- * line, and {@code gateRefusalCount} says how many there were.
+ * line, {@code gateRefusalCount} says how many gates refused, and {@code gateRefused} and
+ * {@code runRefused} say which of the two lists is the reason — because either alone can refuse a
+ * close, and a client that read only the gate's count would see {@code 0} on a 409.
+ *
+ * <h2>How the status codes are put on the wire</h2>
+ *
+ * <p>Through {@code Routes.route}, which registers a path <b>subtree</b> and lets the handler choose
+ * its own status. That primitive exists because {@code get} and {@code post} cover the console's
+ * shape — one verb, one fixed path, always 200 — and none of 06 § 4's: the run and period ids are in
+ * the path, {@code GET /api/periods/{id}} and {@code POST /api/periods/{id}/close} share a prefix the
+ * JDK's longest-prefix dispatch makes one context, and the close has to answer 409. Everything else
+ * in this module is still a 200, including every refusal: a run into a closed period, a book that is
+ * not on file, a replay of a superseded run. The status codes here are the ones 06 § 4 specifies for
+ * a client that has no other way to ask — a close that did not happen, a resource that is not there —
+ * and each still carries the complete answer in its body.
  *
  * <h2>What this module does not add</h2>
  *
@@ -97,6 +112,13 @@ import java.util.Optional;
  * population inline on the request thread, so the run is <em>finished</em> before the response is
  * written: 202 would tell a caller to poll for something that has already happened, and the run
  * resource is readable immediately. So 200, with {@code status} reporting {@code COMPLETED}.
+ *
+ * <p><b>And the run id is assigned here, never accepted.</b> 06 § 4's request is
+ * {@code {periodId, bookId}} and the id comes back in the response, which this module now enforces
+ * rather than merely following: the console's own {@code POST /api/run} defaults its run to
+ * {@code RUN-<periodId>-01}, so a caller naming that id put a run in this register under an id the
+ * console could later publish a different run under — and the replay's {@code replayOf} check could
+ * not tell the two apart. Ids minted here carry {@code API-RUN-} for that reason.
  */
 public final class RunsAndPeriodsModule implements ApiModule {
 
@@ -144,17 +166,22 @@ public final class RunsAndPeriodsModule implements ApiModule {
     }
 
     /**
-     * Registers the two resources.
+     * Registers the two resources, each as a subtree.
      *
-     * <p>Through {@link ExchangeRoutes} rather than through {@link Routes} directly, because three of
-     * these five endpoints carry their subject in the path and one of them has to answer 409 — see
-     * that class's note for why the shared seam cannot express either, and what the proper fix is.
+     * <p>Through {@link Routes#route} and not through {@code get}/{@code post}, because three of
+     * these five endpoints carry their subject in the path and one of them has to choose a status.
+     * {@code GET /api/periods/{id}} and {@code POST /api/periods/{id}/close} are also two verbs under
+     * one path prefix, which the JDK's longest-prefix dispatch makes one context whatever is
+     * registered — so a resource that owns its subtree and dispatches on the method is not a
+     * convenience here, it is the only arrangement that serves both endpoints at all.
      */
     @Override
     public void register(Routes routes) {
-        ExchangeRoutes direct = ExchangeRoutes.behind(Objects.requireNonNull(routes, "routes"));
-        direct.prefix(RUNS, this::runsResource);
-        direct.prefix(PERIODS, this::periodsResource);
+        Objects.requireNonNull(routes, "routes");
+        routes.route(RUNS, (exchange, body) ->
+            runsResource(Resource.of(RUNS, exchange, body)));
+        routes.route(PERIODS, (exchange, body) ->
+            periodsResource(Resource.of(PERIODS, exchange, body)));
     }
 
     @Override
@@ -164,19 +191,22 @@ public final class RunsAndPeriodsModule implements ApiModule {
 
     // ============================================================== runs
 
-    private ExchangeRoutes.Answer runsResource(ExchangeRoutes.Request request) {
+    private Routes.Answer runsResource(Resource.Request request) {
+        if (!request.belongs()) {
+            return notThisResource(request, RUNS);
+        }
         List<String> path = request.segments();
         if (path.isEmpty()) {
             return request.isPost()
                 ? startRun(request.form())
-                : ExchangeRoutes.Answer.methodNotAllowed("POST",
+                : Resource.methodNotAllowed("POST",
                     "POST " + RUNS + " starts a run for {periodId, bookId}; 06 § 4 has no listing"
                         + " of runs, and the runs of a period are on GET " + PERIODS + "/{id}");
         }
         if (path.size() == 1) {
             return request.isGet()
                 ? runStatus(path.get(0))
-                : ExchangeRoutes.Answer.methodNotAllowed("GET",
+                : Resource.methodNotAllowed("GET",
                     "GET " + RUNS + "/{id} reads a run; a run is started with POST " + RUNS
                         + " and replayed with POST " + RUNS + "/{id}/replay. A published run is"
                         + " never edited — a correction is a restatement (FR-902).");
@@ -184,11 +214,11 @@ public final class RunsAndPeriodsModule implements ApiModule {
         if (path.size() == 2 && "replay".equals(path.get(1))) {
             return request.isPost()
                 ? replayRun(path.get(0))
-                : ExchangeRoutes.Answer.methodNotAllowed("POST",
+                : Resource.methodNotAllowed("POST",
                     "POST " + RUNS + "/{id}/replay replays a run to a shadow table and reports the"
                         + " byte comparison (DT-1)");
         }
-        return ExchangeRoutes.Answer.notFound(request.path(),
+        return Resource.notFound(request.path(),
             "the runs resource is POST " + RUNS + ", GET " + RUNS + "/{id}, and POST " + RUNS
                 + "/{id}/replay (06 § 4)");
     }
@@ -207,10 +237,9 @@ public final class RunsAndPeriodsModule implements ApiModule {
      * id is a 400: it is not zero, and it is not "the only period on file" — defaulting it would let
      * a caller who thought they were running June get May's figures with June's expectations.
      */
-    private ExchangeRoutes.Answer startRun(FormBody form) {
+    private Routes.Answer startRun(FormBody form) {
         int periodId = form.integer("periodId");
         String bookId = form.text("bookId");
-        String requestedRunId = form.textOr("runId", null);
 
         List<String> refusals = new ArrayList<>();
         Optional<AccountingPeriod> period = periods.find(periodId);
@@ -232,19 +261,29 @@ public final class RunsAndPeriodsModule implements ApiModule {
                 + BOOK_ID + ". A production deployment resolves the book through"
                 + " eir-persistence rather than holding it in memory.");
         }
-        if (requestedRunId != null && runs.holds(requestedRunId)) {
-            refusals.add("run id '" + requestedRunId + "' is already on file; a run id is assigned"
-                + " once, so that GET " + RUNS + "/{id} and a replay each name one run");
+        if (form.has("runId")) {
+            // 06 § 4's request body is {periodId, bookId} and the run id comes back in the response.
+            // Refusing to take one is not pedantry, it is the fix for a measured defect: a caller
+            // naming RUN-202805-01 — which is exactly what the console's own POST /api/run defaults
+            // to — put a run in this register under an id the console could later publish a
+            // different run under, and the replay's replayOf check could not tell them apart. This
+            // resource mints every id it serves, in its own namespace, so that check cannot be
+            // fooled. A run id that cannot be named in a path (a slash, a quote) becomes impossible
+            // for the same reason.
+            refusals.add("this resource assigns run ids and does not accept one: 06 § 4's request"
+                + " is {periodId, bookId} and the id comes back in the response. An id supplied"
+                + " here could collide with one the console's own POST /api/run mints, and then a"
+                + " replay could not tell which run it reproduced.");
         }
         if (!refusals.isEmpty()) {
-            return ExchangeRoutes.Answer.ok(Json.object()
+            return Resource.ok(Json.object()
                 .bool("started", false)
                 .count("periodId", periodId)
                 .str("bookId", bookId)
                 .strings("refusals", refusals));
         }
 
-        String runId = requestedRunId == null ? runs.nextRunId(periodId) : requestedRunId;
+        String runId = runs.nextRunId(periodId);
         // The run this endpoint starts is the SAME run the console's POST /api/run drives, through
         // the same entry point: EirService holds the completed run so that a close can read the
         // figures it published, and a run started here that the close could not see would give an
@@ -255,7 +294,7 @@ public final class RunsAndPeriodsModule implements ApiModule {
         runs.record(new RunRegister.Run(runId, periodId, bookId, body));
 
         JsonView view = JsonView.of(body);
-        return ExchangeRoutes.Answer.ok(Json.object()
+        return Resource.ok(Json.object()
             .bool("started", true)
             .str("runId", runId)
             .count("periodId", periodId)
@@ -282,10 +321,10 @@ public final class RunsAndPeriodsModule implements ApiModule {
      * walk into the nested object to branch on them; the invariant results, the per-contract rows,
      * the journals and the exception descriptions are in there whole.
      */
-    private ExchangeRoutes.Answer runStatus(String runId) {
+    private Routes.Answer runStatus(String runId) {
         Optional<RunRegister.Run> found = runs.find(runId);
         if (found.isEmpty()) {
-            return ExchangeRoutes.Answer.notFound(RUNS + "/" + runId,
+            return Resource.notFound(RUNS + "/" + runId,
                 "no run '" + runId + "' on this deployment; the runs it has started are "
                     + runs.ids() + ". A run this process did not start is not absent from the"
                     + " engine — eir-persistence's AMORTISATION_RUN holds every published run,"
@@ -293,7 +332,8 @@ public final class RunsAndPeriodsModule implements ApiModule {
         }
         RunRegister.Run run = found.get();
         JsonView view = run.view();
-        boolean isLatest = runs.latest().map(RunRegister.Run::runId).orElseThrow().equals(runId);
+        boolean isLatest = runs.latestFor(run.periodId())
+            .map(RunRegister.Run::runId).orElseThrow().equals(runId);
 
         // One partition, and the response says so rather than implying a progress model this engine
         // does not have. 06 § 4 asks for per-partition progress because the batch it describes
@@ -306,7 +346,7 @@ public final class RunsAndPeriodsModule implements ApiModule {
             .count("processed", view.count("computed"))
             .count("quarantined", view.count("quarantined"));
 
-        return ExchangeRoutes.Answer.ok(Json.object()
+        return Resource.ok(Json.object()
             .str("runId", run.runId())
             .count("periodId", run.periodId())
             .str("bookId", run.bookId())
@@ -319,7 +359,12 @@ public final class RunsAndPeriodsModule implements ApiModule {
             .count("invariantResults", view.occurrencesOf("statement"))
             .count("invariantBreaches", view.occurrencesOf("satisfied", "false"))
             .bool("reportsCleanClose", view.flag("reportsCleanClose"))
-            .bool("replayable", isLatest)
+            // Named for what it actually knows. "replayable" would be a claim about the engine's
+            // working papers, and this resource cannot see them: the console's own POST /api/run
+            // replaces them without telling anybody here. What this field knows is that no LATER run
+            // was started through this resource for this period; the replay endpoint then checks
+            // with the engine before reporting any byte comparison.
+            .bool("latestOfThisResource", isLatest)
             .count("partitions", 1)
             .array("partitionProgress", List.of(partition))
             .obj("run", run.body()));
@@ -337,16 +382,17 @@ public final class RunsAndPeriodsModule implements ApiModule {
      * request is refused where the id is not the latest, and the engine's own {@code replayOf} is
      * checked against the id afterwards.
      */
-    private ExchangeRoutes.Answer replayRun(String runId) {
+    private Routes.Answer replayRun(String runId) {
         Optional<RunRegister.Run> found = runs.find(runId);
         if (found.isEmpty()) {
-            return ExchangeRoutes.Answer.notFound(RUNS + "/" + runId + "/replay",
+            return Resource.notFound(RUNS + "/" + runId + "/replay",
                 "no run '" + runId + "' on this deployment; the runs it has started are "
                     + runs.ids());
         }
-        String latest = runs.latest().map(RunRegister.Run::runId).orElseThrow();
+        String latest = runs.latestFor(found.get().periodId())
+            .map(RunRegister.Run::runId).orElseThrow();
         if (!latest.equals(runId)) {
-            return ExchangeRoutes.Answer.ok(Json.object()
+            return Resource.ok(Json.object()
                 .bool("replayed", false)
                 .str("runId", runId)
                 .str("latestRunId", latest)
@@ -365,7 +411,7 @@ public final class RunsAndPeriodsModule implements ApiModule {
             "shadowRunId=" + URLEncoder.encode("SHADOW-" + runId, StandardCharsets.UTF_8)));
         JsonView view = JsonView.of(body);
         if (!view.flag("ran")) {
-            return ExchangeRoutes.Answer.ok(Json.object()
+            return Resource.ok(Json.object()
                 .bool("replayed", false)
                 .str("runId", runId)
                 .strings("refusals", List.of(view.text("message")))
@@ -373,7 +419,7 @@ public final class RunsAndPeriodsModule implements ApiModule {
         }
         String replayOf = view.text("replayOf");
         if (!runId.equals(replayOf)) {
-            return ExchangeRoutes.Answer.ok(Json.object()
+            return Resource.ok(Json.object()
                 .bool("replayed", false)
                 .str("runId", runId)
                 .str("engineReplayed", replayOf)
@@ -384,7 +430,7 @@ public final class RunsAndPeriodsModule implements ApiModule {
                         + " run's and is not reported as it.")));
         }
 
-        return ExchangeRoutes.Answer.ok(Json.object()
+        return Resource.ok(Json.object()
             .bool("replayed", true)
             .str("runId", runId)
             .str("shadowRunId", view.text("shadowRunId"))
@@ -418,6 +464,19 @@ public final class RunsAndPeriodsModule implements ApiModule {
     }
 
     /**
+     * A path that only shares this resource's opening characters.
+     *
+     * <p>{@code Routes.route} registers a subtree, and the JDK matches a context by string prefix, so
+     * {@code /api/runsomething} arrives at the {@code /api/runs} context. Answered 404 rather than
+     * read as the run named {@code omething}.
+     */
+    private static Routes.Answer notThisResource(Resource.Request request, String prefix) {
+        return Resource.notFound(request.path(),
+            "the resource at " + prefix + " answers for " + prefix + " and its children; '"
+                + request.path() + "' only shares its opening characters");
+    }
+
+    /**
      * How many contracts the run isolated with an exception recorded against them.
      *
      * <p>Counted from the run's own per-contract rows — every quarantined contract carries an
@@ -431,19 +490,22 @@ public final class RunsAndPeriodsModule implements ApiModule {
 
     // ============================================================== periods
 
-    private ExchangeRoutes.Answer periodsResource(ExchangeRoutes.Request request) {
+    private Routes.Answer periodsResource(Resource.Request request) {
+        if (!request.belongs()) {
+            return notThisResource(request, PERIODS);
+        }
         List<String> path = request.segments();
         if (path.isEmpty()) {
             return request.isGet()
-                ? ExchangeRoutes.Answer.ok(periodList())
-                : ExchangeRoutes.Answer.methodNotAllowed("GET",
+                ? Resource.ok(periodList())
+                : Resource.methodNotAllowed("GET",
                     "GET " + PERIODS + " lists the periods and their status; a period is closed"
                         + " with POST " + PERIODS + "/{id}/close");
         }
         int periodId = periodId(path.get(0));
         if (path.size() == 1) {
             if (!request.isGet()) {
-                return ExchangeRoutes.Answer.methodNotAllowed("GET",
+                return Resource.methodNotAllowed("GET",
                     "GET " + PERIODS + "/{id} reads a period. The only write on a period is POST "
                         + PERIODS + "/{id}/close: there is deliberately no PATCH " + PERIODS
                         + "/{id} and no reopen endpoint, because a closed period is immutable"
@@ -452,16 +514,16 @@ public final class RunsAndPeriodsModule implements ApiModule {
             }
             Optional<AccountingPeriod> period = periods.find(periodId);
             return period.isPresent()
-                ? ExchangeRoutes.Answer.ok(periodRow(period.get()))
+                ? Resource.ok(periodRow(period.get()))
                 : unknownPeriod(PERIODS + "/" + periodId, periodId);
         }
         if (path.size() == 2 && "close".equals(path.get(1))) {
             return request.isPost()
                 ? closePeriod(periodId, request.form())
-                : ExchangeRoutes.Answer.methodNotAllowed("POST",
+                : Resource.methodNotAllowed("POST",
                     "POST " + PERIODS + "/{id}/close runs the close workflow (FR-901)");
         }
-        return ExchangeRoutes.Answer.notFound(request.path(),
+        return Resource.notFound(request.path(),
             "the periods resource is GET " + PERIODS + ", GET " + PERIODS + "/{id}, and POST "
                 + PERIODS + "/{id}/close (06 § 4)");
     }
@@ -524,7 +586,7 @@ public final class RunsAndPeriodsModule implements ApiModule {
      * {@code runRefusals.isEmpty() && !decision.isRefused()} — both lists, which is why neither can
      * be dropped from the body.
      */
-    private ExchangeRoutes.Answer closePeriod(int periodId, FormBody form) {
+    private Routes.Answer closePeriod(int periodId, FormBody form) {
         Optional<AccountingPeriod> found = periods.find(periodId);
         if (found.isEmpty()) {
             return unknownPeriod(PERIODS + "/" + periodId + "/close", periodId);
@@ -540,7 +602,7 @@ public final class RunsAndPeriodsModule implements ApiModule {
                     + " the approver and the policy version, recognises the adjustment in the"
                     + " current open period, and leaves the original published figures intact"
                     + " and still replayable (07 § 4.4).");
-            return ExchangeRoutes.Answer.conflict(Json.object()
+            return Resource.conflict(Json.object()
                 .bool("mayClose", false)
                 .bool("gateAsked", false)
                 .count("periodId", periodId)
@@ -555,6 +617,52 @@ public final class RunsAndPeriodsModule implements ApiModule {
         }
 
         periods.beginClose(periodId, CLOSING_STARTED_AT);
+        try {
+            return putItToTheGate(periodId, form);
+        } catch (RuntimeException defect) {
+            // The failing input, measured: before this catch existed, a close that threw left the
+            // period in CLOSING for the life of the process — status CLOSING, lastCloseOutcome "in
+            // progress", nobody closing it — while runs went on publishing into a period that had
+            // supposedly stopped taking postings. A close that did not happen must not leave behind
+            // a status saying one is under way. Every path out of the gate is covered and not just
+            // the parse above, because a response shape that changed under JsonView throws here too
+            // and would strand the period identically.
+            //
+            // Guarded on the period still being CLOSING, because putItToTheGate records a permitted
+            // close before it renders the response: a throw after that point must not stamp a
+            // CLOSED, fully attested period with "abandoned", which is a closed period that reads
+            // as though its close failed.
+            //
+            // The defect is still reported: it is rethrown, and EirServer.route maps it exactly as
+            // every other route does — 400 for a malformed request, 500 with its own message for a
+            // defect. Swallowing it to tidy the status would turn an engine defect into a
+            // data-quality ticket against a contract that is fine.
+            if (periods.find(periodId).map(open -> open.status().isCloseable()).orElse(false)) {
+                periods.abandonClose(periodId,
+                    "abandoned: the close failed with " + defect.getClass().getSimpleName());
+            }
+            if (defect instanceof DateTimeParseException notAnInstant) {
+                // Classified rather than passed on as a defect. EirService parses closedAt with
+                // Instant.parse instead of through a FormBody accessor, so 'closedAt=nope' arrives
+                // here as a DateTimeParseException and would be answered 500 — telling an operator
+                // the engine is broken when the request was. Reclassified where the format is
+                // already known to be wrong, without this module parsing or defaulting the field
+                // itself: EirService still owns the value, and a second parse here would be a
+                // second opinion about the format.
+                throw new FormBody.BadRequest("'closedAt' must be an ISO-8601 instant such as"
+                    + " 2028-06-05T09:00:00Z: " + notAnInstant.getMessage());
+            }
+            throw defect;
+        }
+    }
+
+    /**
+     * The part of a close that runs with the period already in {@code CLOSING}.
+     *
+     * <p>Split out so that {@link #closePeriod} can guarantee the period does not stay there if
+     * anything in here throws. Everything below reads the gate's answer; nothing decides it.
+     */
+    private Routes.Answer putItToTheGate(int periodId, FormBody form) {
         Json.Obj body = service.close(form);
         JsonView view = JsonView.of(body);
 
@@ -563,7 +671,7 @@ public final class RunsAndPeriodsModule implements ApiModule {
             // step 4 has nothing to be green about — and 06 § 4's status applies to it.
             AccountingPeriod reopened =
                 periods.abandonClose(periodId, "refused: no run to close over");
-            return ExchangeRoutes.Answer.conflict(Json.object()
+            return Resource.conflict(Json.object()
                 .bool("mayClose", false)
                 .bool("gateAsked", false)
                 .count("periodId", periodId)
@@ -575,23 +683,40 @@ public final class RunsAndPeriodsModule implements ApiModule {
         }
 
         boolean mayClose = view.flag("mayClose");
+        int gateRefusals = view.count("refusalCount");
+        boolean runRefused = runRefused(view);
         if (!mayClose) {
-            AccountingPeriod reopened =
-                periods.abandonClose(periodId, "refused by " + view.count("refusalCount")
-                    + " gate(s)");
-            return ExchangeRoutes.Answer.conflict(Json.object()
+            AccountingPeriod reopened = periods.abandonClose(periodId,
+                "refused by " + refusalSources(gateRefusals > 0, runRefused));
+            return Resource.conflict(Json.object()
                 .bool("mayClose", false)
                 .bool("gateAsked", true)
                 .bool("closeAbandoned", true)
                 .count("periodId", periodId)
                 .str("periodStatus", reopened.status().name())
-                .count("gateRefusalCount", view.count("refusalCount"))
+                // BOTH lists are named at the top level, and each has its own flag and its own
+                // count where a count exists. mayClose() is `runRefusals.isEmpty() &&
+                // !decision.isRefused()`, so either list alone can refuse a close — and
+                // RunClose says the gate-permits-run-refuses case is real: "A run over an empty
+                // population produces a clean gate decision, which is exactly why the run's own
+                // verdict is asked separately." A client that read only gateRefusalCount would see
+                // 0 on a 409 and have nothing to act on.
+                .bool("gateRefused", gateRefusals > 0)
+                .count("gateRefusalCount", gateRefusals)
+                .bool("runRefused", runRefused)
+                .strings("refusalSources", sourceList(gateRefusals > 0, runRefused))
                 // The gate's own list, one refusal to a line, exactly as CloseDecision.describe()
                 // renders it. Re-emitted at the top level rather than only nested, because a client
                 // that reads the status must not have to walk into a sub-object to find out what
-                // failed.
-                .str("gateVerdict", view.text("gateVerdict"))
-                // Not a count of breaches: EirService's close body carries every red result twice,
+                // failed — but ONLY where the gate actually refused. CloseDecision.describe() of a
+                // permitted decision reads "CLOSE PERMITTED — period 202805 … CLOSED", and putting
+                // that at the top of a 409 would be a body asserting the opposite of its status.
+                .str("gateVerdict", gateRefusals > 0
+                    ? view.text("gateVerdict")
+                    : "the close gate permitted on the evidence it was given; the refusal is the"
+                        + " run's own — see runRefused and close.runRefusals. The gate weighs the"
+                        + " evidence presented and cannot know that the evidence covers nothing.")
+                // No count of breaches: EirService's close body carries every red result twice,
                 // once in the collapsed dashboard it presents as `evidence` and once in `breaches`,
                 // and a control report that double-counts its own reds is how an operator learns to
                 // stop reading it. The list is nested whole under `close.breaches`.
@@ -622,7 +747,7 @@ public final class RunsAndPeriodsModule implements ApiModule {
         Instant closedAt = Instant.parse(view.text("closedAt"));
         Instant cutoff = versionCutoff();
         AccountingPeriod closed = periods.recordClose(periodId, closedBy, closedAt, cutoff);
-        return ExchangeRoutes.Answer.ok(Json.object()
+        return Resource.ok(Json.object()
             .bool("mayClose", true)
             .bool("closed", true)
             .bool("gateAsked", true)
@@ -631,12 +756,51 @@ public final class RunsAndPeriodsModule implements ApiModule {
             .str("closedBy", closedBy)
             .str("closedAt", closedAt.toString())
             .str("versionCutoffAt", cutoff.toString())
+            // The same two flags the refusal carries, both false here. A field that only appears on
+            // one branch is a field a client learns to treat as optional, and then its absence and
+            // its being false read the same.
+            .bool("gateRefused", false)
             .count("gateRefusalCount", 0)
+            .bool("runRefused", false)
             .str("gateVerdict", view.text("gateVerdict"))
             .str("attestation", closed.describe())
             .str("immutability", "CLOSED is terminal (FR-902). This period will not close again,"
                 + " will not reopen, and has no PATCH; a correction is POST /restatements.")
             .obj("close", body));
+    }
+
+    /**
+     * Whether the <b>run's own</b> refusal list is non-empty.
+     *
+     * <p>The list itself cannot be lifted to the top level: its elements are prose sentences carrying
+     * contract ids and rupee figures, and splitting a rendered JSON array of those on a delimiter
+     * would split on the commas inside them. Whether it is <em>empty</em> is exact, though —
+     * {@code Json.Obj.strings} writes an empty array as {@code []} and a non-empty one as
+     * {@code ["…}. So the flag is exact, the count is not published because it cannot be read
+     * honestly, and the list comes back whole under {@code close.runRefusals}.
+     */
+    private static boolean runRefused(JsonView view) {
+        return view.occurrencesOf("runRefusals", "[]") == 0;
+    }
+
+    /** Which of the two lists refused, as one phrase for the period register's record. */
+    private static String refusalSources(boolean gateRefused, boolean runRefused) {
+        if (gateRefused && runRefused) {
+            return "the close gate and the run's own verdict";
+        }
+        return gateRefused ? "the close gate" : "the run's own verdict";
+    }
+
+    /** Which of the two lists refused, named so a client knows where to look for each. */
+    private static List<String> sourceList(boolean gateRefused, boolean runRefused) {
+        List<String> sources = new ArrayList<>(2);
+        if (gateRefused) {
+            sources.add("the close gate — gateVerdict, and close.evidence for what it weighed");
+        }
+        if (runRefused) {
+            sources.add("the run's own verdict — close.runRefusals");
+        }
+        return sources;
     }
 
     /**
@@ -652,8 +816,8 @@ public final class RunsAndPeriodsModule implements ApiModule {
         return Instant.parse(JsonView.of(service.book()).text("recordedAsAt"));
     }
 
-    private ExchangeRoutes.Answer unknownPeriod(String path, int periodId) {
-        return ExchangeRoutes.Answer.notFound(path,
+    private Routes.Answer unknownPeriod(String path, int periodId) {
+        return Resource.notFound(path,
             "no period " + periodId + " on this deployment; the periods on file are "
                 + periods.ids() + ". A period the engine does not have is an absence and not a"
                 + " refusal — there is nothing for a gate to weigh.");
