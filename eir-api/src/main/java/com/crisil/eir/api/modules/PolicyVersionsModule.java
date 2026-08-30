@@ -2,6 +2,7 @@ package com.crisil.eir.api.modules;
 
 import com.crisil.eir.api.EirService;
 import com.crisil.eir.api.http.ApiModule;
+import com.crisil.eir.api.http.Json;
 import com.crisil.eir.api.http.Routes;
 import com.crisil.eir.api.modules.policy.PolicyVersionsSurface;
 import com.crisil.eir.api.store.Seed;
@@ -126,6 +127,47 @@ public final class PolicyVersionsModule implements ApiModule {
         // receives /api/policy-versions and everything beneath it, which is what lets the surface
         // read {id} out of the path.
         server.createContext(PolicyVersionsSurface.BASE, PolicyVersionsSurface.over(Seed.book()));
+
+        if (!seamCollidesWithTheContextJustTaken(routes)) {
+            throw new IllegalStateException(
+                "PolicyVersionsModule registered 06 § 5 on an HttpServer that the Routes seam does"
+                    + " not write to, so the endpoints are not on the port this server answers on."
+                    + " The walk out of " + routes.getClass().getName() + " reached an unrelated"
+                    + " HttpServer — a decorated or delegating seam, or a harness holding two"
+                    + " servers. Refusing to start rather than leaving POST "
+                    + PolicyVersionsSurface.BASE + "/{id}/approve answering 404, which is"
+                    + " indistinguishable from an approval gate that is present and permissive"
+                    + " (FR-210)");
+        }
+    }
+
+    /**
+     * Whether {@code candidate} is the server the seam itself registers on.
+     *
+     * <p><b>Why this check has to exist.</b> {@link #sharedServerBehind} returns the first
+     * {@code HttpServer} within reach of the {@code Routes} object, and reachability is not identity:
+     * this module's own test documents the accident from the other side — an inner {@code Routes}
+     * declared in a test class reaches the test's {@code EirServer} through its synthetic outer
+     * reference, and the walk would "succeed" on a server nobody asked about. In production the same
+     * accident registers this surface on a server that is not listening on the port the caller uses,
+     * and every approval attempt 404s — the exact silent hole the loud failure above exists to
+     * prevent, arrived at through the recovery rather than around it.
+     *
+     * <p><b>How it is checked, with no new privilege.</b> The JDK refuses a second context at a path
+     * one already occupies. So the surface is registered on the candidate first, and then the seam is
+     * asked to register at the same path: if the seam writes to the candidate, it collides and
+     * throws, which is the proof. If it does not collide, the seam's server is a different object,
+     * the answer is no, and the junk context the seam just created does not matter because
+     * construction is about to fail. This is the very collision that made {@code Routes} unable to
+     * serve 06 § 5's two verbs on one path, used here as an identity test.
+     */
+    private static boolean seamCollidesWithTheContextJustTaken(Routes routes) {
+        try {
+            routes.get(PolicyVersionsSurface.BASE, exchange -> Json.object());
+            return false;
+        } catch (IllegalArgumentException collided) {
+            return true;
+        }
     }
 
     @Override

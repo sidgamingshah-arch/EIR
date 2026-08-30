@@ -6,6 +6,7 @@ import com.crisil.eir.api.store.Book;
 import com.crisil.eir.api.store.Seed;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Precision;
+import com.crisil.eir.domain.Rate;
 import com.crisil.eir.policy.PolicyKind;
 import com.crisil.eir.policy.PolicyVersion;
 import com.crisil.eir.policy.PolicyVersionStatus;
@@ -21,7 +22,6 @@ import com.sun.net.httpserver.HttpHandler;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -201,7 +201,12 @@ public final class PolicyVersionsSurface implements HttpHandler {
         if (segments.length != 2 || segments[0].isEmpty() || segments[1].isEmpty()) {
             return notFound(path);
         }
-        String id = URLDecoder.decode(segments[0], StandardCharsets.UTF_8);
+        // Taken as-is, and NOT run through URLDecoder. HttpExchange hands over
+        // getRequestURI().getPath(), which the JDK has already percent-decoded, so decoding again
+        // would be a second pass: an id drafted as "POL+FEE-2029.1" would arrive here as
+        // "POL+FEE-2029.1" and be turned into "POL FEE-2029.1" — the store would miss it, and that
+        // version could never be previewed or approved, on a 404 saying it does not exist.
+        String id = segments[0];
         String action = segments[1];
         if (!"impact-preview".equals(action) && !"approve".equals(action)) {
             return notFound(path);
@@ -282,7 +287,11 @@ public final class PolicyVersionsSurface implements HttpHandler {
         String maker = body.text("maker");
         String content = body.textOr("content", "");
 
-        if (store.holds(id)) {
+        PolicyVersion drafted = drafted(id, kind, description, effectiveFrom, maker);
+        // Test-and-write in one operation. Asking store.holds(id) and then writing would, under two
+        // threads, let both find the id free and both write, and the loser would get an exception
+        // where the answer it needs is the ordinary refusal below.
+        if (!store.draftIfAbsent(drafted, content)) {
             PolicyVersion held = store.find(id).orElseThrow();
             return new Answer(200, Json.object()
                 .str("specSection", SPEC_SECTION)
@@ -293,9 +302,6 @@ public final class PolicyVersionsSurface implements HttpHandler {
                     + "). A version id is what a published figure cites, so drafting over one"
                     + " would silently re-point figures already reported; issue a new id"));
         }
-
-        PolicyVersion drafted = drafted(id, kind, description, effectiveFrom, maker);
-        store.draft(drafted, content);
         DraftFingerprint fingerprint = store.currentDraftOf(id);
         ActivationDecision decision =
             gate.decideFromRegister(drafted, fingerprint, store.previews(), BOOK_AS_AT);
@@ -431,10 +437,14 @@ public final class PolicyVersionsSurface implements HttpHandler {
         TransitionResult signed = MakerCheckerGate.approve(pending, approval);
 
         boolean submissionStands = submission == null || submission.isAllowed();
-        boolean approved = preview.permitted() && submissionStands && signed.isAllowed();
-        if (approved) {
-            store.replace(signed.after());
-        }
+        boolean bothGatesPermit = preview.permitted() && submissionStands && signed.isAllowed();
+        // Written back only if the held version is still in the status the gates were asked about.
+        // Both gates were consulted outside the store's lock — they have to be, since neither gate
+        // belongs to the store — so a concurrent approval could have signed this version in the
+        // meantime, and applying this answer on top would replace a signature already relied on.
+        boolean stillUnchanged = !bothGatesPermit
+            || store.replaceIfAt(signed.after(), version.status());
+        boolean approved = bothGatesPermit && stillUnchanged;
 
         // 409 iff the impact-preview limb refused. 06 § 5 attaches the code to that condition and
         // to no other, so the code stays a reliable signal: run the preview.
@@ -459,11 +469,27 @@ public final class PolicyVersionsSurface implements HttpHandler {
                 .str("detail", "approved: " + preview.detail())
                 .str("audit", after.describe());
         } else if (!preview.permitted()) {
+            // The remedy is named — but so is the maker-checker limb's own refusal, when there is
+            // one, and not left buried in the sub-object. Otherwise POST .../approve on a version
+            // that is already EFFECTIVE answers "run the impact preview first", which for a
+            // retrospective version this endpoint will never certify is advice that cannot be
+            // followed: the caller loops on it while the operative fact — the version is already in
+            // force, so there is no approval left to give — sits one nesting level down.
+            String alsoBlocked = submissionStands
+                ? signed.isAllowed() ? "" : " Also refused by the maker-checker gate: "
+                    + signed.describe()
+                : " Also refused by the maker-checker gate: " + submission.describe();
             out.str("detail", "409 CONFLICT: approval refused because FR-210 requires a stored"
                     + " portfolio-level impact preview generated before the version can go"
                     + " effective, and " + preview.refusal() + " — run POST " + BASE + "/" + id
-                    + "/impact-preview first. " + preview.detail())
+                    + "/impact-preview first. " + preview.detail() + alsoBlocked)
                 .bool("refusalLooksLikeDiligence", preview.refusalLooksLikeDiligence());
+        } else if (!stillUnchanged) {
+            out.str("detail", "both gates permitted this approval, but policy version " + id
+                + " moved out of " + version.status() + " while they were being asked, so the"
+                + " answer was computed about a version that no longer exists; nothing was"
+                + " written. Re-read the version and approve it again")
+                .str("refusal", "CONCURRENTLY_MODIFIED");
         } else {
             out.str("detail", "the impact-preview gate permitted approval and the maker-checker"
                 + " gate refused it: " + (submissionStands ? signed.describe()
@@ -476,12 +502,21 @@ public final class PolicyVersionsSurface implements HttpHandler {
 
     private Json.Obj populationJson() {
         PortfolioImpactPreview.Position position = previews.position();
+        Rate periodic = position.weightedAveragePeriodicEir();
         return Json.object()
             .count("contractsMeasured", position.contractsMeasured())
             .count("openingStatesOnFile", position.openingStatesOnFile())
+            .bool("aggregatable", position.aggregatable())
+            .str("notAggregatableBecause", position.unmeasurable())
             .figure("totalGrossCarryingAmount",
                 position.totalGrossCarryingAmount().atPresentationScale().amount())
-            .figure("weightedAverageEir", position.weightedAverageEir().periodic())
+            // Effective annual, always. See Position: a weighted mean of per-period rates is only
+            // a figure where every weight shares one compounding frequency.
+            .figure("weightedAverageEirEffectiveAnnual", position.weightedAverageEir().periodic())
+            // Published only where the population shares one frequency — null, not an
+            // approximation, where it would be a mean over incompatible bases.
+            .figure("weightedAveragePeriodicEir", periodic == null ? null : periodic.periodic())
+            .strings("compoundingPeriodsPerYear", numbered(position.compoundingBases()))
             .str("asOf", position.asOf().toString())
             .str("limitation", "the population is the book's own holdings; contracts whose"
                 + " opening state the master does not carry are counted and excluded from the"
@@ -512,6 +547,15 @@ public final class PolicyVersionsSurface implements HttpHandler {
             .figure("deviation", result.deviation())
             .str("statement", result.id().statement())
             .str("detail", result.detail());
+    }
+
+    /** Compounding frequencies as strings, so a count is never mistaken for a figure. */
+    private static List<String> numbered(List<Integer> values) {
+        List<String> rendered = new ArrayList<>(values.size());
+        for (Integer value : values) {
+            rendered.add(Integer.toString(value));
+        }
+        return rendered;
     }
 
     private static List<String> names(java.util.Collection<PolicyVersionStatus> statuses) {

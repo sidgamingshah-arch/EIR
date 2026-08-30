@@ -8,14 +8,31 @@ import com.crisil.eir.api.EirService;
 import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.http.Json;
 import com.crisil.eir.api.http.Routes;
+import com.crisil.eir.api.modules.policy.PolicyVersionsStore;
 import com.crisil.eir.api.modules.policy.PolicyVersionsSurface;
+import com.crisil.eir.api.modules.policy.PortfolioImpactPreview;
+import com.crisil.eir.api.store.Book;
 import com.crisil.eir.api.store.Seed;
+import com.crisil.eir.application.port.ContractStateSource;
+import com.crisil.eir.domain.Money;
+import com.crisil.eir.domain.Rate;
+import com.crisil.eir.domain.Stage;
+import com.crisil.eir.policy.PolicyKind;
+import com.crisil.eir.policy.PolicyVersion;
+import com.crisil.eir.policy.PolicyVersionStatus;
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Currency;
+import java.util.List;
 import java.util.function.Function;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,8 +67,16 @@ import org.junit.jupiter.api.Test;
  * <ul>
  *   <li>the measured portfolio is <b>1,056,814.64</b> — 528,407.32 + 528,407.32, C-0003 excluded
  *       because the contract master carries no balance for it;
- *   <li>the gross-carrying-amount-weighted average EIR is <b>0.010421491800</b> exactly: both
- *       weights carry the same rate, so (528,407.32·r + 528,407.32·r) / 1,056,814.64 = r for any r;
+ *   <li>the gross-carrying-amount-weighted average <em>periodic</em> EIR is <b>0.010421491800</b>
+ *       exactly: both weights carry the same rate, so (528,407.32·r + 528,407.32·r) / 1,056,814.64
+ *       = r for any r;
+ *   <li>the same weighting in effective-annual space — which is where the preview states it, since
+ *       a mean of per-period rates means nothing across compounding frequencies — is
+ *       <b>0.132480940855</b>. Derived independently of this engine, in Python's {@code decimal} at
+ *       28 significant digits and HALF_UP to match {@code Precision.WORKING}:
+ *       {@code (1.010421491800)^12 = 1.132480940854651034845383422}, so the effective annual rate is
+ *       {@code 0.132480940854651034845383422}, which {@code Rate}'s storage scale of twelve places
+ *       rounds to {@code 0.132480940855};
  *   <li>the checker's sign-off date is <b>2028-05-31</b>, the book's business date
  *       ({@code Seed.PERIOD_END}); and
  *   <li>a preview is stamped <b>2028-06-01T00:00:00Z</b>, the first instant after that date in UTC
@@ -335,20 +360,27 @@ class PolicyVersionsModuleTest {
             assertThat(response.body())
                 .contains("\"contractsMeasured\":3")
                 .contains("\"openingStatesOnFile\":2")
+                .contains("\"aggregatable\":true")
                 .contains("\"totalGrossCarryingAmount\":\"1056814.64\"")
-                .contains("\"weightedAverageEir\":\"0.010421491800\"");
+                // Both weightings, and the periodic one is present only because this population
+                // shares one compounding frequency — the book is monthly throughout.
+                .contains("\"weightedAverageEirEffectiveAnnual\":\"0.132480940855\"")
+                .contains("\"weightedAveragePeriodicEir\":\"0.010421491800\"")
+                .contains("\"compoundingPeriodsPerYear\":[\"12\"]");
             // A nil movement, stated against a real portfolio rate rather than as two zeroes.
             assertThat(response.body())
                 .contains("\"contractsAffected\":0")
                 .contains("\"grossCarryingAmountDelta\":\"0.00\"")
-                .contains("\"weightedAverageEirBefore\":\"0.010421491800\"")
-                .contains("\"weightedAverageEirAfter\":\"0.010421491800\"")
+                .contains("\"weightedAverageEirBefore\":\"0.132480940855\"")
+                .contains("\"weightedAverageEirAfter\":\"0.132480940855\"")
+                .contains("\"weightedAverageEirShiftBps\":\"0.000000000000\"")
                 .contains("\"noMovement\":true")
                 .contains("\"coherent\":true");
             assertThat(response.body())
                 .as("figures cross the wire as JSON strings: an unquoted rate would have gone"
                     + " through a double in the reader and lost the twelve-place statement")
-                .doesNotContain("\"weightedAverageEir\":0.0104");
+                .doesNotContain("\"weightedAveragePeriodicEir\":0.0104")
+                .doesNotContain("\"totalGrossCarryingAmount\":1056814.64");
         }
 
         @Test
@@ -430,6 +462,25 @@ class PolicyVersionsModuleTest {
         }
 
         @Test
+        @DisplayName("a version id is taken from the path as the JDK decoded it, once and not twice")
+        void aVersionIdIsNotDecodedTwice() throws IOException {
+            // HttpExchange hands over an already-decoded path. Running it through URLDecoder again
+            // maps '+' to a space, so this id would be drafted as "POL+FEE-2030.1", listed under
+            // that name, and then be unreachable for ever: every preview and approval would decode
+            // it to "POL FEE-2030.1", miss the store, and answer 404 "no such policy version" for a
+            // version plainly present in the list. A version that cannot be approved and cannot be
+            // seen to be unapprovable is the worst of both.
+            Response drafted = draft("id=POL%2BFEE-2030.1&kind=FEE_RULE_SET&description=plus+in+id"
+                + "&effectiveFrom=2030-04-01&maker=policy.maker");
+            assertThat(drafted.body()).contains("\"id\":\"POL+FEE-2030.1\"");
+
+            assertThat(impactPreview("POL%2BFEE-2030.1").status()).isEqualTo(200);
+            assertThat(approve("POL%2BFEE-2030.1", "policy.checker").status())
+                .as("the same id must address the same version at every endpoint")
+                .isEqualTo(200);
+        }
+
+        @Test
         @DisplayName("an unknown action under a version id is a 404 listing the four routes")
         void anUnknownActionIsANotFound() throws IOException {
             Response response = post(PolicyVersionsSurface.BASE + "/POL-FEE-2029.1/activate", "");
@@ -480,6 +531,63 @@ class PolicyVersionsModuleTest {
                 .hasMessageContaining("FR-210");
         }
 
+        /**
+         * A {@code Routes} that accepts every registration and writes to a server of its own.
+         *
+         * <p>Stands in for the accident the identity check exists for: a decorated or delegating
+         * seam, or a harness holding two servers, where the field walk reaches an
+         * {@code HttpServer} that is real but is not the one the seam registers on. Registering
+         * there would put 06 § 5 on a port nobody calls.
+         */
+        private static final class RoutesOverItsOwnServer implements Routes {
+
+            /**
+             * Declared first, so the breadth-first field walk finds this one — and it is not the
+             * server this seam registers on. That ordering is the whole scenario: a server that is
+             * reachable from the {@code Routes} object without being the one it writes to.
+             */
+            private final HttpServer reachableButUnused;
+
+            private final HttpServer whereTheSeamActuallyWrites;
+
+            RoutesOverItsOwnServer() throws IOException {
+                this.reachableButUnused = HttpServer.create(new InetSocketAddress(0), 0);
+                this.whereTheSeamActuallyWrites = HttpServer.create(new InetSocketAddress(0), 0);
+            }
+
+            @Override
+            public void get(String path, Function<HttpExchange, Json.Obj> handler) {
+                whereTheSeamActuallyWrites.createContext(path, exchange -> {
+                });
+            }
+
+            @Override
+            public void post(String path, Function<FormBody, Json.Obj> handler) {
+                whereTheSeamActuallyWrites.createContext(path, exchange -> {
+                });
+            }
+        }
+
+        @Test
+        @DisplayName("a seam that writes to a different server than the walk found is fatal too")
+        void bindingToTheWrongServerIsFatal() throws IOException {
+            PolicyVersionsModule module = new PolicyVersionsModule(new EirService(Seed.book()));
+            RoutesOverItsOwnServer seam = new RoutesOverItsOwnServer();
+
+            // The walk finds `elsewhere` — it is a real HttpServer one hop from the Routes object —
+            // so the recovery "succeeds". Without the collision probe the module would register
+            // there, return normally, and POST .../approve would 404 on the port the operator
+            // actually calls: the silent hole, reached through the recovery rather than around it.
+            assertThat(PolicyVersionsModule.sharedServerBehind(seam))
+                .as("the walk does reach a server here, which is exactly why reachability is not"
+                    + " identity")
+                .isPresent();
+            assertThatThrownBy(() -> module.register(seam))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("does not write to")
+                .hasMessageContaining("404");
+        }
+
         @Test
         @DisplayName("the real seam does hide the shared server, so the section is actually served")
         void theRealSeamIsRecovered() throws IOException {
@@ -489,6 +597,86 @@ class PolicyVersionsModuleTest {
             assertThat(get(PolicyVersionsSurface.BASE).status()).isEqualTo(200);
             assertThat(new PolicyVersionsModule(new EirService(Seed.book())).specSection())
                 .isEqualTo("06 § 5");
+        }
+    }
+
+    @Nested
+    @DisplayName("the population the preview measures, at the level below HTTP")
+    class ThePopulation {
+
+        /**
+         * A holding stated in a second currency, built from reference case 1's own terms.
+         *
+         * <p>{@code Book.Holding} needs a whole {@code OpeningState}; only the gross carrying
+         * amount's currency is being varied.
+         */
+        private Book.Holding inDollars(String contractId) {
+            ContractStateSource.OpeningState state = new ContractStateSource.OpeningState(
+                Seed.caseOneTerms(), Seed.EIR,
+                Money.of("528407.32", Currency.getInstance("USD")),
+                Money.of("529815.61", Currency.getInstance("USD")),
+                Stage.STAGE_1, Money.zero(Currency.getInstance("USD")), "ECL-MODEL-2028.05",
+                Money.of("5298.16", Currency.getInstance("USD")));
+            return Book.Holding.onFile(contractId, "HL", "IN-MUM", "dollar exposure",
+                state, Seed.book().holdings().get(0).period());
+        }
+
+        @Test
+        @DisplayName("a mixed-currency population is measured without throwing, and refuses a preview")
+        void aMixedCurrencyPopulationRefusesRatherThanThrows() {
+            List<Book.Holding> mixed = new ArrayList<>(Seed.book().holdings());
+            mixed.add(inDollars("C-9001"));
+
+            PortfolioImpactPreview.Position position = PortfolioImpactPreview.Position.measure(
+                mixed, PolicyVersionsSurface.BOOK_BUSINESS_DATE);
+
+            // Total rather than throwing, and that matters beyond tidiness: measure() is first
+            // called from PolicyVersionsSurface.over(), which runs inside EirServer's constructor.
+            // A Money.plus currency mismatch there would abort the whole server — /api/book,
+            // /api/run, the operator page — over one row this endpoint could not add up.
+            assertThat(position.aggregatable()).isFalse();
+            assertThat(position.unmeasurable()).contains("INR").contains("USD");
+
+            PolicyVersion draft = new PolicyVersion("POL-FEE-2029.9", PolicyKind.FEE_RULE_SET,
+                "prospective", LocalDate.of(2029, 4, 1), "policy.maker", null, null,
+                PolicyVersionStatus.DRAFT);
+            PortfolioImpactPreview.Outcome outcome =
+                new PortfolioImpactPreview(position, PolicyVersionsSurface.BOOK_AS_AT)
+                    .previewOf(draft, PolicyVersionsStore.fingerprintOf(draft, ""));
+
+            assertThat(outcome.produced())
+                .as("with no portfolio total there is nothing for a delta to be stated against, so"
+                    + " no preview may be stored and approval must stay blocked")
+                .isFalse();
+            assertThat(outcome.refusal())
+                .isEqualTo(PortfolioImpactPreview.Refusal.PORTFOLIO_NOT_AGGREGATABLE);
+        }
+
+        @Test
+        @DisplayName("a population spanning two compounding frequencies withholds the periodic mean")
+        void mixedCompoundingWithholdsThePeriodicBlend() {
+            List<Book.Holding> mixed = new ArrayList<>(Seed.book().holdings());
+            ContractStateSource.OpeningState quarterly = new ContractStateSource.OpeningState(
+                Seed.caseOneTerms(), Rate.periodic(new BigDecimal("0.030000000000"), 4),
+                Seed.OPENING_GCA, Seed.OPENING_CONTRACTUAL, Stage.STAGE_1, Seed.NIL,
+                "ECL-MODEL-2028.05", Seed.BILLED_INTEREST);
+            mixed.add(Book.Holding.onFile("C-9002", "HL", "IN-MUM", "quarterly exposure",
+                quarterly, Seed.book().holdings().get(0).period()));
+
+            PortfolioImpactPreview.Position position = PortfolioImpactPreview.Position.measure(
+                mixed, PolicyVersionsSurface.BOOK_BUSINESS_DATE);
+
+            // A monthly 1.0421...% and a quarterly 3% are not two numbers that can be averaged.
+            // Publishing a blend of them stamped with one of the two frequencies would flow into
+            // ImpactPreview.weightedAverageEirBefore and be compared in basis points.
+            assertThat(position.compoundingBases()).containsExactly(4, 12);
+            assertThat(position.weightedAveragePeriodicEir())
+                .as("a figure that cannot be stated is not a figure to approximate")
+                .isNull();
+            assertThat(position.weightedAverageEir().periodsPerYear())
+                .as("the convention-free weighting is always effective annual")
+                .isEqualTo(1);
+            assertThat(position.aggregatable()).isTrue();
         }
     }
 

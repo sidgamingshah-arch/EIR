@@ -1,6 +1,7 @@
 package com.crisil.eir.api.modules.policy;
 
 import com.crisil.eir.policy.PolicyVersion;
+import com.crisil.eir.policy.PolicyVersionStatus;
 import com.crisil.eir.policy.preview.DraftFingerprint;
 import com.crisil.eir.policy.preview.ImpactPreview;
 import com.crisil.eir.policy.preview.ImpactPreviewRegister;
@@ -34,11 +35,16 @@ import java.util.Optional;
  * site, because two call sites computing a fingerprint from slightly different parts is precisely
  * how a gate that compares fingerprints starts refusing everything or accepting everything.
  *
- * <p><b>Synchronised.</b> {@code EirServer} runs one executor thread today, so contention is
- * currently impossible — which is the reason to lock rather than to rely on it: the approval path
- * reads a version, asks two gates about it and writes a replacement, and if that ever runs on two
- * threads the interleaving loses one checker's signature silently. A lock costs nothing at this
- * scale and removes the question.
+ * <p><b>Synchronised, and that is not on its own enough — so the two writes are compare-and-set.</b>
+ * {@code EirServer} runs one executor thread today, so contention is currently impossible, which is
+ * the reason to design for it rather than to rely on it. Per-method locking would <em>not</em> have
+ * been enough: the approval path reads a version, asks two gates about it outside any lock, and
+ * then writes a replacement, so two concurrent approvals of one id would both read {@code DRAFT},
+ * both pass, and the second write would overwrite the first checker's signature with no record that
+ * it existed. Making every method {@code synchronized} and calling it safe is exactly the kind of
+ * claim this codebase treats as worse than an absent one. So the two state changes take the state
+ * they expect to find as an argument — {@link #draftIfAbsent} and {@link #replaceIfAt} — and refuse
+ * rather than clobber when the world has moved under the caller.
  */
 public final class PolicyVersionsStore {
 
@@ -136,20 +142,23 @@ public final class PolicyVersionsStore {
     }
 
     /**
-     * Adds a version and fingerprints it.
+     * Adds a version and fingerprints it, unless the id is already held.
      *
-     * @throws IllegalStateException if the id is already held — the caller must have refused first,
-     *     because overwriting a version would discard a checker's signature or a stored preview's
-     *     draft with no record that either existed
+     * <p>The test and the write are one operation on purpose. A caller that asked {@link #holds}
+     * and then wrote would, under two threads, both find the id free and both write — and the
+     * loser's response would have to be an exception mapped to a 500, where the answer the caller
+     * needs is the ordinary refusal "that id is taken".
+     *
+     * @return whether the version was added; false means the id was already held and nothing was
+     *     written — overwriting would discard whatever has been approved or previewed against it
      */
-    public synchronized void draft(PolicyVersion version, String draftContent) {
+    public synchronized boolean draftIfAbsent(PolicyVersion version, String draftContent) {
         Objects.requireNonNull(version, "version");
         if (versions.containsKey(version.id())) {
-            throw new IllegalStateException(
-                "policy version " + version.id() + " is already held; drafting over it would"
-                    + " discard whatever has been approved or previewed against that id");
+            return false;
         }
         put(version, draftContent);
+        return true;
     }
 
     /**
@@ -161,15 +170,31 @@ public final class PolicyVersionsStore {
      * permitted it at approval. Recomputing here would also mean the digest silently depended on
      * status, which is not draft content.
      *
-     * @throws IllegalStateException if the id is not held, or if the id changed
+     * <p><b>Compare-and-set on the status the caller read.</b> {@code expectedFrom} is the status
+     * the version was in when the caller took it out and started asking gates about it. If the held
+     * version has moved since, the write is refused: the gates were asked about a version that no
+     * longer exists, and applying their answer anyway is how a second checker's approval silently
+     * replaces a first one that has already been relied on.
+     *
+     * @return whether the replacement was written; false means the held version is no longer at
+     *     {@code expectedFrom} and nothing was changed
+     * @throws IllegalStateException if the id is not held — a caller replacing a version it never
+     *     read is a defect here, not a race
      */
-    public synchronized void replace(PolicyVersion moved) {
+    public synchronized boolean replaceIfAt(
+        PolicyVersion moved, PolicyVersionStatus expectedFrom) {
         Objects.requireNonNull(moved, "moved");
-        if (!versions.containsKey(moved.id())) {
+        Objects.requireNonNull(expectedFrom, "expectedFrom");
+        PolicyVersion held = versions.get(moved.id());
+        if (held == null) {
             throw new IllegalStateException(
                 "policy version " + moved.id() + " is not held, so there is nothing to replace");
         }
+        if (held.status() != expectedFrom) {
+            return false;
+        }
         versions.put(moved.id(), moved);
+        return true;
     }
 
     /** The previews stored for every version — what the activation gate reads. */
