@@ -14,12 +14,21 @@ import java.util.Optional;
  * would be noise, and enumerating every rule a caller tripped is how an access log becomes a
  * reconnaissance tool.
  *
- * <p><b>{@link #segregationEvaluated()} is on the record on purpose.</b> A permit that says only
- * "permitted" cannot be distinguished from a permit where the segregation limb had no second
+ * <p><b>{@link #runMakerSegregationEvaluated()} is on the record on purpose.</b> A permit that says
+ * only "permitted" cannot be distinguished from a permit where the segregation limb had no second
  * identity to compare against and therefore never ran. This repository has a commit named "An
  * invariant nobody evaluated reads exactly like one that passed"; the same trap is here, and the
  * flag is how the caller — and the operator reading the response — can tell a cleared check from a
- * skipped one.
+ * skipped one. It is {@code true} on a refusal <em>caused</em> by the rule as well as on a permit
+ * that cleared it: a breach is the limb running and failing, and a log query filtering
+ * {@code false} to find un-evaluated checks must not sweep up every real breach.
+ *
+ * <p><b>The name is long because the short one would overstate.</b>
+ * {@code APPROVE_EXCEPTION_ACCEPTANCE} sits on a maker–checker pair with two maker halves — the
+ * proposer of the acceptance, and the starter of the run whose exceptions it covers. Only the second
+ * is comparable here; the first is a fact about the acceptance artefact's own two signatories, held
+ * by {@code ExceptionAcceptance.isSelfApproved()} and refused by the close gate as
+ * {@code SELF_APPROVED_ACCEPTANCE}. A field called {@code segregationEvaluated} would claim both.
  *
  * @param permitted            whether the act may proceed
  * @param assertedIdentity     the identity as the caller presented it, echoed verbatim so an
@@ -31,7 +40,10 @@ import java.util.Optional;
  * @param refusal              the reason, or {@code null} on a permit
  * @param detail              what was attempted and why the answer is what it is; never blank —
  *                             both halves, always, per {@link AccessRefusal}
- * @param segregationEvaluated whether the segregation-of-duties limb had the inputs to run
+ * @param runMakerSegregationEvaluated whether the run-maker limb of the segregation rule had the
+ *                             inputs to run — the caller's identity and the run's. Says nothing
+ *                             about the proposer-versus-approver limb, which is the acceptance
+ *                             artefact's and is decided by the close gate.
  */
 public record AccessDecision(
     boolean permitted,
@@ -40,7 +52,7 @@ public record AccessDecision(
     Capability capability,
     AccessRefusal refusal,
     String detail,
-    boolean segregationEvaluated) {
+    boolean runMakerSegregationEvaluated) {
 
     public AccessDecision {
         Objects.requireNonNull(detail, "detail");
@@ -61,20 +73,32 @@ public record AccessDecision(
     /** A permit. */
     static AccessDecision permit(
         AuthorisationRequest request, Principal principal, Capability capability,
-        boolean segregationEvaluated, String detail) {
+        boolean runMakerSegregationEvaluated, String detail) {
         return new AccessDecision(true, request.assertedIdentity(),
             Objects.requireNonNull(principal, "principal"),
             Objects.requireNonNull(capability, "capability"),
-            null, detail, segregationEvaluated);
+            null, detail, runMakerSegregationEvaluated);
     }
 
-    /** A refusal. {@code principal} and {@code capability} are whatever resolved before the stop. */
+    /**
+     * A refusal. {@code principal} and {@code capability} are whatever resolved before the stop.
+     *
+     * <p>The evaluated flag is <em>derived</em> from the reason rather than passed in, and that is
+     * exact rather than convenient: {@link AccessControl} checks the run-maker limb last, so the
+     * only refusal it can produce after running that limb is
+     * {@link AccessRefusal#SEGREGATION_OF_DUTIES}, and every earlier stop — no identity, no such
+     * act, unknown identity, missing grant — returned before the limb had anything to compare.
+     * Passing the flag would let a call site set it wrongly; deriving it cannot drift. It was
+     * hard-coded {@code false} here at first, which reported every genuine breach as a check that
+     * never ran.
+     */
     static AccessDecision refuse(
         AuthorisationRequest request, Principal principal, Capability capability,
         AccessRefusal refusal, String because) {
         Objects.requireNonNull(refusal, "refusal");
         return new AccessDecision(false, request.assertedIdentity(), principal, capability,
-            refusal, refusal.explanation() + " — " + because, false);
+            refusal, refusal.explanation() + " — " + because,
+            refusal == AccessRefusal.SEGREGATION_OF_DUTIES);
     }
 
     /** The resolved principal, absent where resolution failed. */

@@ -168,6 +168,11 @@ class AccessControlTest {
             // The grant is not the problem, so the refusal must not read as a missing grant.
             assertThat(refused.resolvedPrincipal()).isPresent();
             assertThat(refused.detail()).contains("started the run");
+            assertThat(refused.runMakerSegregationEvaluated())
+                .as("a breach IS the limb running and failing; reporting it as un-evaluated would"
+                    + " make every real breach look like a check that never ran, which is the"
+                    + " defect this flag exists to prevent")
+                .isTrue();
         }
 
         @Test
@@ -206,10 +211,13 @@ class AccessControlTest {
                 APPROVER, "APPROVE_EXCEPTION_ACCEPTANCE", OPERATOR);
 
             assertThat(permitted.permitted()).isTrue();
-            assertThat(permitted.segregationEvaluated())
+            assertThat(permitted.runMakerSegregationEvaluated())
                 .as("cleared, and the record has to say the check ran")
                 .isTrue();
-            assertThat(permitted.detail()).contains("segregation cleared against run maker");
+            assertThat(permitted.detail())
+                .contains("run-maker segregation limb cleared against run maker")
+                .as("the note must not claim the proposer limb, which this gate never sees")
+                .contains("decided by the close gate");
         }
 
         @Test
@@ -218,11 +226,11 @@ class AccessControlTest {
             AccessDecision permitted = decide(APPROVER, "APPROVE_EXCEPTION_ACCEPTANCE");
 
             assertThat(permitted.permitted()).isTrue();
-            assertThat(permitted.segregationEvaluated())
+            assertThat(permitted.runMakerSegregationEvaluated())
                 .as("an invariant nobody evaluated reads exactly like one that passed; this flag is"
                     + " the only thing that tells them apart")
                 .isFalse();
-            assertThat(permitted.detail()).contains("SEGREGATION NOT EVALUATED");
+            assertThat(permitted.detail()).contains("RUN-MAKER SEGREGATION NOT EVALUATED");
         }
 
         @Test
@@ -235,10 +243,10 @@ class AccessControlTest {
             AccessDecision permitted = decideOverRun(CONTROLLER, "CLOSE_PERIOD", CONTROLLER);
 
             assertThat(permitted.permitted()).isTrue();
-            assertThat(AccessControl.segregationApplies(Capability.CLOSE_PERIOD)).isFalse();
+            assertThat(AccessControl.runMakerSegregationApplies(Capability.CLOSE_PERIOD)).isFalse();
             assertThat(permitted.detail())
                 .as("not applicable is not the same as skipped; neither note belongs here")
-                .doesNotContain("SEGREGATION NOT EVALUATED");
+                .doesNotContain("RUN-MAKER SEGREGATION NOT EVALUATED");
         }
 
         @Test

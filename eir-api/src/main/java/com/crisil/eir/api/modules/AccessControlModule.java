@@ -265,7 +265,8 @@ public final class AccessControlModule implements ApiModule {
             mayRows.add(Json.object()
                 .str("capability", capability.name())
                 .bool("permitted", principal.may(capability))
-                .bool("subjectToSegregation", AccessControl.segregationApplies(capability))
+                .bool("subjectToRunMakerSegregation",
+                    AccessControl.runMakerSegregationApplies(capability))
                 .str("description", capability.description()));
         }
 
@@ -303,9 +304,16 @@ public final class AccessControlModule implements ApiModule {
         Map<String, String> query = query(exchange.getRequestURI());
         String action = query.get("action");
         if (action == null || action.isBlank()) {
+            // Deliberately NOT enumerating the capabilities here, and NOT because the vocabulary
+            // is secret — it is not. AccessControl answers NO_SUCH_CAPABILITY before
+            // UNKNOWN_IDENTITY, deliberately (07 § 5's answer must be the same for everybody), so a
+            // caller with no valid identity can still tell a real act name from an invented one, one
+            // request at a time. What this avoids is handing the whole list over in a single
+            // response to a caller who has not even said who they are. The list is on
+            // GET /api/access/roles, which is guarded, and that is where it belongs.
             throw new FormBody.BadRequest(
-                "action is absent; name the act to be authorised, one of " + names(
-                    List.of(Capability.values())));
+                "action is absent; name the act to be authorised. The vocabulary is on"
+                    + " GET /api/access/roles.");
         }
         String runStartedBy = query.get(RUN_MAKER_PARAM);
 
@@ -344,6 +352,7 @@ public final class AccessControlModule implements ApiModule {
         }
 
         List<Json.Obj> rows = new ArrayList<>();
+        int unenforced = 0;
         for (String route : EirServer.routes()) {
             RouteRequirement requirement = requirementFor(route);
             rows.add(Json.object()
@@ -351,8 +360,14 @@ public final class AccessControlModule implements ApiModule {
                 .str("requires", requirement.capability())
                 .bool("enforced", false)
                 .str("why", requirement.why()));
+            // Counted only where a guard is actually owed. GET / is the operator page: a static
+            // asset that computes nothing and requires nothing, so counting it would report one
+            // more unguarded route than there are routes needing a guard — on the endpoint whose
+            // entire purpose is an accurate gap count.
+            if (requirement.needsAGuard()) {
+                unenforced++;
+            }
         }
-        int unenforced = rows.size();
         for (String route : GUARDED_ROUTES) {
             rows.add(Json.object()
                 .str("route", route)
@@ -397,6 +412,11 @@ public final class AccessControlModule implements ApiModule {
 
     /** A route's required capability and the sentence explaining the mapping. */
     private record RouteRequirement(String capability, String why) {
+
+        /** Whether this route owes a guard at all. Only the static operator page does not. */
+        boolean needsAGuard() {
+            return !"none".equals(capability);
+        }
     }
 
     /**
@@ -458,9 +478,31 @@ public final class AccessControlModule implements ApiModule {
             Principal.of("ops.superuser", Role.BATCH_OPERATOR, Role.APPROVER)));
     }
 
-    /** The identity the caller asserted, or {@code null}. */
+    /**
+     * The identity the caller asserted, or {@code null} when none was presented.
+     *
+     * <p><b>Two identity headers are refused, not resolved first-wins.</b> HTTP allows a header to
+     * repeat, and {@code getFirst} would silently pick one of two names — verified over a socket:
+     * with {@code reader.only} then {@code ops.superuser} the request was refused, and with the two
+     * swapped the same request was permitted. That is the identical ambiguity {@link #query}
+     * refuses one layer down, applied to the more load-bearing input of the two: a caller and a
+     * reverse proxy that pick differently would produce a decision about one principal logged
+     * against another, and 07 § 7's audit log would name the wrong person.
+     *
+     * <p>Refused as a 400 rather than a 403. The request is malformed — it does not say who is
+     * asking — so there is no identity to be unentitled.
+     */
     private static String header(HttpExchange exchange) {
-        return exchange.getRequestHeaders().getFirst(IDENTITY_HEADER);
+        List<String> asserted = exchange.getRequestHeaders().get(IDENTITY_HEADER);
+        if (asserted == null || asserted.isEmpty()) {
+            return null;
+        }
+        if (asserted.size() > 1) {
+            throw new FormBody.BadRequest("the request carries " + asserted.size() + " "
+                + IDENTITY_HEADER + " headers; an identity that is two names is not an identity,"
+                + " and picking one silently would log a decision against the wrong principal");
+        }
+        return asserted.get(0);
     }
 
     /** The decision for a route whose requirement is a fixed capability. */
@@ -521,8 +563,9 @@ public final class AccessControlModule implements ApiModule {
                 .map(Capability::name).orElse(""))
             .str("refusal", decision.reason().map(Enum::name).orElse(""))
             .bool("segregationBreach", decision.isSegregationBreach())
-            // A permit whose segregation limb never ran must not read like one that cleared it.
-            .bool("segregationEvaluated", decision.segregationEvaluated())
+            // A permit whose run-maker limb never ran must not read like one that cleared it.
+            // True on a breach too: a breach IS the limb running and failing.
+            .bool("runMakerSegregationEvaluated", decision.runMakerSegregationEvaluated())
             .str("detail", decision.detail())
             .str("auditSentence", decision.describe())
             .str("identityAssertedByCaller", ASSERTED_NOTE)
@@ -556,8 +599,17 @@ public final class AccessControlModule implements ApiModule {
      * The query string, decoded.
      *
      * <p>Parsed here rather than through {@code FormBody}, which reads a POST body. The two formats
-     * are the same and the duplication is four lines; sharing them would mean widening
+     * are the same and the duplication is a few lines; sharing them would mean widening
      * {@code FormBody}'s contract, which is another module's file.
+     *
+     * <p><b>A repeated parameter is refused, not resolved.</b>
+     * {@code ?action=READ_FIGURES&action=CLOSE_PERIOD} arrives at an authorisation gate as two
+     * different questions in one request, and every way of picking between them is wrong: first-wins
+     * and last-wins are both a silent choice about which act the caller is being authorised for, and
+     * they disagree with each other, so a caller and a reverse proxy that pick differently would
+     * produce a decision about one act logged against another. Refused for the same reason
+     * {@code RoleRegister.of} refuses one identity appearing twice: an ambiguous control input is
+     * not an input.
      */
     private static Map<String, String> query(URI uri) {
         Map<String, String> parsed = new LinkedHashMap<>();
@@ -570,9 +622,15 @@ public final class AccessControlModule implements ApiModule {
                 continue;
             }
             int equals = pair.indexOf('=');
-            String key = equals < 0 ? pair : pair.substring(0, equals);
-            String value = equals < 0 ? "" : pair.substring(equals + 1);
-            parsed.put(decode(key), decode(value));
+            String key = decode(equals < 0 ? pair : pair.substring(0, equals));
+            String value = decode(equals < 0 ? "" : pair.substring(equals + 1));
+            if (parsed.containsKey(key)) {
+                throw new FormBody.BadRequest("the query names '" + key + "' more than once;"
+                    + " an authorisation request that asks two questions at once has no single"
+                    + " answer, and picking one silently would log a decision about one act"
+                    + " against another");
+            }
+            parsed.put(key, value);
         }
         return parsed;
     }

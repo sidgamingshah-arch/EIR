@@ -8,6 +8,7 @@ import com.crisil.eir.api.store.Seed;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.Socket;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.AfterEach;
@@ -77,6 +78,32 @@ class AccessControlModuleTest {
             connection.setRequestProperty(AccessControlModule.IDENTITY_HEADER, identity);
         }
         return read(connection);
+    }
+
+    /**
+     * A GET asserting two identities, written onto a raw socket.
+     *
+     * <p>{@code HttpURLConnection.setRequestProperty} replaces rather than appends, so the only
+     * reliable way to put two of one header on the wire is to write the request. Which is the right
+     * test anyway: what is under test is what this module does with bytes a misconfigured proxy or a
+     * hostile client actually sent.
+     */
+    private Response getWithTwoIdentities(String path, String first, String second)
+        throws IOException {
+        try (Socket socket = new Socket("localhost", server.port())) {
+            String request = "GET " + path + " HTTP/1.1\r\n"
+                + "Host: localhost\r\n"
+                + AccessControlModule.IDENTITY_HEADER + ": " + first + "\r\n"
+                + AccessControlModule.IDENTITY_HEADER + ": " + second + "\r\n"
+                + "Connection: close\r\n\r\n";
+            socket.getOutputStream().write(request.getBytes(StandardCharsets.UTF_8));
+            socket.getOutputStream().flush();
+            String raw = new String(
+                socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            int status = Integer.parseInt(raw.substring(9, 12));
+            int bodyStart = raw.indexOf("\r\n\r\n");
+            return new Response(status, bodyStart < 0 ? raw : raw.substring(bodyStart + 4));
+        }
     }
 
     private Response post(String path, String identity, String form) throws IOException {
@@ -187,6 +214,105 @@ class AccessControlModuleTest {
             assertThat(response.status()).isEqualTo(400);
             assertThat(response.body()).contains("bad request").contains("action is absent");
         }
+
+        @Test
+        @DisplayName("the 400 for an absent action does not hand an anonymous caller the vocabulary")
+        void thebadRequestDoesNotEnumerateTheCapabilities() throws IOException {
+            // This 400 is answered before the identity is resolved, so it reaches an
+            // unauthenticated caller. An earlier draft listed every Capability in the message,
+            // which handed an anonymous caller the exact vocabulary to probe with. The list belongs
+            // on /api/access/roles, which is guarded.
+            Response response = get("/api/access/decisions", null);
+
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body())
+                .contains("GET /api/access/roles")
+                .doesNotContain("APPROVE_EXCEPTION_ACCEPTANCE")
+                .doesNotContain("CLOSE_PERIOD")
+                .doesNotContain("START_RUN");
+        }
+
+        @Test
+        @DisplayName("a repeated action parameter is refused, not resolved by last-wins")
+        void arepeatedParameterIsRefused() throws IOException {
+            // Two questions in one request. Last-wins would decide CLOSE_PERIOD while a proxy or
+            // client reading first-wins believed it asked about READ_FIGURES, so the decision would
+            // be logged against the wrong act. Refused for the reason RoleRegister.of refuses one
+            // identity appearing twice.
+            Response response = get(
+                "/api/access/decisions?action=READ_FIGURES&action=CLOSE_PERIOD", "reader.only");
+
+            assertThat(response.status()).isEqualTo(400);
+            assertThat(response.body())
+                .contains("more than once")
+                .contains("no single answer");
+        }
+
+        @Test
+        @DisplayName("two identity headers are refused, not resolved first-wins")
+        void twoIdentityHeadersAreRefused() throws IOException {
+            // The bypass this closes, measured before the fix: with reader.only first and
+            // ops.superuser second, first-wins refused the request; with the two swapped, the SAME
+            // request was permitted. Which header a caller, a load balancer and this module each
+            // treat as authoritative is not something an authorisation gate may guess at — 07 § 7's
+            // audit log would name the wrong principal.
+            Response ordered = getWithTwoIdentities(
+                "/api/access/decisions?action=CLOSE_PERIOD", "reader.only", "financial.controller");
+            Response reversed = getWithTwoIdentities(
+                "/api/access/decisions?action=CLOSE_PERIOD", "financial.controller", "reader.only");
+
+            assertThat(ordered.status()).isEqualTo(400);
+            assertThat(reversed.status())
+                .as("the answer must not depend on the order two identities arrived in")
+                .isEqualTo(400);
+            assertThat(ordered.body())
+                .contains("an identity that is two names is not an identity");
+        }
+
+        @Test
+        @DisplayName("two headers naming the same person are still refused, not deduplicated")
+        void twoHeadersNamingOnePersonAreStillRefused() throws IOException {
+            Response response = getWithTwoIdentities(
+                "/api/access/decisions?action=CLOSE_PERIOD",
+                "financial.controller", "financial.controller");
+
+            assertThat(response.status())
+                .as("deduplicating would mean this module deciding that two control inputs are"
+                    + " one, and the next pair it saw might not be")
+                .isEqualTo(400);
+        }
+
+        @Test
+        @DisplayName("a single identity on a raw socket resolves exactly as it does over the client")
+        void asingleIdentityOnARawSocketResolves() throws IOException {
+            // The duplicate tests above rely on the raw-socket path; this proves that path agrees
+            // with HttpURLConnection on a well-formed request, so a 400 there is the guard firing
+            // and not the test's own request being malformed.
+            try (Socket socket = new Socket("localhost", server.port())) {
+                String request = "GET /api/access/decisions?action=CLOSE_PERIOD HTTP/1.1\r\n"
+                    + "Host: localhost\r\n"
+                    + AccessControlModule.IDENTITY_HEADER + ": financial.controller\r\n"
+                    + "Connection: close\r\n\r\n";
+                socket.getOutputStream().write(request.getBytes(StandardCharsets.UTF_8));
+                socket.getOutputStream().flush();
+                String raw = new String(
+                    socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
+                assertThat(raw).startsWith("HTTP/1.1 200");
+                assertThat(raw).contains("\"permitted\":true");
+            }
+        }
+
+        @Test
+        @DisplayName("the seam's prefix matching does not open an unguarded path")
+        void aprefixPathIsStillGuarded() throws IOException {
+            // HttpServer.createContext matches by prefix, so /api/access/whoami/anything reaches
+            // this module's handler — the same property every EirServer route has. What matters is
+            // that the guard runs there too: a path that answered 200 without an identity would be
+            // an unguarded route hiding behind a guarded one.
+            assertThat(get("/api/access/whoami/extra/path", null).status()).isEqualTo(403);
+            assertThat(get("/api/access/whoami/extra/path", "reader.only").status()).isEqualTo(200);
+        }
     }
 
     @Nested
@@ -207,7 +333,10 @@ class AccessControlModuleTest {
             assertThat(response.body())
                 .contains("SEGREGATION_OF_DUTIES")
                 .contains("\"segregationBreach\":true")
-                .contains("started the run");
+                .contains("started the run")
+                // A breach is the limb running and failing. Reported as un-evaluated, a log query
+                // filtering for un-evaluated checks would sweep up every real breach.
+                .contains("\"runMakerSegregationEvaluated\":true");
             assertThat(response.body())
                 .as("the refusal must not read as a missing grant, or it gets closed by widening"
                     + " the grant — which is the control being removed by the ticket reporting it")
@@ -239,7 +368,7 @@ class AccessControlModuleTest {
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
                 .contains("\"permitted\":true")
-                .contains("\"segregationEvaluated\":true");
+                .contains("\"runMakerSegregationEvaluated\":true");
         }
 
         @Test
@@ -251,8 +380,8 @@ class AccessControlModuleTest {
             assertThat(response.status()).isEqualTo(200);
             assertThat(response.body())
                 .as("an invariant nobody evaluated reads exactly like one that passed")
-                .contains("\"segregationEvaluated\":false")
-                .contains("SEGREGATION NOT EVALUATED");
+                .contains("\"runMakerSegregationEvaluated\":false")
+                .contains("RUN-MAKER SEGREGATION NOT EVALUATED");
         }
 
         @Test
@@ -384,9 +513,14 @@ class AccessControlModuleTest {
         void theconsoleRoutesAreReportedUnguarded() throws IOException {
             Response response = get("/api/access/coverage", "reader.only");
 
-            // EirServer.routes() lists nine; all nine are unguarded because EirServer registers
-            // them directly and every mutating one is a POST.
-            assertThat(response.body()).contains("\"unenforcedRoutes\":9");
+            // EirServer.routes() lists nine, and eight of them owe a guard: GET / is the operator
+            // page, a static asset that requires nothing. All eight are unguarded because EirServer
+            // registers them directly and every mutating one is a POST.
+            assertThat(response.body()).contains("\"unenforcedRoutes\":8");
+            assertThat(response.body())
+                .as("the page owes no guard, so counting it would overstate the gap on the very"
+                    + " endpoint whose purpose is an accurate gap count")
+                .contains("\"route\":\"GET /\",\"requires\":\"none\"");
             assertThat(response.body())
                 .contains("\"route\":\"POST /api/run\",\"requires\":\"START_RUN\","
                     + "\"enforced\":false")

@@ -131,9 +131,9 @@ public final class AccessControl {
         // both — the grant a deployment drifts into the first time somebody needs cover over a
         // quarter-end. That composed grant is the failing input, and it is constructed in
         // AccessControlTest.
-        boolean segregationEvaluated =
+        boolean runMakerLimbEvaluated =
             capability.checks().contains(Capability.START_RUN) && request.namesRunMaker();
-        if (segregationEvaluated
+        if (runMakerLimbEvaluated
             && FourEyes.sameIdentity(principal.identity(), request.runStartedBy())) {
             return AccessDecision.refuse(request, principal, capability,
                 AccessRefusal.SEGREGATION_OF_DUTIES,
@@ -143,28 +143,38 @@ public final class AccessControl {
                     + " over them cannot be one person's (07 § 7)");
         }
 
-        return AccessDecision.permit(request, principal, capability, segregationEvaluated,
+        return AccessDecision.permit(request, principal, capability, runMakerLimbEvaluated,
             principal.describe() + " may " + capability.name() + " — " + capability.description()
-                + segregationNote(capability, request, segregationEvaluated));
+                + segregationNote(capability, request, runMakerLimbEvaluated));
     }
 
     /**
-     * What the permit says about the segregation limb: cleared, not applicable, or <em>not
+     * What the permit says about the run-maker limb: cleared, not applicable, or <em>not
      * evaluated</em>.
      *
      * <p>The third case is the one worth spelling out on the response. A permit for
      * {@code APPROVE_EXCEPTION_ACCEPTANCE} that reached this point without a run maker to compare
-     * against has not passed the segregation check, it has skipped it, and the two are
-     * indistinguishable from a bare "permitted". That is the failure mode of the commit named "An
-     * invariant nobody evaluated reads exactly like one that passed".
+     * against has not passed the check, it has skipped it, and the two are indistinguishable from a
+     * bare "permitted". That is the failure mode of the commit named "An invariant nobody evaluated
+     * reads exactly like one that passed".
+     *
+     * <p>Every branch names the <em>limb</em> rather than "segregation", because
+     * {@link Capability#APPROVE_EXCEPTION_ACCEPTANCE} sits on a pair with two maker halves and only
+     * one of them is comparable here. An unqualified "segregation cleared" would claim the
+     * proposer-versus-approver half too, and that half is
+     * {@code ExceptionAcceptance.isSelfApproved()}'s — decided by the close gate, on an artefact
+     * this gate never sees.
      */
     private static String segregationNote(
         Capability capability, AuthorisationRequest request, boolean evaluated) {
         if (evaluated) {
-            return "; segregation cleared against run maker '" + request.runStartedBy() + "'";
+            return "; run-maker segregation limb cleared against run maker '"
+                + request.runStartedBy() + "'. The proposer-versus-approver limb of the same rule"
+                + " is the acceptance artefact's own and is decided by the close gate"
+                + " (SELF_APPROVED_ACCEPTANCE), not here";
         }
-        if (segregationApplies(capability)) {
-            return "; SEGREGATION NOT EVALUATED — this act is subject to the"
+        if (runMakerSegregationApplies(capability)) {
+            return "; RUN-MAKER SEGREGATION NOT EVALUATED — this act is subject to the"
                 + " segregation-of-duties rule and the request named no run maker to compare"
                 + " against";
         }
@@ -172,15 +182,19 @@ public final class AccessControl {
     }
 
     /**
-     * Whether {@code capability} is subject to the run-level segregation limb at all.
+     * Whether {@code capability} is subject to the run-maker limb of the segregation rule.
      *
      * <p>Published so that a caller building a request can tell whether it is obliged to supply the
      * run's maker. An act that is subject to the rule and reaches a permit without the input has
      * not passed the check — it has skipped it — and both the detail sentence and
-     * {@link AccessDecision#segregationEvaluated()} say so rather than letting a skipped check read
-     * as a cleared one.
+     * {@link AccessDecision#runMakerSegregationEvaluated()} say so rather than letting a skipped
+     * check read as a cleared one.
+     *
+     * <p>Named for the limb, not for the rule. The rule has a second half — proposer versus
+     * approver — which this gate never evaluates because it is a fact about the acceptance artefact
+     * rather than about the caller's grant.
      */
-    public static boolean segregationApplies(Capability capability) {
+    public static boolean runMakerSegregationApplies(Capability capability) {
         return capability != null && capability.checks().contains(Capability.START_RUN);
     }
 }
