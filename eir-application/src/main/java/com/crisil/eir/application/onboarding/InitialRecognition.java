@@ -16,12 +16,16 @@ import com.crisil.eir.calc.solver.SolverTolerance;
 import com.crisil.eir.domain.FeeClassification;
 import com.crisil.eir.domain.InvariantId;
 import com.crisil.eir.domain.InvariantResult;
+import com.crisil.eir.domain.MaterialityTier;
 import com.crisil.eir.policy.exception.ExceptionCategory;
 import com.crisil.eir.policy.exception.ExceptionQueue;
 import com.crisil.eir.policy.exception.ExceptionRecord;
 import com.crisil.eir.policy.exception.FailureIsolation;
 import com.crisil.eir.policy.fee.rule.FeeClassificationResolution;
 import com.crisil.eir.policy.fee.rule.FeeClassificationResolver;
+import com.crisil.eir.policy.tier.EquivalenceTestGate;
+import com.crisil.eir.policy.tier.EquivalenceTestOutcome;
+import com.crisil.eir.policy.tier.EquivalenceTestSubject;
 import com.crisil.eir.policy.tier.TierAssignment;
 import com.crisil.eir.policy.tier.TierAssignmentResult;
 import java.math.BigDecimal;
@@ -94,13 +98,43 @@ import java.util.Set;
  *       {@link ExceptionRecord#ofSolve}, and never a fallback to the contractual rate (03 § 4.3).
  * </ul>
  *
+ * <h2>The tier is assigned, and then it is <em>permitted</em></h2>
+ *
+ * <p>The sequence diagram's {@code assign materiality tier} is one message and 03 § 10 is two rules.
+ * FR-107 assigns; FR-411 and FR-412 decide whether the assignment may be used. Until this unit,
+ * only the first ran: {@code TierAssignmentResult.requiresEquivalenceTest()} was true for every
+ * Tier 3 assignment and nothing asked it, {@code EquivalenceTestGate} had no caller outside its own
+ * package, and the tier reached exactly one consumer — {@link SolverTolerance#forTier}. So a 15-year
+ * zero-coupon instrument was assigned Tier 3 by {@code TIER_3_FULLY_COLLATERALISED_LOW_FEE}, solved
+ * on Tier 3's tolerance and recognised, with nothing recording that the permission was never sought.
+ * Reference case 9 measures the straight-line error on that instrument at <b>81.0% overstatement of
+ * year-one income</b> and 38.4% understatement of the final year, the two columns tying at
+ * 684,758.30 exactly — the 08 risk register's Cambodia failure mode arriving through an unwired gate
+ * rather than through a decision.
+ *
+ * <p>{@link #recognise} now consults {@link EquivalenceTestGate} between the projection and the
+ * solve, and {@link TierPermission#effectiveTier()} is what reaches {@link SolverTolerance#forTier}.
+ * <b>Between</b>, and not immediately after the assignment, because the subject FR-412 measures is
+ * derived by arithmetic off the projection's contractual leg — see {@link EquivalenceTestSubjects}.
+ * Before the solve, because the solve is what the permission licenses. It is not a sixth
+ * {@link OnboardingWork} stage: it is a map lookup and six comparisons, not one of the two stages
+ * 05 § 3.1 calls "expensive work", and the enum's declaration order is the statement of that
+ * document's five stages rather than of every call this class makes.
+ *
+ * <p><b>The permission does not ride on {@link OnboardingOutcome}</b>, and
+ * {@link OnboardingRecognition} says why at length: an outcome carrying an exception reports
+ * {@code QUARANTINED}, and a TG-1 demotion is the opposite of a quarantine — the contract is
+ * measurable and is measured, at Tier 2. So {@link #onboard} keeps its signature and its meaning,
+ * {@link #recognise} is the richer call, and {@link #onboardAll} files both kinds of entry.
+ *
  * <h2>No clock</h2>
  *
  * <p>Every date this class uses arrives as an input: the {@link AsAtBoundary} the population and the
- * source are read at, each posting's own {@code postedOn} for the fee rule lookup, and the request's
- * {@code initialRecognitionDate} for the tier policy's governance question. Nothing calls
- * {@code now()}. 03 § 1.1 and ADR-0003: a run that reads {@code Instant.now()} cannot be re-run,
- * which is DT-1.
+ * source are read at, each posting's own {@code postedOn} for the fee rule lookup, the request's
+ * {@code initialRecognitionDate} for the tier policy's governance question, and
+ * {@code boundary.businessAsOf()} as the reporting date the equivalence test is judged current
+ * against. Nothing calls {@code now()}. 03 § 1.1 and ADR-0003: a run that reads
+ * {@code Instant.now()} cannot be re-run, which is DT-1.
  */
 public final class InitialRecognition {
 
@@ -118,20 +152,47 @@ public final class InitialRecognition {
 
     private final FeeClassificationResolver feeRules;
     private final TierAssignment tierGate;
+    private final EquivalenceTestGate equivalenceTests;
     private final CashflowProjector projector;
     private final RateSolver solver;
 
     /**
+     * A pipeline with <b>no equivalence tests on file</b>.
+     *
+     * <p>Kept so that a caller who has not yet wired the 03 § 10.2 register still gets the second
+     * gate rather than no gate, and it resolves in the only direction a missing register can
+     * honestly resolve in: {@link EquivalenceTestGate#empty()} demotes every Tier 3 proposal to
+     * Tier 2 on {@code NO_TEST_ON_FILE}, breaches TG-1, and raises
+     * {@code STALE_EQUIVALENCE_TEST} against every contract affected. That is the conservative
+     * answer — Tier 2 is more expensive and more correct — and it is <em>loud</em>: one queue entry
+     * per contract, blocking the close until somebody either produces the tests or accepts the
+     * demotion with approval.
+     *
+     * <p>It is deliberately not a way to switch the gate off. A default that silently permitted
+     * Tier 3 would be the defect this unit closes, reintroduced as a convenience.
+     */
+    public InitialRecognition(FeeClassificationResolver feeRules, TierAssignment tierGate,
+        CashflowProjector projector, RateSolver solver) {
+        this(feeRules, tierGate, EquivalenceTestGate.empty(), projector, solver);
+    }
+
+    /**
      * @param feeRules  the versioned fee taxonomy (FR-201); resolution happens nowhere else
      * @param tierGate  the § 10 materiality gate with its approved Board threshold (FR-107)
+     * @param equivalenceTests the 03 § 10.2 register — the second gate (FR-411, FR-412, TG-1).
+     *                  Supplied rather than constructed for the same reason the projector is: the
+     *                  register is what decides whether a Tier 3 measurement is permitted, and a
+     *                  test has to be able to hand this class one that is empty, one that is stale
+     *                  and one that is current
      * @param projector the projection seam — supplied rather than constructed, which is what lets a
      *                  test count its calls and assert the gate ran first
      * @param solver    the solve seam, for the same reason
      */
     public InitialRecognition(FeeClassificationResolver feeRules, TierAssignment tierGate,
-        CashflowProjector projector, RateSolver solver) {
+        EquivalenceTestGate equivalenceTests, CashflowProjector projector, RateSolver solver) {
         this.feeRules = Objects.requireNonNull(feeRules, "feeRules");
         this.tierGate = Objects.requireNonNull(tierGate, "tierGate");
+        this.equivalenceTests = Objects.requireNonNull(equivalenceTests, "equivalenceTests");
         this.projector = Objects.requireNonNull(projector, "projector");
         this.solver = Objects.requireNonNull(solver, "solver");
     }
@@ -146,24 +207,56 @@ public final class InitialRecognition {
      */
     public static InitialRecognition standard(
         FeeClassificationResolver feeRules, TierAssignment tierGate) {
-        return new InitialRecognition(feeRules, tierGate,
+        return standard(feeRules, tierGate, EquivalenceTestGate.empty());
+    }
+
+    /**
+     * The production wiring with the 03 § 10.2 equivalence-test register attached.
+     *
+     * <p>The overload above supplies {@link EquivalenceTestGate#empty()}, which is a real register
+     * with nothing in it rather than an absent gate — see the four-argument constructor. This is the
+     * one a bank that performs the annual test calls.
+     */
+    public static InitialRecognition standard(
+        FeeClassificationResolver feeRules, TierAssignment tierGate,
+        EquivalenceTestGate equivalenceTests) {
+        return new InitialRecognition(feeRules, tierGate, equivalenceTests,
             new RegistryProjector(ProjectorRegistry.standard()), new BracketedNewtonSolver());
     }
 
     /**
-     * Recognises one contract.
+     * Recognises one contract, returning the disposition alone.
      *
-     * <p>Total: every request yields an outcome. There is no path that returns null, throws for a
+     * <p>Unchanged in signature and in meaning, so that every existing caller keeps compiling and
+     * keeps getting the same answer. <b>It does not carry the tier permission</b>: a caller that
+     * persists 04 § 2.1's {@code materiality_tier}, files the TG-1 result, or files the
+     * {@code STALE_EQUIVALENCE_TEST} entry must use {@link #recognise} instead, because
+     * {@link OnboardingOutcome#tier()} is the FR-107 <em>proposal</em> and the tier actually
+     * measured is {@link TierPermission#effectiveTier()}. {@link OnboardingRecognition} states why
+     * the two cannot be collapsed today and what a change to {@code OnboardingOutcome} would have
+     * to do.
+     */
+    public OnboardingOutcome onboard(String runId, AsAtBoundary boundary,
+        OnboardingRequest request) {
+        return recognise(runId, boundary, request).outcome();
+    }
+
+    /**
+     * Recognises one contract: the disposition, and the second gate's decision.
+     *
+     * <p>Total: every request yields a recognition. There is no path that returns null, throws for a
      * data condition, or leaves a contract without a disposition — FR-905, and
      * {@link com.crisil.eir.application.ContractResult}'s javadoc on why dropping one is the wrong
      * reading.
      *
      * @param runId    the run the outcome and any queue entry are stamped with (04 § 2.13)
-     * @param boundary the as-at boundary; carried for the record and never read as "now"
+     * @param boundary the as-at boundary; carried for the record, never read as "now", and — as
+     *                 {@code businessAsOf} — the reporting date the equivalence test is judged
+     *                 current against
      * @param request  the contract, its schedule, its unclassified postings and its classification
      *                 attributes
      */
-    public OnboardingOutcome onboard(String runId, AsAtBoundary boundary,
+    public OnboardingRecognition recognise(String runId, AsAtBoundary boundary,
         OnboardingRequest request) {
 
         Objects.requireNonNull(runId, "runId");
@@ -178,9 +271,10 @@ public final class InitialRecognition {
         MeasurementDecision decision = MeasurementGate.assess(request);
 
         if (decision.isRefused()) {
-            return OnboardingOutcome.quarantined(contractId, decision, List.of(), null, null, null,
-                work, ExceptionRecord.raise(contractId, runId, decision.refusal(),
-                    decision.detail(), payloadRef));
+            return OnboardingRecognition.ungated(
+                OnboardingOutcome.quarantined(contractId, decision, List.of(), null, null, null,
+                    work, ExceptionRecord.raise(contractId, runId, decision.refusal(),
+                        decision.detail(), payloadRef)));
         }
         if (!decision.eirApplies()) {
             // 05 § 3.1's FVTPL branch. Nothing below this line has run: not the fee lookup, not the
@@ -188,7 +282,8 @@ public final class InitialRecognition {
             // branch further down deliberately — a pipeline that computed everything and then chose
             // what to keep would satisfy every assertion about the OUTPUT and none about the cost,
             // and it is the shape 05 § 3.1 calls "waste, and worse".
-            return OnboardingOutcome.excluded(contractId, decision);
+            return OnboardingRecognition.ungated(
+                OnboardingOutcome.excluded(contractId, decision));
         }
 
         // ------------------------------------------------- 2. classify fees (rule set version)
@@ -203,9 +298,10 @@ public final class InitialRecognition {
             resolutions.add(resolution);
             Optional<ExceptionCategory> refusal = feeRefusal(resolution, submission);
             if (refusal.isPresent()) {
-                return OnboardingOutcome.quarantined(contractId, decision, resolutions, null, null,
-                    null, work, ExceptionRecord.raise(contractId, runId, refusal.get(),
-                        feeRefusalDetail(refusal.get(), resolution, submission), payloadRef));
+                return OnboardingRecognition.ungated(
+                    OnboardingOutcome.quarantined(contractId, decision, resolutions, null, null,
+                        null, work, ExceptionRecord.raise(contractId, runId, refusal.get(),
+                            feeRefusalDetail(refusal.get(), resolution, submission), payloadRef)));
             }
             postings.add(new FeePosting(submission.feeCode(), submission.amount(),
                 submission.postedOn(), resolution.classification(), submission.costFunction(),
@@ -226,25 +322,81 @@ public final class InitialRecognition {
             // entered the vector." Both mean the carrying amount the solver would target is wrong,
             // so a rate solved against it would be precise and meaningless. The projection is kept
             // on the outcome so the breach and its two operands stay readable.
-            return OnboardingOutcome.quarantined(contractId, decision, resolutions, tier, projection,
-                null, work, ExceptionRecord.raise(contractId, runId, ExceptionCategory.IC1_BREACH,
-                    InvariantId.IC_1 + " (" + InvariantId.IC_1.statement() + ") breached at initial"
-                        + " recognition: " + initialRecognitionCheck.detail() + ". Deviation "
-                        + initialRecognitionCheck.deviation().toPlainString(), payloadRef));
+            // Ungated, and it must be: the tier gate has not run, and a TierPermission fabricated
+            // for a Tier 3 assignment with no gate outcome is the one state that type refuses. The
+            // permission is absent rather than defaulted, exactly as the projection and the solve
+            // are absent from an outcome that never reached them.
+            return OnboardingRecognition.ungated(
+                OnboardingOutcome.quarantined(contractId, decision, resolutions, tier, projection,
+                    null, work,
+                    ExceptionRecord.raise(contractId, runId, ExceptionCategory.IC1_BREACH,
+                        InvariantId.IC_1 + " (" + InvariantId.IC_1.statement() + ") breached at"
+                            + " initial recognition: " + initialRecognitionCheck.detail()
+                            + ". Deviation " + initialRecognitionCheck.deviation().toPlainString(),
+                        payloadRef)));
         }
+
+        // ------------------------------------------- 4b. permit the tier (FR-411, FR-412, TG-1)
+        // Not an OnboardingWork stage; see the class comment. It sits here because FR-412's subject
+        // is arithmetic off the contractual leg above, and before the solve because the solve is
+        // what the permission licenses.
+        TierPermission permission = permit(runId, payloadRef, boundary, request, tier, projection);
 
         // ----------------------------------------------------------------------- 5. solve EIR
         work.add(OnboardingWork.SOLVE);
-        SolveResult solve = solver.solve(solveRequestFor(request.terms(), projection, tier));
+        MaterialityTier measuredTier = permission.effectiveTier();
+        SolveResult solve =
+            solver.solve(solveRequestFor(request.terms(), projection, measuredTier));
         Optional<ExceptionRecord> solveFailure = ExceptionRecord.ofSolve(contractId, runId,
-            solve.status(), "initial recognition of " + contractId + " under tier " + tier.tier()
-                + " (" + tier.basis() + "): " + solve.diagnostic(), payloadRef);
+            solve.status(), "initial recognition of " + contractId + " under tier " + measuredTier
+                + " (" + permission.describe() + "): " + solve.diagnostic(), payloadRef);
         if (solveFailure.isPresent()) {
-            return OnboardingOutcome.quarantined(contractId, decision, resolutions, tier, projection,
-                solve, work, solveFailure.get());
+            return new OnboardingRecognition(
+                OnboardingOutcome.quarantined(contractId, decision, resolutions, tier, projection,
+                    solve, work, solveFailure.get()),
+                permission);
         }
-        return OnboardingOutcome.recognised(contractId, decision, resolutions, tier, projection,
-            solve, work);
+        return new OnboardingRecognition(
+            OnboardingOutcome.recognised(contractId, decision, resolutions, tier, projection, solve,
+                work),
+            permission);
+    }
+
+    /**
+     * The second gate of 03 § 10: whether the proposed tier may actually be measured.
+     *
+     * <p><b>Consulted only for a Tier 3 proposal</b>, which is what
+     * {@code TierAssignmentResult.requiresEquivalenceTest()} answers. Not because the gate would
+     * misbehave otherwise — {@code EquivalenceTestGate.evaluate} answers a Tier 1 or Tier 2 subject
+     * with a vacuous {@code NOT_TIER_3} pass — but because publishing that pass per contract would
+     * put a TG-1 result no input can turn into a breach against every retail mortgage in the book.
+     * {@code OnboardingRun}'s javadoc names that shape directly: "An absent control is bad; a
+     * control that reads as coverage and cannot fail is worse, because nobody looks at it again."
+     * {@link TierPermission} refuses both halves structurally, so neither a missing consultation nor
+     * a fabricated one can survive an edit here.
+     *
+     * <p><b>The reporting date is {@code boundary.businessAsOf()}</b>, not the contract's initial
+     * recognition date. The gate's own javadoc defines {@code asOf} as the reporting date and
+     * reasons about it that way — "a test performed in June says nothing about whether a March close
+     * was defensible" — and {@code AsAtBoundary} pins {@code businessAsOf} to the original period end
+     * on a replay, so a replay of a closed period asks the same question and gets the same answer
+     * (DT-1). The initial recognition date was the other candidate and is the wrong one on a
+     * migrated book: it would demand 03 § 10.2 evidence for periods before the bank was under
+     * ACPIR at all, turning a legitimate migration into one queue entry per contract — and a control
+     * that is red by design gets argued down to a soft one within a quarter, which is the reasoning
+     * 03 § 9 records against TM-1.
+     */
+    private TierPermission permit(String runId, String payloadRef, AsAtBoundary boundary,
+        OnboardingRequest request, TierAssignmentResult tier, ProjectionResult projection) {
+
+        if (!tier.requiresEquivalenceTest()) {
+            return TierPermission.notRequired(tier);
+        }
+        EquivalenceTestSubject subject =
+            EquivalenceTestSubjects.subjectFor(request, projection, tier.tier());
+        EquivalenceTestOutcome outcome =
+            equivalenceTests.evaluate(subject, boundary.businessAsOf());
+        return TierPermission.gated(tier, outcome, runId, payloadRef);
     }
 
     /**
@@ -266,6 +418,26 @@ public final class InitialRecognition {
      * {@code runBatch} performs before it starts is reproduced here for the same reason its javadoc
      * gives: a duplicate "would overwrite one contract's figures with another's and the loss would
      * be invisible in the output".
+     *
+     * <p><b>The TG-1 entries are filed here and not on the outcome.</b>
+     * {@code ExceptionCategory.STALE_EQUIVALENCE_TEST} carries {@code stopsTheContract() == false},
+     * so a demoted contract is recognised with a Tier 2 rate <em>and</em> queued — the value-path
+     * filing {@code FailureIsolation}'s javadoc calls for: "A demotion belongs on the value path —
+     * {@code ExceptionRecord.raise} alongside a successful Tier 2 recomputation." It still blocks
+     * the close, because {@code ExceptionCategory.blocksClose()} is true for every category, and a
+     * population changing measurement basis between one close and the next is exactly what a close
+     * should surface.
+     *
+     * <p><b>TG-1 is deliberately absent from {@link OnboardingRun#POPULATION_INVARIANTS}.</b> A
+     * population with no Tier 3 contracts asserts TG-1 nowhere, so declaring it an obligation would
+     * make {@code unassertedInvariants()} name it — and therefore block the close — on every book
+     * without Tier 3 exposure. That is the reasoning {@code RunAggregate.POPULATION_INVARIANTS}
+     * records for leaving S3-1 out: "An obligation red on every performing book is a control that
+     * gets argued down to a soft one within a quarter." The complementary half that keeps the
+     * absence honest is structural rather than declarative: {@link TierPermission} cannot be
+     * constructed for a Tier 3 assignment with no gate outcome, so a Tier 3 contract that reached a
+     * solve has been through the gate by construction, and {@code OnboardingRun.invariants()}
+     * already drops ids it is not answerable for.
      *
      * @param queue every entry raised is filed here, in population order, so that two runs of one
      *              population file byte-identically (FR-903)
@@ -293,13 +465,17 @@ public final class InitialRecognition {
         List<OnboardingOutcome> outcomes = new ArrayList<>(ids.size());
         List<ExceptionRecord> unreadable = new ArrayList<>();
         for (String id : ids) {
-            FailureIsolation.Outcome<OnboardingOutcome> isolated = FailureIsolation.isolate(
+            FailureIsolation.Outcome<OnboardingRecognition> isolated = FailureIsolation.isolate(
                 id, runId, ExceptionCategory.MISSING_MANDATORY_FIELD,
-                () -> onboard(runId, boundary, requiredRequest(source, id, boundary)));
+                () -> recognise(runId, boundary, requiredRequest(source, id, boundary)));
             if (isolated.succeeded()) {
-                OnboardingOutcome outcome = isolated.value();
-                outcomes.add(outcome);
-                outcome.failure().ifPresent(queue::raise);
+                OnboardingRecognition recognition = isolated.value();
+                outcomes.add(recognition.outcome());
+                // Both kinds of entry, tier gate first, because the gate runs before the solve. A
+                // Tier 3 population with no test on file whose Tier 2 solve then finds no root
+                // raises two, and they are different facts: one is a control failure somebody has
+                // to clear, the other is a computation that produced no figure.
+                queue.raiseAll(recognition.queueEntries());
             } else {
                 // The contract never reached the gate, so there is no MeasurementDecision to build
                 // an outcome around. Carried as its own list rather than fabricated into an
@@ -343,20 +519,34 @@ public final class InitialRecognition {
      * rather than being a column written and never read. A pipeline that assigned a tier and solved
      * at the standard tolerance would satisfy FR-107's letter and lose its point.
      *
+     * <p><b>The tier argument is the {@link MaterialityTier} the second gate permitted, not the one
+     * FR-107 proposed.</b> Stated as the enum rather than as a {@code TierAssignmentResult} so that
+     * the call site cannot reach {@code tier.tier()} out of habit and undo the demotion.
+     *
+     * <p>Note honestly what a demotion does and does not change here today:
+     * {@code SolverTolerance.forTier} maps {@code TIER_2} and {@code TIER_3} to the same
+     * {@code standard()} tolerance, so a Tier 3 → Tier 2 demotion does not move the convergence
+     * criterion. The demotion's effect is on the tier that is recorded and on the TG-1 result and
+     * queue entry that accompany it — and, if policy ever elects
+     * {@code SolverTolerance.tightened()} for a long-tenor Tier 2 pool as FR-406 contemplates, on
+     * the criterion too. That is why the effective tier is passed even though the two tolerances
+     * coincide: a call site that passed the proposal would be correct by coincidence and would
+     * silently stop being correct the day the Tier 2 election is made.
+     *
      * <p>The seed goes through {@link ConventionSelector#rateUnder} rather than straight off the
      * terms. {@code SolveRequest}'s javadoc requires "the contractual rate in the convention's
      * units", and a vector that failed the periodic-index precondition falls back to actual dating,
      * whose {@code periodsPerYear} is one: pairing a monthly rate with a year fraction is an
      * annualisation round-trip in disguise.
      */
-    private static SolveRequest solveRequestFor(
-        ContractTerms terms, ProjectionResult projection, TierAssignmentResult tier) {
+    static SolveRequest solveRequestFor(
+        ContractTerms terms, ProjectionResult projection, MaterialityTier measuredTier) {
         BigDecimal seed = ConventionSelector
             .rateUnder(projection.recommendedConvention(), terms.contractualRate())
             .periodic();
         return SolveRequest.of(projection.expected(), projection.initialCarryingAmount(),
                 projection.recommendedConvention(), seed)
-            .withTolerance(SolverTolerance.forTier(tier.tier()));
+            .withTolerance(SolverTolerance.forTier(measuredTier));
     }
 
     /**
