@@ -19,27 +19,27 @@ import java.util.Objects;
  *
  * <p>Specification: {@code docs/06-api-spec.md} 07 § 4.
  */
-public final class AccessControlModule implements ApiModule {{
+public final class AccessControlModule implements ApiModule {
 
     private final EirService service;
 
-    public AccessControlModule(EirService service) {{
+    public AccessControlModule(EirService service) {
         this.service = Objects.requireNonNull(service, "service");
-    }}
+    }
 
     /** The engine this module reads through. Protected from an unused-field warning while stubbed. */
-    protected EirService service() {{
+    protected EirService service() {
         return service;
-    }}
+    }
 
     @Override
-    public void register(Routes routes) {{
+    public void register(Routes routes) {
         Objects.requireNonNull(routes, "routes");
         // Nothing yet. See the class javadoc.
-    }}
+    }
 
     @Override
-    public String specSection() {{
+    public String specSection() {
         return "07 § 4";
-    }}
-}}
+    }
+}
