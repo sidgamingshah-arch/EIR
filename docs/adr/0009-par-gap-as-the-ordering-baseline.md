@@ -110,10 +110,21 @@ so the ratio is roughly the iteration-times-period count: two to three orders of
 typical retail schedule.
 
 Design-time sizing put that at **0.2 core-hours** per 10M-contract close for the chosen approach
-against **922** for a second solve. Those two figures are an estimate, not a measurement on this
-codebase — they are recorded because the *order of magnitude* is what the decision turns on, and it
-is not close. A benchmark belongs alongside the batch-sizing work in
-[08](../08-roadmap.md), where a close is actually timed end to end.
+against **922** for a second solve. Those two figures were an estimate, not a measurement on this
+codebase — recorded because the *order of magnitude* is what the decision turns on, and it is not
+close.
+
+**Now measured, and the 0.2 was optimistic by at least 2.7×.**
+[`tools/load-harness/RESULTS.md`](../../tools/load-harness/RESULTS.md) times a synthetic close end to
+end: **0.0534 core-hours at 1,000,000 contracts, single-threaded**, which is **0.53 core-hours** for
+10M at the same rate — and worse if the superlinearity that measurement also found persists, since
+the per-contract cost rises from 59 µs at 100,000 contracts to 197 µs at 1,000,000 as the run's live
+set grows.
+
+**The decision is unaffected, and the reason is worth stating rather than assuming.** The argument
+above turns on a *ratio* of two to three orders of magnitude, not on either absolute. A 2.7× error in
+the smaller figure does not approach 922, and no plausible correction to it would. So the estimate is
+corrected here and the decision stands. The figure to quote from now on is the measured one.
 
 Reusing the leg is what makes the correction affordable at book scale, and the two-way verification
 above is what licenses the reuse.

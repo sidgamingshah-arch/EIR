@@ -120,7 +120,7 @@ forbids.
 | `eir-policy` | Versioned policy and fee rule sets; maker–checker; **mandatory** impact preview | FR-201…210 | `policy/{approval,preview,registry}` — five states, not a flag; the activation gate refuses EFFECTIVE without a preview for *that draft* |
 | **Routing table** | Driver→mechanism mapping as versioned data, not code | FR-504…507, [ADR-0006](adr/0006-configurable-event-routing.md) | `policy/routing` — a text format displaces `ofSpecDefaults`, and a registry selects the version in force |
 | Tier assignment | Tier 1/2/3 with equivalence-test tracking | FR-107, FR-411…412 | `policy/tier` — the TG-1 evaluator that was previously a label with no logic |
-| `eir-persistence` | Bitemporal schema, partitioning, Flyway migrations | [04](04-data-model.md) | **DDL only.** Two PostgreSQL 16 migrations, 54 tables, verified by execution. No ORM — see below |
+| `eir-persistence` | Bitemporal schema, partitioning, Flyway migrations | [04](04-data-model.md) | **DDL only, and now with an implementation beside it.** Two PostgreSQL 16 migrations, 54 tables, verified by execution. `eir-persistence-jdbc` ([ADR-0011](adr/0011-jdbc-persistence-behind-a-profile.md)) implements all seven ports over that DDL with both temporal predicates on every read, so a read as at an earlier `recorded_at` returns the version set recorded then — which is the first time DT-1 has anything real to check, since the in-memory book answers the same thing at every boundary. Behind a `jdbc` profile: the driver and Flyway are not cached, and `mvn -o install` must keep building the whole engine |
 | Exception queue | All categories; per-contract failure isolation | FR-905 | `policy/exception` — the ten categories of 04 § 3, with the barrier that captures a per-contract failure instead of propagating it |
 | Fee & cost taxonomy | **The critical path.** Fee master with EIR-eligibility flags; `cost_function` sourcing from HR and cost-centre data | FR-203 | `policy/fee` — the rule set, resolver, cost-function type, commitment thresholds and exclusion rules. **The sourcing half is not code and is not done** |
 
@@ -138,7 +138,9 @@ the phase is not:
   classifies a fee once someone has said what it is. The months-long exercise § 0 names — sourcing HR
   and cost-centre data along the ACPIR 53 selling-agent-versus-appraisal line it is structured along
   neither — is a data problem owned with other teams, and nothing here advances it.
-- **`eir-persistence` is DDL, not persistence.** The root enforcer bans JPA, Hibernate, Spring and
+- ~~**`eir-persistence` is DDL, not persistence.**~~ **Answered by `eir-persistence-jdbc`**, which is
+  hand-written JDBC rather than an ORM, so the paragraph below still describes the constraint the
+  implementation was written under. The root enforcer bans JPA, Hibernate, Spring and
   Jackson across every module, so wiring an ORM needs that ban restructured — a shared root-pom
   change that deserves its own attention. Migrations use Flyway's naming so that wiring is an
   addition rather than a rewrite.
@@ -146,9 +148,10 @@ the phase is not:
   nine modules and four now exist. Phase 2 never promised the rest, but "policy, routing and
   persistence delivered" should not be read as an engine anything can call: there is no
   orchestration layer, no run, no journal and no API.
-  *Superseded in part:* `eir-gl` landed in Phase 5, then `eir-application`, then `eir-api`, so seven of
-  the nine exist. `eir-batch` and `eir-app` still do not — and `eir-api` now serves the console
-  `eir-app` was to have been.
+  *Superseded:* `eir-gl` landed in Phase 5, then `eir-application`, then `eir-api`, then `eir-batch`
+  and `eir-persistence-jdbc`. **All nine of 05 § 2's modules now exist**, counting `eir-api` as the
+  console `eir-app` was to have been — it serves 06's surface and the month-end page from one module,
+  and a separate front-end module would have been a second deployable for one HTML file.
 
 > **Start the fee and cost taxonomy in Phase 0, not Phase 2.** It appears here because that is where
 > it completes, but it is the longest-lead item in the programme and it depends on other teams. If
@@ -309,18 +312,49 @@ goes first, and it is the one that never needs a reconstructed rate at all.
 | Close workflow | Hard gates; immutable closed periods; read-only partitions | FR-901…902 | `policy/close` — refusals as values, exception acceptance under four eyes, **CL-1** on immutability |
 | Replay | Shadow-table replay with byte comparison; nightly sampled run | FR-903, C-12 | `policy/replay` — **DT-1** with a scale-sensitive comparison and the policy-then-in-force half |
 | Reconciliations | SL-1, C-14 to core banking, C-04, C-05 | FR-803…804 | `policy/reconciliation` — **RC-1**; C-04 and C-05 landed in Phase 3 |
-| `eir-batch` | Spring Batch partitioned runs; restartability; per-contract isolation | [ADR-0007](adr/0007-spring-batch-for-runs.md) | **Deferred.** Unblocked by [ADR-0010](adr/0010-framework-ban-fails-closed.md); see below |
-| `eir-api` | Full surface including the trace endpoint | [06](06-api-spec.md) | **Delivered as a working tool, not the full 06 surface.** Seven endpoints over eir-application's entry points plus a month-end console: the book, initial recognition, the run, repair, four-eyes acceptance, posting, the close and replay. Framework-free on `com.sun.net.httpserver`, no ADR-0010 exemption, so the repo still builds and runs offline. 06's trace endpoint, pagination and auth are not built |
+| `eir-batch` | Spring Batch partitioned runs; restartability; per-contract isolation | [ADR-0007](adr/0007-spring-batch-for-runs.md) | **Delivered.** `AmortisationBatchJob` over `PartitionPlan`, restart from `RunProgressStore`, per-contract isolation through FR-905's existing barrier, and `NightlyReplaySchedule` — which gives `NightlyReplayReport` the caller this section recorded it lacking. Offline-safe: Spring Batch 5.1.2 is cached, and the module takes ADR-0010's exemption with the authority named in its pom |
+| `eir-api` | Full surface including the trace endpoint | [06](06-api-spec.md) | **Delivered.** 41 routes across eleven modules on one `Routes` seam: the trace endpoint (FR-808), runs and periods with 06's specified 409 on a refused close, policy versions behind the impact-preview gate (FR-210), fee rule sets and routing tables, the exception work queue, the movement schedule (FR-805, now under `InvariantId.MV_1`), the four reconciliation reports, the approximations register and Ind AS 107 extract (FR-809), contracts and events, the five transition endpoints, and FR-906's role model. Framework-free on `com.sun.net.httpserver`, no ADR-0010 exemption, so the repo still builds and runs offline. **Authorisation is modelled and not enforced** — see the qualification below |
 | `eir-application` | Framework-free orchestration: ports, onboarding, the per-contract run, replay, the run-level close | 05 § 3.1–3.3 | Delivered. The layer that gives every Phase 5 control a caller; see the first qualification below |
 
 **Exit gate:** a 10M-contract synthetic close inside 4 hours; a replay of that close is
 byte-identical; the close workflow refuses to close on any red invariant.
 
-**Exit gate: one of three met.** The close workflow refuses to close on any red invariant —
-that is `policy/close`, and it is the third clause. The first two are load and replay *at scale*,
-and neither is met: there is no run to load, so there is no 10M-contract close to time and no close
-to replay. What exists is the arithmetic each of those gates would be measuring, with the controls
-that would decide whether the answer was right.
+**Exit gate: two of three met, and the third is now blocked on something other than speed.**
+Measured by [`tools/load-harness`](../tools/load-harness/RESULTS.md), which replaces the estimates
+this section used to carry.
+
+- **Clause 3 — refuses to close on any red invariant: met.** `policy/close`, as before. Every run in
+  the harness also reported `red invariants 0`, `blocking reasons 0`, `mayClose true`, and the
+  population accounting closed exactly (`unaccounted 0`) at every size.
+- **Clause 2 — a replay of that close is byte-identical: met, and measured at scale.** Bit-identical
+  at 10,000, 100,000 and 300,000 contracts, with **1,506,000 figures compared** at 300,000. Not a
+  spot check and not an extrapolation. What it does *not* cover is the persistence round trip: both
+  sides reduce through `ShadowRun.figures`, so the arithmetic is genuinely tested and a scale lost on
+  the way into a database would show in `eir-persistence-jdbc`'s live-cluster suite and cannot show
+  here.
+- **Clause 1 — a 10M-contract close inside 4 hours: not met as measured, and the reason is the
+  finding.** No 10M close was run. The largest actually run was **1,000,000 contracts in 3 min 16 s**
+  single-threaded, extrapolating to **0.55 h** for 10M — comfortably inside four hours *on time*. The
+  binding constraint is heap: peak was **8.3 GiB at 1M**, so 10M in one JVM needs on the order of
+  **80 GiB** and a **~19 GB** retained live set. This section said "the 4-hour figure is untested and
+  remains an estimate"; it is now tested at a tenth of the population and the timing is not the
+  problem. **A 10M close is not a single-JVM workload**, and that was never stated before. Partitioning
+  is not an optimisation here — it is what makes the gate reachable.
+
+**The measurement also produced a falsifiable argument for
+[ADR-0007](adr/0007-spring-batch-for-runs.md), where there was an assumed one.** The per-contract cost
+is flat to 100,000 contracts (59 µs) and then rises — 80 µs at 300,000, **197 µs at 1,000,000**. The
+arithmetic per contract is identical at every size; what grows is the live set, because
+`MonthEndRun.Completion` keeps every `ContractComputation` and `RunAggregate` keeps every
+`ContractResult`, at ~1.9 KB retained per contract. A partitioned run over bounded slices should hold
+that flat and recover the 59 µs figure, which would put 10M at 0.16 h. `eir-batch` exists to test that
+prediction; nothing has tested it yet.
+
+**And [ADR-0009](adr/0009-par-gap-as-the-ordering-baseline.md)'s costing is corrected.** Its 0.2
+core-hours per 10M close was a design-time estimate; measured, it is **0.53 core-hours** — optimistic
+by 2.7×. The ADR's decision turns on a ratio of two to three orders of magnitude against 922
+core-hours for a second solve, so a 2.7× error in the smaller figure changes nothing, and the ADR now
+says so with the measured number.
 
 **Why the Spring half is deferred rather than blocked.** Central is reachable and Spring Batch
 resolves; this is a choice. Spring Batch is the *runner*, and wiring a runner with no database
@@ -377,13 +411,37 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   quarantined; and `RunClose.evidence()` showed SL-2 twice — found by rendering an invariant list to
   a person for the first time, which is a test no unit had.
 
-  **What still has no caller**, stated as narrowly as it now deserves: `NightlyReplayReport` is
-  built by `ReplayUseCase.replayNightly` and nothing schedules it, which is `eir-batch`'s job;
-  nothing in `eir-application` reaches `policy/transition` at all; and — the one that matters —
-  **`EquivalenceTestGate` has no caller**, so FR-411/FR-412's Tier 3 permission is never asked for.
-  See below.
+  ~~**What still has no caller**~~ — **all three closed.** `NightlyReplayReport` is scheduled by
+  `eir-batch`'s `NightlyReplaySchedule`. `eir-application/transition` reaches `policy/transition`,
+  running the ACPIR 19 day-1 valuation over a book and reporting migration coverage against both
+  deadlines. And `EquivalenceTestGate` is called by `InitialRecognition` for every Tier 3 assignment
+  — the item that mattered, and the two seam defects that closing it exposed are recorded below.
 
-- **The Tier 3 permission gate is unwired, and it is the highest-value open item in the engine.**
+- ~~**The Tier 3 permission gate is unwired.**~~ **Closed.** `InitialRecognition.recognise` consults
+  `EquivalenceTestGate` for every Tier 3 assignment and returns a `TierPermission`:
+  `NO_TEST_ON_FILE` demotes to Tier 2 and raises `STALE_EQUIVALENCE_TEST`, and FR-412 refuses the
+  shortcut outright for zero-coupon and deep-discount instruments at any tenor. `populationId` is
+  `productId + ":" + segment`, and the subject is derived with
+  `EquivalenceTestSubject.couponBearingAtPar` — lifetime interest is total contractual inflows less
+  principal, which is arithmetic on the projection rather than the guess that would have defeated the
+  gate. TG-1 is deliberately **not** in `OnboardingRun.POPULATION_INVARIANTS`, for the reason
+  `RunAggregate` records for leaving S3-1 out.
+
+  **Two defects the wiring found afterwards, both at seams and neither visible to the unit that built
+  the gate.** `EirService` called `InitialRecognition.onboard`, which returns the disposition alone
+  and *drops* the permission — so a Tier 3 contract through HTTP had its gate consulted, was demoted,
+  was solved on Tier 2's tolerance, and came back reporting `TIER_3` with no exception, which is this
+  register's Cambodia row arriving through a dropped return value rather than through a decision. And
+  `OnboardingRun.blocksClose()` read breaches, the quarantine count and `assertedNothing`, none of
+  which a demotion trips: `STALE_EQUIVALENCE_TEST` does not quarantine, so `describeClose()` printed
+  "close may proceed" over a population whose measurement basis had changed while
+  `ExceptionQueue.blocksClose()` correctly said otherwise. The run now carries what it raised and has
+  a fourth reason reading it. The unit that built the gate had *named both* in javadoc as changes it
+  could not make; neither was found by a test.
+
+- **Superseded, and kept because it is the argument that got the gate built** — and because the
+  figure in it is the reason the gate matters. The reading that follows describes the position before
+  the item above closed it.
   `TierAssignment` assigns the tier and `InitialRecognition` uses it for one thing: the solver's
   tolerance. `TierAssignmentResult.requiresEquivalenceTest()` is true for every Tier 3 assignment
   and nothing asks it. `EquivalenceTestGate` — built in Phase 2 specifically because "until now
@@ -400,13 +458,29 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   an `OnboardingRequest` or a `ProjectionResult`: the first is a judgement about how a contract maps
   to an equivalence-test population, and the third needs a coupon leg separated from principal
   repayment across a schedule shape, which is projector work. Handing a guessed coupon total to the
-  gate whose purpose is catching a fabricated approximation would defeat the gate. The month-end and replay paths
-  have callers; the nightly schedule and the transition jobs do not.
+  gate whose purpose is catching a fabricated approximation would defeat the gate — which is why the
+  subject is now derived from the projection's own contractual inflows rather than supplied.
+- **Authorisation is modelled and not enforced, and the API says so on every response.**
+  `eir-policy/access` is FR-906's role model as values — capabilities, roles, principals, a grant
+  register, and a decision — with the maker-cannot-be-the-checker comparison borrowed from
+  `FourEyes.sameIdentity` rather than restated for a fifth time. What it is not is authentication:
+  07 § 7 specifies OAuth2 client credentials over TLS 1.3 with an external secret manager, none of
+  which is in this repository, so the identity on a request is asserted by the caller on a header and
+  every response repeats that. `GET /api/access/coverage` publishes the gap as a value, derived from
+  `Routes.registeredRoutes()`: **41 routes registered, 4 enforced, 36 counted as gaps, 1 owing no
+  guard.** That endpoint previously read a hand-maintained list of nine and so reported a gap of eight
+  over a surface of forty — a control that read as coverage, which is why the inventory now comes from
+  the registration and cannot drift from it.
+
 - **`read-only partitions` is schema, not code.** FR-902's partition-level enforcement lives in
   V2's DDL (verified by execution in Phase 2); the Java models the *restatement artefact* that makes
   immutability workable, not the lock.
-- **The 4-hour figure is untested and remains an estimate**, as does ADR-0009's core-hour costing.
-  A load test belongs with `eir-batch`.
+- ~~**The 4-hour figure is untested and remains an estimate**, as does ADR-0009's core-hour
+  costing.~~ **Both measured** — see the exit-gate reading above and
+  [`tools/load-harness/RESULTS.md`](../tools/load-harness/RESULTS.md). What replaces this
+  qualification is a narrower and more useful one: every figure is in-memory and single-threaded.
+  A real close reads seven ports over JDBC and the I/O is absent from all of it, so the numbers bound
+  the arithmetic's cost and not a deployment's.
 
 **The one qualification `eir-application` adds rather than removes.** Its four units were built in
 parallel and **carry no independent adversarial review** — all four reviewers failed on the session

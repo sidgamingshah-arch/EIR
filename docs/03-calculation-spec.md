@@ -1031,7 +1031,7 @@ units shipped without, and the third pass over this seam:
 |---|---|
 | `ContractPipeline` threw on `Mechanism.NONE` alongside `DERECOGNITION`, so every contract whose driver a bank had elected as immaterial was quarantined, every month | control with no caller, in the strict direction |
 | `RoutingTable` accepted `DERECOGNITION` as a driver's treatment, which derecognises every event on that driver with no substantiality assessment | missing guard, at the artefact a maker–checker gate approves |
-| `TierAssignmentResult.requiresEquivalenceTest()` is true for every Tier 3 assignment and `InitialRecognition` never asks; `EquivalenceTestGate` has no caller outside its own package | control with no caller, in the permissive direction — **open**, see below |
+| `TierAssignmentResult.requiresEquivalenceTest()` is true for every Tier 3 assignment and `InitialRecognition` never asks; `EquivalenceTestGate` has no caller outside its own package | control with no caller, in the permissive direction — **closed**, see below |
 
 **The `NONE` pair is the fourth family in both directions at once.** `Mechanism.NONE` means "no EIR
 consequence", which is precisely a roll-forward; throwing on it was the pipeline being *too strict*
@@ -1046,17 +1046,49 @@ because derecognition is the *conclusion* of the substantiality assessment reach
 never a treatment a driver carries. One refusal when a table is authored beats a wrong number per
 contract for as long as the version stays in force.
 
-**The tier finding is open, and deliberately.** `requiresEquivalenceTest()`'s javadoc says a Tier 3
-assignment "is only usable once the equivalence test has passed" and that § 10.3 "refuses it
-outright for zero-coupon and deep-discount instruments at any tenor" — Case 9's 81.0% year-one
-overstatement. `EquivalenceTestGate` implements all of it, including `NO_TEST_ON_FILE` demoting to
-Tier 2 and raising an exception. Nothing calls it. Wiring it needs an `EquivalenceTestSubject`, and
-three of its six fields — `populationId`, `redemptionAmount`, `contractualCouponTotal` — are not
-derivable from an `OnboardingRequest` or a `ProjectionResult` without a judgement about how a
-contract maps to an equivalence-test population and how a coupon leg is separated from principal
-repayment across a schedule shape. Supplying a guessed `contractualCouponTotal` to the gate whose
-purpose is catching a fabricated approximation would be the worst available version of this fix, so
-it is recorded rather than half-made. It is the top item in [08](08-roadmap.md)'s Phase 5 tail.
+**The tier finding is closed, and how it closed is the more useful record.** It was left open on a
+stated reason: wiring `EquivalenceTestGate` needs an `EquivalenceTestSubject`, and three of its six
+fields — `populationId`, `redemptionAmount`, `contractualCouponTotal` — are not derivable from an
+`OnboardingRequest` or a `ProjectionResult` without a judgement about how a contract maps to an
+equivalence-test population and how a coupon leg is separated from principal repayment across a
+schedule shape. Supplying a *guessed* `contractualCouponTotal` to the gate whose purpose is catching a
+fabricated approximation would have been the worst available version of the fix.
+
+What resolved it was noticing that two of the three are arithmetic rather than judgement.
+Contractual coupon total is total contractual inflows less principal — a sum over the projection the
+engine has already built, not an estimate — and the redemption amount is the final principal flow.
+`EquivalenceTestSubject.couponBearingAtPar` takes them that way, with
+`discountInstrument` for a vector carrying no interest leg. Only `populationId` was a judgement, and
+it is a *policy* one: `productId + ":" + segment`, decided and recorded rather than inferred.
+`InitialRecognition.recognise` now consults the gate for every Tier 3 assignment and returns a
+`TierPermission` carrying the effective tier, the TG-1 result and any queue entry.
+
+**Three further findings, from wiring that gate to callers and merging seventeen parallel units.**
+This is the fifth time this document has recorded the same lesson, and it arrived the same way:
+
+| Finding | Family |
+|---|---|
+| `EirService` called `InitialRecognition.onboard`, which returns the disposition and **drops** the `TierPermission` — so a Tier 3 contract through HTTP was gated, demoted, solved on Tier 2's tolerance, and reported back as `TIER_3` with no exception | control with no caller, in the permissive direction |
+| `OnboardingRun.blocksClose()` read breaches, the quarantine count and `assertedNothing`, and a TG-1 demotion trips none: `STALE_EQUIVALENCE_TEST` does not quarantine, so `describeClose()` printed "close may proceed" while `ExceptionQueue.blocksClose()` said otherwise | one rule, two places, with two answers |
+| `AccessControlModule`'s coverage report read a hand-maintained inventory of nine routes while forty-one were registered, so it named a gap of eight over a surface it had never seen | control that reads as coverage |
+| `EquivalenceTestGate`'s same-day tie-break ranked on `excessOverThresholdBps()`, which clamps at zero — two duplicates that both passed compared equal, and the governing test fell to the register's list order | control that cannot fail, in the case it was written for |
+| `Json.Obj` took the second value for a repeated key silently, so a response that assembled a figure in two branches published one and discarded the other | silent loss on the value path |
+
+**The first two were named in javadoc by the unit that built the gate, as changes it could not make,
+and neither was found by a test.** That is the honest reading and it cuts both ways: a unit that
+writes down what it cannot reach is doing the right thing, and a written-down defect is still a
+defect until somebody with the reach closes it. Both are now closed with the assertion that pinned
+the divergence *inverted* rather than deleted — `TierPermissionTest` asserted the run said false while
+the queue said true, and now asserts they agree and that nothing was quarantined and no invariant
+breached, so it cannot pass for the wrong reason.
+
+**And every one of the five is mutation-verified.** Reverting each guard fails the test that claims
+it; the headroom tie-break fails two different tests under two different mutations. That matters
+because the fourth of them was, on the first attempt, a control that could not fail: the branch where
+the route seam cannot enumerate is unreachable over a socket, so the first mutation run passed and
+proved the test worthless. It has its own test now. Nineteen defects of this family have been found in
+this programme, and the standing mitigation — mutate the implementation to prove the test can fail at
+all — caught one more here, in a fix for a defect of exactly the same shape.
 
 **A fourth family, and the one this pair is really about: an unwired control is wrong in whichever
 direction nobody checked.** The first finding is the mirror image of everything above it — not a
