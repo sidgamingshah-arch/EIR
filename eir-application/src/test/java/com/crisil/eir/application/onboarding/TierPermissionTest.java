@@ -579,17 +579,41 @@ class TierPermissionTest {
                 .isEmpty();
             assertThat(queue.blocksClose())
                 .as("04 § 3: the entry blocks the close until somebody accepts the demotion with"
-                    + " approval. THE QUEUE IS THE AUTHORITY HERE, NOT THE RUN —"
-                    + " OnboardingRun.blocksClose() reads breaches, quarantine count and"
-                    + " assertedNothing, and a TG-1 demotion trips none of the three: TG-1 is"
-                    + " deliberately not a population obligation and the contract's disposition is"
-                    + " RECOGNISED. That divergence is recorded on InitialRecognition.onboardAll"
-                    + " and is a change to OnboardingRun, which this unit does not own")
+                    + " approval")
                 .isTrue();
+
+            // This assertion was .isFalse() when the unit that built the gate wrote it, pinning a
+            // divergence it could not close: OnboardingRun.blocksClose() read breaches, the
+            // quarantine count and assertedNothing, and a TG-1 demotion trips none of the three.
+            // TG-1 is deliberately not a population obligation, the disposition stays RECOGNISED
+            // because 03 § 10.2's consequence is Tier 2 measurement rather than a halt, and the run
+            // asserted plenty. So describeClose() printed "close may proceed" over a population
+            // whose measurement basis had changed while the queue said otherwise -- two answers to
+            // one question. The run now carries what it raised and has a fourth reason reading it.
             assertThat(run.blocksClose())
-                .as("pinned deliberately, so the divergence above is visible rather than assumed:"
-                    + " the run object alone does not know the population changed measurement basis")
-                .isFalse();
+                .as("the run and the queue must agree; the run knowing less than the queue about"
+                    + " its own entries is how an operator reads a clean close over a demotion")
+                .isTrue();
+            assertThat(run.blockingEntries())
+                .as("and it is the demotion that blocks, not something incidental")
+                .singleElement()
+                .satisfies(entry -> {
+                    assertThat(entry.contractId()).isEqualTo("C-WCDL");
+                    assertThat(entry.category())
+                        .isEqualTo(ExceptionCategory.STALE_EQUIVALENCE_TEST);
+                });
+            assertThat(run.quarantinedCount())
+                .as("nothing was quarantined, which is exactly why the other three reasons could"
+                    + " not see this and a test on quarantine alone would pass")
+                .isZero();
+            assertThat(run.breaches())
+                .as("and no invariant breached either, for the same reason")
+                .isEmpty();
+            assertThat(run.describeClose())
+                .as("an operator reading one line must see the block AND what to act on")
+                .contains("CLOSE BLOCKED")
+                .contains("C-WCDL")
+                .doesNotContain("close may proceed");
         }
 
         @Test

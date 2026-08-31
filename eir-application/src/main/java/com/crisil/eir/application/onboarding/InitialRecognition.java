@@ -428,20 +428,23 @@ public final class InitialRecognition {
      * population changing measurement basis between one close and the next is exactly what a close
      * should surface.
      *
-     * <p><b>A gap this unit cannot close, named rather than left to be discovered.</b> The queue is
-     * the authority on whether a TG-1 demotion blocks the close, and the {@link OnboardingRun}
-     * returned here does not know about it. {@code OnboardingRun.blocksClose()} reads three things —
-     * a published invariant breach, the quarantine count, and whether the run asserted nothing — and
-     * a demoted contract trips none of them: TG-1 is deliberately not a population obligation (next
-     * paragraph), and the contract's disposition is {@code RECOGNISED} because
-     * {@code STALE_EQUIVALENCE_TEST} does not stop it. So {@code run.describeClose()} prints "close
-     * may proceed" over a population whose measurement basis changed, while
-     * {@code queue.blocksClose()} correctly says otherwise — and that method's own javadoc claims
-     * its second bullet covers "every category {@code ExceptionCategory#blocksClose()}", which this
-     * change makes untrue. Callers must gate on the queue. Closing it properly means giving
-     * {@code OnboardingRun} sight of the permissions, which is a change to a type this unit does not
-     * own; {@code TierPermissionTest.queueEntriesAreFiled} pins both sides so the divergence is
-     * visible rather than assumed.
+     * <p><b>The gap this unit named, and how it was closed.</b> As built, the {@link OnboardingRun}
+     * returned here did not know about the queue, and {@code OnboardingRun.blocksClose()} read three
+     * things — a published invariant breach, the quarantine count, and whether the run asserted
+     * nothing. A TG-1 demotion trips none of them: TG-1 is deliberately not a population obligation
+     * (next paragraph), and the contract's disposition stays {@code RECOGNISED} because
+     * {@code STALE_EQUIVALENCE_TEST} does not stop it — 03 § 10.2's consequence is measurement at
+     * Tier 2, not a halt. So {@code run.describeClose()} printed "close may proceed" over a
+     * population whose measurement basis had changed, while {@code queue.blocksClose()} correctly
+     * said otherwise: two answers to one question.
+     *
+     * <p>Closed at the coordinator's merge, because it needed a change to {@code OnboardingRun}. The
+     * run now carries {@code raised} — every entry it filed, in population order — and
+     * {@code blocksClose()} has a fourth reason reading it, so a blocking entry counts whatever the
+     * contract's disposition. The run's own list rather than the queue: the queue is the caller's
+     * sink and may hold other runs' entries, so a run consulting it would report somebody else's
+     * block and would report nothing when handed a fresh one. Both sides now agree, and
+     * {@code TierPermissionTest.queueEntriesAreFiled} pins them.
      *
      * <p><b>TG-1 is deliberately absent from {@link OnboardingRun#POPULATION_INVARIANTS}.</b> A
      * population with no Tier 3 contracts asserts TG-1 nowhere, so declaring it an obligation would
@@ -479,6 +482,11 @@ public final class InitialRecognition {
 
         List<OnboardingOutcome> outcomes = new ArrayList<>(ids.size());
         List<ExceptionRecord> unreadable = new ArrayList<>();
+        // What this run raised, kept alongside the queue rather than instead of it. The queue is the
+        // caller's sink and may hold other runs' entries; this is the run's own record, and it is
+        // what lets OnboardingRun.blocksClose() see a TG-1 demotion -- which quarantines nothing and
+        // so tripped none of its other three reasons.
+        List<ExceptionRecord> raised = new ArrayList<>();
         for (String id : ids) {
             FailureIsolation.Outcome<OnboardingRecognition> isolated = FailureIsolation.isolate(
                 id, runId, ExceptionCategory.MISSING_MANDATORY_FIELD,
@@ -490,6 +498,7 @@ public final class InitialRecognition {
                 // Tier 3 population with no test on file whose Tier 2 solve then finds no root
                 // raises two, and they are different facts: one is a control failure somebody has
                 // to clear, the other is a computation that produced no figure.
+                raised.addAll(recognition.queueEntries());
                 queue.raiseAll(recognition.queueEntries());
             } else {
                 // The contract never reached the gate, so there is no MeasurementDecision to build
@@ -497,10 +506,11 @@ public final class InitialRecognition {
                 // outcome with a null decision: "the gate ran on every contract" is a claim this
                 // module makes, and a synthetic decision would make it unfalsifiable.
                 unreadable.add(isolated.exception());
+                raised.add(isolated.exception());
                 queue.raise(isolated.exception());
             }
         }
-        return new OnboardingRun(runId, boundary, ids, outcomes, unreadable);
+        return new OnboardingRun(runId, boundary, ids, outcomes, unreadable, raised);
     }
 
     /**

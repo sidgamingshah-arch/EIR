@@ -65,7 +65,22 @@ public record OnboardingRun(
     AsAtBoundary boundary,
     List<String> population,
     List<OnboardingOutcome> outcomes,
-    List<ExceptionRecord> unreadable) {
+    List<ExceptionRecord> unreadable,
+    List<ExceptionRecord> raised) {
+
+    /**
+     * Every contract that reached the gate, with only its disposition — the shape this record had
+     * before it carried {@code raised}.
+     *
+     * <p>Kept so that a caller with no interest in the queue is not made to supply an empty list and
+     * quietly lose the fourth reason {@link #blocksClose()} now has. It passes {@code List.of()},
+     * which is the honest reading of "this construction knows of no queue entries" — and any
+     * quarantining entry is still counted, because a quarantined contract's disposition says so.
+     */
+    public OnboardingRun(String runId, AsAtBoundary boundary, List<String> population,
+        List<OnboardingOutcome> outcomes, List<ExceptionRecord> unreadable) {
+        this(runId, boundary, population, outcomes, unreadable, List.of());
+    }
 
     /**
      * The invariants a run of this use case is answerable for — <b>fixed, and not derived from the
@@ -97,6 +112,7 @@ public record OnboardingRun(
         population = List.copyOf(Objects.requireNonNull(population, "population"));
         outcomes = List.copyOf(Objects.requireNonNull(outcomes, "outcomes"));
         unreadable = List.copyOf(Objects.requireNonNull(unreadable, "unreadable"));
+        raised = List.copyOf(Objects.requireNonNull(raised, "raised"));
         if (runId.isBlank()) {
             throw new IllegalArgumentException(
                 "an onboarding run needs an id; 04 § 2.13 stamps every exception and every"
@@ -329,10 +345,42 @@ public record OnboardingRun(
      *   <li>the run established nothing. A run over an empty population has no breaches and no
      *       exceptions, and reporting it clean is the aggregation-over-nothing defect. It is
      *       reported here, as a property of the run, rather than as a fabricated invariant breach.
+     *   <li><b>an entry this run raised blocks the close, whatever the contract's disposition.</b>
+     *       Added because the three above had a hole shaped exactly like a TG-1 demotion, and it was
+     *       reported by the unit that built the gate rather than found by a test.
+     *       {@code STALE_EQUIVALENCE_TEST} does not quarantine — 03 § 10.2's consequence is
+     *       measurement at Tier 2, a more expensive and more correct basis, not a stop — so the
+     *       contract's disposition stays {@code RECOGNISED} and {@link #quarantinedCount()} does not
+     *       see it. TG-1 is deliberately not a population obligation (see
+     *       {@link #POPULATION_INVARIANTS}), so {@link #breaches()} does not see it either. The run
+     *       asserted plenty, so {@link #assertedNothing()} is false. Result:
+     *       {@link #describeClose()} printed "close may proceed" over a population whose
+     *       measurement basis had changed, while {@code ExceptionQueue.blocksClose()} correctly said
+     *       otherwise — two answers to one question, which is the defect this codebase has recorded
+     *       finding three times.
      * </ul>
+     *
+     * <p>This reason is read from what the run itself raised rather than from the queue, and that is
+     * deliberate. The queue is a sink the caller owns and may hold entries from other use cases and
+     * earlier runs, so a run that consulted it would report a block belonging to somebody else and
+     * would report nothing at all when handed a fresh one. What the run raised is the run's own fact
+     * — the same reason {@code MonthEndRun.Completion} carries its own exception list.
      */
     public boolean blocksClose() {
-        return !breaches().isEmpty() || quarantinedCount() > 0 || assertedNothing();
+        return !breaches().isEmpty() || quarantinedCount() > 0 || assertedNothing()
+            || !blockingEntries().isEmpty();
+    }
+
+    /**
+     * The entries this run raised that block the close, in the order they were raised.
+     *
+     * <p>Every {@code ExceptionCategory} blocks the close today, so this is presently every entry in
+     * {@link #raised()}. Filtered rather than returned whole because the category's own method is
+     * the authority on which block, and a caller reading {@code raised()} and assuming all of them
+     * do would be right by accident.
+     */
+    public List<ExceptionRecord> blockingEntries() {
+        return raised.stream().filter(ExceptionRecord::blocksClose).toList();
     }
 
     /** One line an operator can act on: the counts, the gaps, and whether the close can proceed. */
@@ -346,6 +394,14 @@ public record OnboardingRun(
         List<InvariantResult> breaches = breaches();
         if (!breaches.isEmpty()) {
             line.append("; ").append(breaches.size()).append(" invariant breach(es)");
+        }
+        List<ExceptionRecord> blocking = blockingEntries();
+        if (!blocking.isEmpty()) {
+            line.append("; ").append(blocking.size())
+                .append(" queue entr(y/ies) blocking the close on contracts that were not"
+                    + " quarantined — ")
+                .append(truncate(blocking.stream().map(ExceptionRecord::contractId).distinct()
+                    .toList()));
         }
         line.append(blocksClose() ? "; CLOSE BLOCKED" : "; close may proceed");
         if (assertedNothing()) {
