@@ -1082,7 +1082,37 @@ the divergence *inverted* rather than deleted — `TierPermissionTest` asserted 
 the queue said true, and now asserts they agree and that nothing was quarantined and no invariant
 breached, so it cannot pass for the wrong reason.
 
-**And every one of the five is mutation-verified.** Reverting each guard fails the test that claims
+**A sixth pass, on `eir-persistence-jdbc` after its first successful build.** The module had never
+compiled under its profile — its tests still called two methods the main classes had refactored away
+— so no claim in it had ever been tested by execution. Building it, running its live suite against a
+real PostgreSQL 16 cluster, and reviewing it adversarially produced the largest single crop of this
+programme, and the shapes are the familiar ones:
+
+| Finding | Family |
+|---|---|
+| `JdbcCoreBankingFeed` and `JdbcContractStateSource` read the same `cbs_billed_interest` row under the same predicate, so under the JDBC wiring **both sides of RC-1 come from one column of one table** and its deviation is identically nil | control that cannot fail — the literal "field against itself" its own port javadoc warns of |
+| The flow vector is read over the accounting calendar month while `ContractPipeline` defines the accrual period as `(dueDate(n−1), dueDate(n)]`; a contract whose instalment falls outside the month gets an empty vector and a zero-amount boundary flow | one rule, two places, with two answers |
+| A weekly or fortnightly contract yields several accrual boundaries in one month and `ContractPipeline` refuses `roll.periods() != 1` — reinstating, one layer up, exactly the abort `CompoundingBasis.stepOf` was rewritten to prevent | a refusal moved rather than removed |
+| `SELECT_POPULATION` ignores the `bookId` the adapter holds, so a run of one book enumerates FR-109's parallel books | asymmetric guard: the population is unscoped while the balances are scoped |
+| `readRateInForce` wraps the stored rate without consulting `eir_computation.convention`, which the period source reads for the same solve | one rule, two places |
+| The live suite's **business-time predicate is behaviourally unfailable** — deletable from both queries with no test failing — while its system-time predicate is genuinely exercised against a superseded version | control that cannot fail, on one axis of two |
+| The flow vector has **no decision-time axis at all**, undeclared, while the module declares two other such gaps honestly in javadoc | a gap named nowhere, in a module built to close exactly this |
+
+**The one the live suite caught by itself is the one worth dwelling on.** `RemainingPortsLiveTest`
+expected period ordinal 12 where the engine derives 13, and the engine is right. The test's
+derivation named its own error — "YearMonth 2026-05 to 2027-04 is eleven months" — which is the
+truncation `PeriodId.elapsedPeriods` was rewritten to replace, and which counts a due date already
+passed within the month as not passed. Left at 12 it would not have been a failing test: it would
+have been ST-2 red on every contract whose due day is not the 1st, on every period, because
+`ContractPipeline` and the roll-forward derive the accrual length independently and that
+independence is the whole reason ST-2 is a control rather than a tautology.
+
+**None of the five defects is active, and saying why matters.** Nothing constructs `JdbcPorts` for a
+run, so they are latent — which is the honest reason they are recorded rather than patched in the
+same hour they were found. The engine's exit gate for this module is not "the tests pass"; it is a
+close driven through these ports, and that is the step that would fire all five.
+
+**And every one of the five earlier fixes is mutation-verified.** Reverting each guard fails the test that claims
 it; the headroom tie-break fails two different tests under two different mutations. That matters
 because the fourth of them was, on the first attempt, a control that could not fail: the branch where
 the route seam cannot enumerate is unreachable over a socket, so the first mutation run passed and

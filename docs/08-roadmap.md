@@ -120,7 +120,7 @@ forbids.
 | `eir-policy` | Versioned policy and fee rule sets; maker–checker; **mandatory** impact preview | FR-201…210 | `policy/{approval,preview,registry}` — five states, not a flag; the activation gate refuses EFFECTIVE without a preview for *that draft* |
 | **Routing table** | Driver→mechanism mapping as versioned data, not code | FR-504…507, [ADR-0006](adr/0006-configurable-event-routing.md) | `policy/routing` — a text format displaces `ofSpecDefaults`, and a registry selects the version in force |
 | Tier assignment | Tier 1/2/3 with equivalence-test tracking | FR-107, FR-411…412 | `policy/tier` — the TG-1 evaluator that was previously a label with no logic |
-| `eir-persistence` | Bitemporal schema, partitioning, Flyway migrations | [04](04-data-model.md) | **DDL only, and now with an implementation beside it.** Two PostgreSQL 16 migrations, 54 tables, verified by execution. `eir-persistence-jdbc` ([ADR-0011](adr/0011-jdbc-persistence-behind-a-profile.md)) implements all seven ports over that DDL with both temporal predicates on every read, so a read as at an earlier `recorded_at` returns the version set recorded then — which is the first time DT-1 has anything real to check, since the in-memory book answers the same thing at every boundary. Behind a `jdbc` profile: the driver and Flyway are not cached, and `mvn -o install` must keep building the whole engine |
+| `eir-persistence` | Bitemporal schema, partitioning, Flyway migrations | [04](04-data-model.md) | **DDL only, with an implementation beside it that is verified against a live cluster and not yet wired to a run.** Three migrations now — V1, V2 and V3 (`eir-persistence-jdbc`'s own adapter-owned tables) — applied to PostgreSQL 16.13 and verified from `information_schema` rather than from an exit code: 67 tables, 3 partitioned, 294 check constraints, **167 foreign keys of which 23 run from a V2 table into a V1 table**, 302 money columns at `NUMERIC(24,6)`, 37 rate columns at `NUMERIC(20,12)`, **zero** float or double columns. `eir-persistence-jdbc` ([ADR-0011](adr/0011-jdbc-persistence-behind-a-profile.md)) implements all seven ports with both temporal predicates on every read. **53 tests offline and 100 against the live cluster.** What it is not yet: wired. Nothing constructs `JdbcPorts` for a run, which is why the defects below are latent rather than active |
 | Exception queue | All categories; per-contract failure isolation | FR-905 | `policy/exception` — the ten categories of 04 § 3, with the barrier that captures a per-contract failure instead of propagating it |
 | Fee & cost taxonomy | **The critical path.** Fee master with EIR-eligibility flags; `cost_function` sourcing from HR and cost-centre data | FR-203 | `policy/fee` — the rule set, resolver, cost-function type, commitment thresholds and exclusion rules. **The sourcing half is not code and is not done** |
 
@@ -471,6 +471,63 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   guard.** That endpoint previously read a hand-maintained list of nine and so reported a gap of eight
   over a surface of forty — a control that read as coverage, which is why the inventory now comes from
   the registration and cannot drift from it.
+
+- **`eir-persistence-jdbc` builds and passes against a live cluster, and it carries five latent
+  defects that fire the moment anything wires it to a run.** Nothing does today — no module
+  constructs `JdbcPorts` — which is exactly why they are recorded here rather than fixed in a hurry.
+  The module was reviewed adversarially after its first successful build, on the reasoning that code
+  which has never executed has never had a single claim tested. Ranked by what they cost:
+
+  1. **RC-1 would compare a field against itself.** `JdbcCoreBankingFeed.SELECT_BILLED_FOR_PERIOD`
+     and `JdbcContractStateSource.SELECT_BILLED` read the same `cbs_billed_interest.billed_interest`
+     row under the same system-time predicate. `OpeningState.contractualInterestBilled` feeds RC-1's
+     *engine* leg and the feed port is its *CBS* leg, so under the JDBC wiring both sides come from
+     one column of one table and the deviation is identically nil whatever the value.
+     `CoreBankingFeed`'s own javadoc says the two ports exist separately because "if the run took
+     both numbers from one port, the comparison would be a field against itself". Verified by reading
+     both SQL strings.
+  2. **The flow window and the accrual period are different windows.** The vector is read over the
+     accounting calendar month (`accounting_period.period_start_date` → `period_end_date`), while
+     `ContractPipeline` defines period *n* as `(dueDate(n−1), dueDate(n)]`. For a contract whose
+     instalment falls outside the calendar month the vector comes back empty and a zero-amount
+     boundary flow is substituted, so the roll-forward applies no cash while the cash book reports
+     the receipt.
+  3. **A weekly or fortnightly contract aborts the run.** Several flow dates inside one accounting
+     month produce several accrual boundaries, and `ContractPipeline` refuses `roll.periods() != 1`.
+     `CompoundingBasis.stepOf` goes to explicit trouble to support those two frequencies precisely so
+     they are *not* refused, and the refusal reappears one layer up.
+  4. **`SELECT_POPULATION` ignores the book.** `JdbcContractSource` is handed a `bookId`, stores it,
+     and never puts it in the population query — so a run of book `MAIN` enumerates the IGAAP and tax
+     contracts of the same facility (FR-109's parallel books). `JdbcCoreBankingFeed` and
+     `JdbcPolicySource` do the same. Verified by reading the query.
+  5. **The rate is wrapped without consulting its convention.** `readRateInForce` builds
+     `Rate.periodic(value, periodsPerYear)` unconditionally, ignoring `eir_computation.convention` —
+     the column the period source reads for the same solve. `AmortisationEngine.roll` refuses the
+     mismatched pair outright, so an `ACTUAL_DATE` solve on a monthly contract aborts rather than
+     quarantines.
+
+  **And the review found what the live suite cannot prove, which matters more than the count.** The
+  suite has no skip mechanism anywhere — verified, zero uses of `assumeTrue`, `Assumptions`,
+  `@Disabled` or `@EnabledIf` in the module — so a green build cannot be mistaken for a verified one.
+  Its schema verification is real, querying `information_schema` for the exact numeric precisions and
+  `pg_class.relkind` for the partitions. **Both halves of the system-time predicate are genuinely
+  exercised**: the fixture inserts a superseded version and proves the earlier as-at read returns the
+  old row while the new one exists, which is the first real test DT-1 has ever had. But the
+  **business-time predicate is behaviourally unfailable** — it could be deleted from both queries and
+  no live test would fail — and seven assertions pass for reasons other than the one they name,
+  mostly `isEmpty()` and three-zeros checks with several sufficient causes. The fixture's own choices
+  are what hide defects 2 and 5: its cashflow line is dated the 30th rather than the schedule's real
+  due date, and every stored solve carries `PERIODIC_INDEX`.
+
+- **The flow vector has no decision-time axis at all, and that gap was not declared.** Neither
+  `cashflow_schedule` nor `cashflow_line` carries `recorded_at`/`superseded_at`, and
+  `cashflow_schedule_kind_uq` is `UNIQUE (contract_version_id, kind)`, so a re-derived expected
+  schedule overwrites its predecessor. A B5.4.6 re-estimation changes expected cash flows without
+  changing any term in `contract_version`, so a replay of a closed period discounts the *new* vector
+  and DT-1 compares figures the original run never computed. The module declares two other
+  decision-time gaps honestly — `suspense_entry` and `fee_posting` both say so in javadoc and name
+  the consequence — which is the standard this one should have been held to, and the reason it reads
+  as an oversight rather than a policy.
 
 - **`read-only partitions` is schema, not code.** FR-902's partition-level enforcement lives in
   V2's DDL (verified by execution in Phase 2); the Java models the *restatement artefact* that makes
