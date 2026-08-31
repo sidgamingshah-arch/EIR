@@ -54,6 +54,22 @@ public final class EirServer {
     /** Handlers per shared subtree, in registration order. See {@link #route}. */
     private final Map<String, List<Routes.PathHandler>> subtreeHandlers = new LinkedHashMap<>();
 
+    /**
+     * Every route registered on this server, as {@code "VERB /path"}, in registration order.
+     *
+     * <p>Recorded rather than restated. {@link #routes()} used to be a hand-maintained list of the
+     * original nine endpoints, and {@code AccessControlModule}'s coverage report read it — so once
+     * ten modules had registered roughly thirty more routes, the report named nine as owing a guard
+     * and said nothing about the others, which are also unguarded. A control that reads as coverage
+     * is worse than an absent one, and the only fix is for the inventory to come from the
+     * registration rather than from somebody remembering to update a list.
+     *
+     * <p>A subtree route is recorded as {@code "ANY /path"}: the handler owns every verb and
+     * everything below the path, and it chooses which shapes it claims. Naming a verb it does not
+     * restrict would be a more precise-looking and less true entry.
+     */
+    private final List<String> registrations = new ArrayList<>();
+
     public EirServer(int port, EirService service) throws IOException {
         this.service = Objects.requireNonNull(service, "service");
         this.server = HttpServer.create(new InetSocketAddress(port), 0);
@@ -86,11 +102,23 @@ public final class EirServer {
             public void route(String path, Routes.PathHandler handler) {
                 EirServer.this.route(path, handler);
             }
+
+            @Override
+            public java.util.Optional<List<String>> registeredRoutes() {
+                // Live, and read at request time: a module holding this seam and asking during
+                // register() would see only the modules registered before it.
+                return java.util.Optional.of(List.copyOf(registrations));
+            }
         };
         for (ApiModule module : ApiModules.all(service)) {
             module.register(routes);
         }
 
+        // The operator page, last so that every /api prefix above wins the longest-prefix match.
+        // Recorded in the inventory like everything else: a report of what is exposed that omitted
+        // the one route a browser reaches first would be a strange kind of inventory, and the
+        // access-control coverage report has a row for it saying it owes no guard.
+        registrations.add("GET /");
         server.createContext("/", this::page);
     }
 
@@ -118,6 +146,7 @@ public final class EirServer {
     // ---- routing ---------------------------------------------------------------------------
 
     private void get(String path, Function<HttpExchange, Json.Obj> handler) {
+        registrations.add("GET " + path);
         server.createContext(path, exchange -> {
             if (!"GET".equals(exchange.getRequestMethod())) {
                 respond(exchange, 405, Json.object().str("error", "GET only").toString());
@@ -128,6 +157,7 @@ public final class EirServer {
     }
 
     private void post(String path, Function<FormBody, Json.Obj> handler) {
+        registrations.add("POST " + path);
         server.createContext(path, exchange -> {
             if (!"POST".equals(exchange.getRequestMethod())) {
                 respond(exchange, 405, Json.object().str("error", "POST only").toString());
@@ -154,8 +184,13 @@ public final class EirServer {
             subtreeHandlers.computeIfAbsent(path, key -> new ArrayList<>());
         chain.add(handler);
         if (chain.size() > 1) {
+            // A second module on the same prefix. Not recorded again: the inventory answers "what
+            // is exposed", and one path is one exposure however many modules take turns claiming
+            // requests under it. Recording it twice would inflate the coverage report's own
+            // denominator, on the endpoint whose purpose is an accurate count.
             return;
         }
+        registrations.add("ANY " + path);
         server.createContext(path, exchange -> {
             try {
                 String body = "POST".equals(exchange.getRequestMethod()) ? readBody(exchange) : "";
@@ -279,10 +314,22 @@ public final class EirServer {
         }
     }
 
-    /** The routes, for the smoke test and for anyone reading the module. */
-    public static List<String> routes() {
-        return List.of("GET /", "GET /api/book", "POST /api/onboard", "POST /api/run",
-            "POST /api/repair", "POST /api/accept", "POST /api/post", "POST /api/close",
-            "POST /api/replay");
+    /**
+     * Every route this server registered, as {@code "VERB /path"}, in registration order.
+     *
+     * <p><b>An instance method, and that is the fix rather than a refactor.</b> This was a static
+     * hand-maintained list of the nine endpoints the console needed, and
+     * {@code AccessControlModule}'s coverage report read it to decide which routes owe an
+     * authorisation guard. Ten modules then registered roughly thirty more, and the report went on
+     * naming nine — reporting a gap of nine over a surface of forty, which is a control that reads
+     * as coverage. A static method could not be right: what is registered depends on which modules
+     * {@code ApiModules} returns, which is per-server state.
+     *
+     * <p>The operator page is included as {@code GET /}, registered last so that every {@code /api}
+     * prefix wins the longest-prefix match. A subtree appears as {@code ANY /path} — see
+     * {@link #registrations}.
+     */
+    public List<String> routes() {
+        return List.copyOf(registrations);
     }
 }

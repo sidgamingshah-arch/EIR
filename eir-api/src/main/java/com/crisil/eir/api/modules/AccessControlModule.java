@@ -123,6 +123,18 @@ public final class AccessControlModule implements ApiModule {
     private final EirService service;
     private final RoleRegister register;
 
+    /**
+     * The seam this module was registered on, kept so that the coverage report can ask it what is
+     * actually registered.
+     *
+     * <p>Held rather than snapshotted at registration: a module asking during {@code register}
+     * would see only the modules registered before it, and the answer would then depend on
+     * {@code ApiModules}' ordering. Null until {@link #register} runs, which is only reachable
+     * through {@code coverage} — a route this module registers, so by the time anything can call it
+     * the seam is set.
+     */
+    private Routes seam;
+
     public AccessControlModule(EirService service) {
         this(service, demonstrationRegister());
     }
@@ -156,6 +168,7 @@ public final class AccessControlModule implements ApiModule {
     @Override
     public void register(Routes routes) {
         Objects.requireNonNull(routes, "routes");
+        this.seam = routes;
 
         // Every route here is a GET, because Routes.post cannot deliver a request header to its
         // handler. See the class javadoc — this is a limitation of the seam, not a design choice.
@@ -341,9 +354,18 @@ public final class AccessControlModule implements ApiModule {
      * {@code /api/reports/approximations} (FR-809): making a shortcut visible is what keeps it
      * defensible.
      *
-     * <p>The route list is read from {@link EirServer#routes()} rather than restated, so a route
-     * added there and not mapped here appears as {@code UNMAPPED} instead of quietly vanishing from
-     * the report.
+     * <p><b>The route list is read from the seam this module was registered on</b>
+     * ({@link Routes#registeredRoutes()}), not restated and no longer read from a hand-maintained
+     * inventory. It used to read {@code EirServer.routes()}, a static list of the nine endpoints the
+     * console needed. Ten modules then registered roughly thirty more, and this report went on
+     * naming nine — reporting a gap of nine over a surface of forty, on the one endpoint whose whole
+     * purpose is an accurate gap count. A route registered and not mapped here appears as
+     * {@code UNMAPPED} rather than vanishing.
+     *
+     * <p>Where the seam cannot enumerate — {@code registeredRoutes()} returns empty, which a test
+     * stand-in does — the report says so and publishes no count. An empty list rendered as
+     * "no routes owe a guard" is the failure mode this method exists to prevent, so it must not be
+     * this method's own behaviour.
      */
     private Json.Obj coverage(HttpExchange exchange) {
         AccessDecision guard = guard(exchange, Capability.READ_FIGURES);
@@ -351,9 +373,34 @@ public final class AccessControlModule implements ApiModule {
             return forbid(exchange, guard);
         }
 
+        List<String> registered = seam == null
+            ? List.of()
+            : seam.registeredRoutes().orElse(null);
+        if (registered == null) {
+            // Not "no routes". The distinction is the whole point of the Optional: a report that
+            // rendered an unenumerable seam as an empty list would publish "0 routes owe a guard"
+            // over a surface it never saw.
+            return Json.object()
+                .bool("enumerable", false)
+                .count("enforcedRoutes", GUARDED_ROUTES.size())
+                .str("whyNotEnumerable",
+                    "the seam this module was registered on does not implement"
+                        + " Routes.registeredRoutes(), so what is exposed cannot be listed and no"
+                        + " gap count is published. A count of zero here would be a claim about a"
+                        + " surface nothing read")
+                .str("identityAssertedByCaller", ASSERTED_NOTE)
+                .str("production", PRODUCTION_NOTE);
+        }
+
         List<Json.Obj> rows = new ArrayList<>();
         int unenforced = 0;
-        for (String route : EirServer.routes()) {
+        for (String route : registered) {
+            if (GUARDED_ROUTES.contains(route)) {
+                // This module's own four, reported below as enforced. Skipped here so they are not
+                // counted twice -- once unguarded and once guarded -- which would overstate both
+                // the gap and the coverage from one loop.
+                continue;
+            }
             RouteRequirement requirement = requirementFor(route);
             rows.add(Json.object()
                 .str("route", route)
@@ -378,15 +425,18 @@ public final class AccessControlModule implements ApiModule {
         }
 
         return Json.object()
+            .bool("enumerable", true)
             .array("routes", rows)
+            .count("routesRegistered", registered.size())
             .count("unenforcedRoutes", unenforced)
             .count("enforcedRoutes", GUARDED_ROUTES.size())
-            .str("notEnumerable",
-                "This report covers EirServer's own registrations and this module's. The other ten"
-                    + " modules of ApiModules register their routes through the same seam and"
-                    + " nothing enumerates them, so their routes are absent from this list rather"
-                    + " than reported as unguarded — which they also are. A route registry on"
-                    + " Routes would close that, and it is another file's change.")
+            .str("wasNotEnumerable",
+                "This report used to cover only EirServer's own nine registrations, read from a"
+                    + " static hand-maintained list. The ten modules of ApiModules register through"
+                    + " the same seam, and their routes were absent from this list rather than"
+                    + " reported as unguarded — which they also were, so the report named a gap of"
+                    + " nine over a surface of forty. It now reads Routes.registeredRoutes(), so"
+                    + " the inventory comes from the registration and cannot drift from it.")
             .str("theGap",
                 "Routes.post hands a handler a FormBody and nothing else, so a POST handler"
                     + " registered through the module seam cannot read a request header and cannot"

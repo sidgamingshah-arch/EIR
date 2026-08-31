@@ -22,6 +22,8 @@ import com.crisil.eir.policy.transition.TransitionFairValue;
 import com.crisil.eir.policy.transition.TransitionValuationRun;
 import com.crisil.eir.policy.transition.ValuationTechnique;
 import com.sun.net.httpserver.HttpExchange;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -183,31 +185,25 @@ public final class TransitionModule implements ApiModule {
 
         routes.post(BASE + "/fair-value-run", this::fairValueRun);
 
-        // One route per contract this book can ANSWER for — not per contract in the population.
-        // See the class javadoc: it is what makes an unknown contract a 404. The first cut looped
-        // over populationIds(), which includes contracts the master carries and the valuation run
-        // never saw, so those got a route whose handler could only throw: a 500 naming an internal
-        // invariant where the engine's honest answer is "no such valuation".
-        for (String contractId : transition.answerableContractIds()) {
-            routes.get(BASE + "/fair-value/" + contractId, exchange -> fairValue(contractId));
-        }
+        // ONE subtree route, and the contract id comes off the path.
+        //
+        // This was a loop registering one route per contract the book could answer for, because
+        // Routes.get takes a fixed path and could not read a path parameter — so the id had to be
+        // baked into the registration for an unknown contract to 404. Routes.route now exists and
+        // hands the handler its exchange. The loop was not merely inelegant: it created one JDK
+        // HttpServer context per contract, so a book of ten million would have registered ten
+        // million contexts at construction. It also made the surface inventory
+        // (Routes.registeredRoutes(), which the access-control coverage report reads) grow with the
+        // population, so a report of "what is exposed" counted nine transition routes on the seed
+        // book and would have counted millions on a real one.
+        routes.route(BASE + "/fair-value/", this::fairValueByPath);
 
         routes.get(BASE + "/legacy-cohorts", exchange -> legacyCohorts());
-        for (LegacyCohort cohort : transition.cohorts()) {
-            String cohortName = cohort.cohortName();
-            routes.post(BASE + "/legacy-cohorts/" + cohortName + "/migrate",
-                body -> migrate(cohortName, body));
-        }
-        // A POST under /legacy-cohorts/ that no cohort route claimed. Registered because without it
-        // the longest matching context is the GET listing, and an unknown cohort answers 405 "GET
-        // only" — which tells an integrator the verb is wrong when the cohort name is. This handler
-        // cannot name the offending id (a POST handler receives no exchange), so it names the four
-        // that exist, which is the more useful half anyway.
-        routes.post(BASE + "/legacy-cohorts/", body -> {
-            throw new FormBody.BadRequest("no cohort route matched this path; the migration plan"
-                + " holds " + transition.cohorts().stream().map(LegacyCohort::cohortName).toList()
-                + " and the route is POST " + BASE + "/legacy-cohorts/{cohortName}/migrate");
-        });
+        // Same change, same reason. The declining branch also replaces a handler registered only to
+        // stop an unknown cohort answering 405 "GET only" — which told an integrator the verb was
+        // wrong when the cohort name was — and it can now name the offending id, because a subtree
+        // handler receives the exchange that a POST handler did not.
+        routes.route(BASE + "/legacy-cohorts/", this::migrateByPath);
 
         routes.get(BASE + "/coverage", this::coverage);
     }
@@ -359,12 +355,95 @@ public final class TransitionModule implements ApiModule {
      * valuation of the existing book, or a concessional loan measured at fair value on its own day 1
      * (FR-909). {@code kind} says which, and the two refuse differently — see the class javadoc.
      */
+    /**
+     * {@code GET /api/transition/fair-value/{contractId}} — one route, the id read off the path.
+     *
+     * <p>Declines anything that is not a single-segment GET under the prefix, so a sibling module on
+     * the same prefix can claim it and an unclaimed shape becomes the server's 404 naming the path.
+     * The path is split raw and the segment decoded afterwards: decoding first would let an id
+     * carrying {@code %2F} split into two segments and address something the caller did not name.
+     *
+     * <p>A contract the transition book cannot answer for is a 404 with the reason, not a 500. That
+     * was previously guaranteed by the registration — a route existed only for answerable contracts
+     * — and now has to be a decision in the handler, which is the honest place for it: "this book
+     * holds no ACPIR 19 valuation and no origination for that contract" is an answer about the
+     * book, and the per-route version could not distinguish it from a path nobody serves.
+     */
+    private Routes.Answer fairValueByPath(HttpExchange exchange, FormBody body) {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            return null;
+        }
+        String prefix = BASE + "/fair-value/";
+        String rawPath = exchange.getRequestURI().getRawPath();
+        if (!rawPath.startsWith(prefix)) {
+            return null;
+        }
+        String[] segments = rawPath.substring(prefix.length()).split("/");
+        if (segments.length != 1 || segments[0].isBlank()) {
+            return null;
+        }
+        String contractId = URLDecoder.decode(segments[0], StandardCharsets.UTF_8);
+        if (!transition.answerableContractIds().contains(contractId)) {
+            return Routes.Answer.of(404, Json.object()
+                .str("contractId", contractId)
+                .bool("answered", false)
+                .str("reason", "NO_TRANSITION_RECORD")
+                .strings("answerableContracts", transition.answerableContractIds())
+                .str("detail", "the transition book holds neither an ACPIR 19 day-1 valuation nor a"
+                    + " below-market origination for " + contractId + ". A contract the master"
+                    + " carries and the valuation run never saw has no fair value to report, and"
+                    + " reporting one would be inventing the figure this endpoint exists to"
+                    + " evidence"));
+        }
+        return Routes.Answer.ok(fairValue(contractId));
+    }
+
+    /**
+     * {@code POST /api/transition/legacy-cohorts/{cohortName}/migrate} — one route, id off the path.
+     *
+     * <p>The shape is checked exactly: two segments, the second {@code migrate}. Anything else is
+     * declined rather than swallowed, which is the difference between a mistyped action and a
+     * migration nobody asked for. An unknown cohort name is a 404 that <em>names</em> it and lists
+     * the plan's cohorts — the per-cohort registration it replaces could not, because a
+     * {@code Routes.post} handler receives no exchange and so could not see the path it arrived by.
+     */
+    private Routes.Answer migrateByPath(HttpExchange exchange, FormBody body) {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            return null;
+        }
+        String prefix = BASE + "/legacy-cohorts/";
+        String rawPath = exchange.getRequestURI().getRawPath();
+        if (!rawPath.startsWith(prefix)) {
+            return null;
+        }
+        String[] segments = rawPath.substring(prefix.length()).split("/");
+        if (segments.length != 2 || !"migrate".equals(segments[1])) {
+            return null;
+        }
+        String cohortName = URLDecoder.decode(segments[0], StandardCharsets.UTF_8);
+        List<String> known = transition.cohorts().stream()
+            .map(LegacyCohort::cohortName)
+            .toList();
+        if (!known.contains(cohortName)) {
+            return Routes.Answer.of(404, Json.object()
+                .str("cohortName", cohortName)
+                .bool("migrated", false)
+                .str("reason", "NO_SUCH_COHORT")
+                .strings("cohortsInThePlan", known)
+                .str("detail", "the migration plan holds no cohort named " + cohortName
+                    + "; migrating a cohort nobody segmented would record progress against the"
+                    + " ACPIR 21 deadline for a population that does not exist"));
+        }
+        return Routes.Answer.ok(migrate(cohortName, body));
+    }
+
     private Json.Obj fairValue(String contractId) {
         Optional<TransitionFairValue> valued = transition.valuation(contractId);
         if (valued.isPresent()) {
             return transitionValuation(valued.get());
         }
-        // Registered per contract, so the only way to reach this branch is an origination.
+        // fairValueByPath has already established the contract is answerable, so the only way to
+        // reach this branch is an origination.
         return belowMarket(transition.origination(contractId).orElseThrow(
             () -> new IllegalStateException("route registered for " + contractId
                 + " but the transition book carries neither a valuation nor an origination for it")));

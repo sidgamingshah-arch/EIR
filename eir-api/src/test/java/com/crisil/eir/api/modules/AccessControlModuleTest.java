@@ -4,6 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.crisil.eir.api.EirServer;
 import com.crisil.eir.api.EirService;
+import java.util.function.Function;
+import java.util.Map;
+import java.util.LinkedHashMap;
+import com.sun.net.httpserver.HttpExchange;
+import com.crisil.eir.api.http.Routes;
+import com.crisil.eir.api.http.PathOnlyExchange;
+import com.crisil.eir.api.http.Json;
+import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.store.Seed;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -513,13 +521,42 @@ class AccessControlModuleTest {
         void theconsoleRoutesAreReportedUnguarded() throws IOException {
             Response response = get("/api/access/coverage", "reader.only");
 
-            // EirServer.routes() lists nine, and eight of them owe a guard: GET / is the operator
-            // page, a static asset that requires nothing. All eight are unguarded because EirServer
-            // registers them directly and every mutating one is a POST.
-            assertThat(response.body()).contains("\"unenforcedRoutes\":8");
+            // The number this assertion carried was 8, and that is the finding. It read
+            // EirServer.routes(): a static hand-maintained list of the nine endpoints the console
+            // needed, so the report named eight routes owing a guard. Ten modules had meanwhile
+            // registered the rest of 06's surface through the same seam, all of it equally
+            // unguarded and none of it in the list — a report of a gap of eight over a surface of
+            // forty, on the one endpoint whose entire purpose is an accurate gap count.
+            //
+            // The inventory now comes from Routes.registeredRoutes(), so it cannot drift from what
+            // was actually registered. The count is asserted as a lower bound rather than an exact
+            // figure ON PURPOSE: pinning it exactly would mean every new endpoint fails this test
+            // and gets its number bumped, which trains the reader to update the figure rather than
+            // to guard the route. What must never regress is the pairing — every registered route
+            // is either enforced or counted as a gap, and the two must add up.
+            assertThat(response.body()).contains("\"enumerable\":true");
+
+            int registered = intField(response.body(), "routesRegistered");
+            int unenforced = intField(response.body(), "unenforcedRoutes");
+            int enforced = intField(response.body(), "enforcedRoutes");
+
+            assertThat(registered)
+                .as("the whole 06 surface is registered, not just the console's nine")
+                .isGreaterThan(30);
+            assertThat(enforced)
+                .as("this module's own four, and only those, are guarded today")
+                .isEqualTo(4);
+            // Every registered route appears as a row, and each row is in exactly one of three
+            // columns: guarded, a counted gap, or owing no guard at all. The third has exactly one
+            // member -- GET /, the operator page, a static asset that computes nothing -- and it is
+            // named rather than left as a residual, because "some routes need no guard" is how a
+            // gap count quietly shrinks.
+            int owingNoGuard = registered - enforced - unenforced;
+            assertThat(owingNoGuard)
+                .as("exactly one route owes no guard and it must be the page; anything else in this"
+                    + " column is a route that fell out of the count")
+                .isEqualTo(1);
             assertThat(response.body())
-                .as("the page owes no guard, so counting it would overstate the gap on the very"
-                    + " endpoint whose purpose is an accurate gap count")
                 .contains("\"route\":\"GET /\",\"requires\":\"none\"");
             assertThat(response.body())
                 .contains("\"route\":\"POST /api/run\",\"requires\":\"START_RUN\","
@@ -536,6 +573,51 @@ class AccessControlModuleTest {
             assertThat(response.body())
                 .contains("cannot read a request header")
                 .contains("hooksNeeded");
+        }
+
+        @Test
+        @DisplayName("a seam that cannot enumerate publishes no count, rather than a count of nil")
+        void anUnenumerableSeamPublishesNoCount() {
+            // The branch this pins is the one that makes the whole change safe, and it cannot be
+            // reached over a socket: EirServer's seam always enumerates. Routes.registeredRoutes()
+            // returns an Optional precisely so that "this seam registered nothing" and "this seam
+            // cannot tell you" stay distinguishable, and the failure mode being guarded against is
+            // this endpoint rendering the second as the first -- publishing "0 routes owe a guard"
+            // over a surface it never read. That would be this report becoming the misleading thing
+            // it exists to prevent, which is the defect class this codebase has found seventeen
+            // times.
+            AccessControlModule module = new AccessControlModule(new EirService(Seed.book()));
+            Map<String, Function<HttpExchange, Json.Obj>> registered = new LinkedHashMap<>();
+            module.register(new Routes() {
+                @Override
+                public void get(String path, Function<HttpExchange, Json.Obj> handler) {
+                    registered.put(path, handler);
+                }
+
+                @Override
+                public void post(String path, Function<FormBody, Json.Obj> handler) {
+                    throw new AssertionError("this module registers only GETs");
+                }
+                // registeredRoutes() deliberately NOT overridden: this is the stand-in shape the
+                // default exists for.
+            });
+
+            Json.Obj body = registered.get("/api/access/coverage").apply(
+                PathOnlyExchange.getWithHeader("/api/access/coverage",
+                    AccessControlModule.IDENTITY_HEADER, "reader.only"));
+
+            assertThat(body.toString())
+                .as("it must say it cannot see the surface, and say why")
+                .contains("\"enumerable\":false")
+                .contains("whyNotEnumerable")
+                .contains("A count of zero here would be a claim about a surface nothing read");
+            assertThat(body.toString())
+                .as("and publish NO gap count at all -- a nil gap is the reading that looks clean")
+                .doesNotContain("unenforcedRoutes")
+                .doesNotContain("routesRegistered");
+            assertThat(body.toString())
+                .as("what it does know about is its own four routes, which it guards itself")
+                .contains("\"enforcedRoutes\":4");
         }
 
         @Test
@@ -580,4 +662,20 @@ class AccessControlModuleTest {
             assertThat(response.body()).contains("\"approvedBy\":\"someone.else\"");
         }
     }
+
+    /** Reads one JSON integer field out of a response body, for a count asserted as a bound. */
+    private static int intField(String body, String key) {
+        String needle = "\"" + key + "\":";
+        int at = body.indexOf(needle);
+        if (at < 0) {
+            throw new AssertionError("no field " + key + " on the response: " + body);
+        }
+        int from = at + needle.length();
+        int to = from;
+        while (to < body.length() && Character.isDigit(body.charAt(to))) {
+            to++;
+        }
+        return Integer.parseInt(body.substring(from, to));
+    }
+
 }

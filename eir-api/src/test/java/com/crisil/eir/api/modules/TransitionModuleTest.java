@@ -7,6 +7,7 @@ import com.crisil.eir.api.EirServer;
 import com.crisil.eir.api.EirService;
 import com.crisil.eir.api.http.FormBody;
 import com.crisil.eir.api.http.Json;
+import com.crisil.eir.api.http.PathOnlyExchange;
 import com.crisil.eir.api.http.Routes;
 import com.crisil.eir.api.modules.transition.TransitionBook;
 import com.crisil.eir.api.store.Seed;
@@ -662,11 +663,17 @@ class TransitionModuleTest {
             Response response = post("/api/transition/legacy-cohorts/NOT-A-COHORT/migrate",
                 "method=DEEMED_EIR&migratedBy=transition.lead");
 
-            // Without the catch-all route the longest matching context is the GET listing, and the
-            // answer is 405 "GET only" — which tells an integrator the verb is wrong when the cohort
-            // name is. A POST handler receives no exchange, so this cannot name the bad id; it names
-            // the valid ones, which is the more useful half.
-            assertThat(response.status()).isEqualTo(400);
+            // Was a 400 that could name only the VALID cohorts: the module registered one
+            // Routes.post per cohort plus a catch-all, and a post handler receives no exchange, so
+            // the catch-all could not see which name it had been reached by. One subtree route now
+            // reads the name off the path, so the answer is a 404 that names the id that is wrong as
+            // well as the ones that are right -- and a 404 rather than a 400, because a cohort
+            // nobody segmented is a resource that is not there, not a malformed request.
+            assertThat(response.status()).isEqualTo(404);
+            assertThat(response.body())
+                .as("the whole gain of reading the path: the offending name is in the answer")
+                .contains("NOT-A-COHORT")
+                .contains("NO_SUCH_COHORT");
             assertThat(response.body())
                 .contains("HL-PRE-2020")
                 .contains("VEHICLE-2021-2023")
@@ -891,6 +898,7 @@ class TransitionModuleTest {
             private final Map<String, Function<HttpExchange, Json.Obj>> gets =
                 new LinkedHashMap<>();
             private final Map<String, Function<FormBody, Json.Obj>> posts = new LinkedHashMap<>();
+            private final Map<String, Routes.PathHandler> subtrees = new LinkedHashMap<>();
 
             @Override
             public void get(String path, Function<HttpExchange, Json.Obj> handler) {
@@ -900,6 +908,23 @@ class TransitionModuleTest {
             @Override
             public void post(String path, Function<FormBody, Json.Obj> handler) {
                 posts.put(path, handler);
+            }
+
+            @Override
+            public void route(String path, Routes.PathHandler handler) {
+                subtrees.put(path, handler);
+            }
+
+            /** Drives the registered subtree at {@code rawPath} the way EirServer would. */
+            Routes.Answer at(String verb, String rawPath) {
+                Routes.PathHandler handler = subtrees.entrySet().stream()
+                    .filter(entry -> rawPath.startsWith(entry.getKey()))
+                    .map(Map.Entry::getValue)
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError(
+                        "no subtree covering " + rawPath + "; registered: " + subtrees.keySet()));
+                return handler.handle(
+                    PathOnlyExchange.method(verb, rawPath), FormBody.parse(""));
             }
         }
 
@@ -941,26 +966,50 @@ class TransitionModuleTest {
         }
 
         @Test
-        @DisplayName("a contract the run never saw gets no fair-value route at all")
-        void aNeverPresentedContractGetsNoFairValueRoute() {
+        @DisplayName("a contract the run never saw is a 404 that says why, not a 500")
+        void aNeverPresentedContractIsARefusalThatSaysWhy() {
             TransitionModule module = new TransitionModule(
                 new EirService(Seed.book()), TransitionBook.seeded(List.of("C-0010")));
             CapturedRoutes routes = new CapturedRoutes();
             module.register(routes);
 
             // C-0010 is in the population and has no valuation, so this module has nothing to say
-            // about it. The first cut registered a route per POPULATION id, and that route's handler
-            // could only throw: GET /api/transition/fair-value/C-0010 answered 500 naming an
-            // internal invariant, where the honest answer is a 404 from the absence of a route.
+            // about it. Three shapes of this answer, in order of how they were reached:
+            //
+            //  1. a route per POPULATION id, whose handler could only throw -- 500 naming an
+            //     internal invariant, where the honest answer is about the book;
+            //  2. a route per ANSWERABLE id, so C-0010 had no route and the server's own 404
+            //     answered -- honest, but it could not say why, and it registered one HTTP context
+            //     per contract, which on a real book is millions of contexts and a surface
+            //     inventory that grows with the population;
+            //  3. one subtree route reading the id off the path, which is this: a 404 naming the
+            //     contract and the reason, and one context however large the book.
             assertThat(routes.gets)
-                .as("a route whose handler can only throw is worse than no route")
-                .doesNotContainKey("/api/transition/fair-value/C-0010");
-            // The seven valued contracts and the two below-market originations all keep theirs.
-            assertThat(routes.gets)
-                .containsKey("/api/transition/fair-value/C-0001")
-                .containsKey("/api/transition/fair-value/C-0007")
-                .containsKey("/api/transition/fair-value/C-0008")
-                .containsKey("/api/transition/fair-value/C-0009");
+                .as("no per-contract registration remains: a context per contract is not a routing"
+                    + " table, it is the population")
+                .doesNotContainKey("/api/transition/fair-value/C-0010")
+                .doesNotContainKey("/api/transition/fair-value/C-0001");
+
+            Routes.Answer absent = routes.at("GET", "/api/transition/fair-value/C-0010");
+            assertThat(absent.status()).isEqualTo(404);
+            assertThat(absent.body().toString())
+                .as("the reason has to be about the book -- an integrator seeing a bare 404 cannot"
+                    + " tell a missing valuation from a missing deployment")
+                .contains("C-0010")
+                .contains("NO_TRANSITION_RECORD")
+                .contains("neither an ACPIR 19 day-1 valuation nor a below-market origination");
+
+            // The seven valued contracts and the two below-market originations still answer.
+            for (String answerable : List.of("C-0001", "C-0007", "C-0008", "C-0009")) {
+                assertThat(routes.at("GET", "/api/transition/fair-value/" + answerable).status())
+                    .as("%s is answerable and must still be served", answerable)
+                    .isEqualTo(200);
+            }
+
+            assertThat(routes.at("POST", "/api/transition/fair-value/C-0001"))
+                .as("a verb this subtree does not serve is declined, so a sibling module on the"
+                    + " prefix can claim it rather than being shadowed")
+                .isNull();
         }
 
         @Test
@@ -971,6 +1020,9 @@ class TransitionModuleTest {
             // /api/transition/fair-value/C-0008 twice, HttpServer.createContext refused the
             // duplicate path, and the IllegalArgumentException came out of the EirServer
             // constructor — so /api/book and /api/run died too, for a transition seed mistake.
+            // One subtree route removes that failure mode entirely; the guard is kept because a
+            // contract in two halves of the transition book is still a seeding error, and now it
+            // would silently resolve to whichever half the handler consults first.
             assertThatThrownBy(() -> TransitionBook.seeded(List.of("C-0008")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("C-0008")

@@ -84,6 +84,31 @@ public interface Routes {
                 + " explain");
     }
 
+    /**
+     * Every route registered on this seam, as {@code "VERB /path"}, or empty where this
+     * implementation cannot enumerate them.
+     *
+     * <p><b>Why an {@link Optional} and not a list.</b> A coverage report has to distinguish "this
+     * seam registered no routes" from "this seam cannot tell you what it registered", and a default
+     * returning an empty list collapses the two into the reading that looks clean. That is the exact
+     * shape of defect this codebase keeps finding: {@code AccessControlModule}'s coverage report
+     * read a hand-maintained list of the original nine endpoints, so once ten modules had registered
+     * roughly thirty more it reported nine routes owing a guard and was silent about the rest —
+     * a report that reads as coverage. Its own {@code notEnumerable} caveat said so and named this
+     * method as the change that would close it.
+     *
+     * <p>So the default is {@code Optional.empty()}: a test stand-in that records nothing says it
+     * cannot answer, and a caller must state that rather than publish a count it did not obtain.
+     * {@code EirServer} overrides it with what was actually registered.
+     *
+     * <p>Read at request time, not at registration time. A module capturing this seam and asking it
+     * during {@code register} would see only the modules registered before it, which is an ordering
+     * dependency between modules that this interface exists to remove.
+     */
+    default java.util.Optional<java.util.List<String>> registeredRoutes() {
+        return java.util.Optional.empty();
+    }
+
     /** A handler that reads the exchange and chooses its own status. */
     @FunctionalInterface
     interface PathHandler {

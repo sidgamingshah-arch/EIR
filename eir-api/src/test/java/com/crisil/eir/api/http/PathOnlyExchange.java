@@ -32,10 +32,33 @@ public final class PathOnlyExchange extends HttpExchange {
 
     private final String method;
     private final URI uri;
+    private final Headers requestHeaders;
 
-    private PathOnlyExchange(String method, String rawPath) {
+    private PathOnlyExchange(String method, String rawPath, Headers requestHeaders) {
         this.method = method;
         this.uri = URI.create(rawPath);
+        this.requestHeaders = requestHeaders;
+    }
+
+    private PathOnlyExchange(String method, String rawPath) {
+        this(method, rawPath, null);
+    }
+
+    /**
+     * A GET carrying one request header, for a handler whose decision reads one.
+     *
+     * <p>The single deliberate hole in the rule above, and it is narrow on purpose. A handler that
+     * authorises on {@code X-EIR-Identity} has no other way to be exercised at the module level, and
+     * the branch that needs exercising is the one where the {@code Routes} seam cannot enumerate its
+     * registrations — a condition the real server never produces, so a test over a socket cannot
+     * reach it. Everything else still throws: this carries the named header and nothing more, so a
+     * handler reaching for a second one still fails loudly here rather than passing against
+     * behaviour no client will see.
+     */
+    public static PathOnlyExchange getWithHeader(String rawPath, String name, String value) {
+        Headers headers = new Headers();
+        headers.add(name, value);
+        return new PathOnlyExchange("GET", rawPath, headers);
     }
 
     /** A POST at {@code rawPath}. The path is taken raw: {@code %2F} stays encoded. */
@@ -65,7 +88,10 @@ public final class PathOnlyExchange extends HttpExchange {
 
     @Override
     public Headers getRequestHeaders() {
-        throw unsupported("getRequestHeaders");
+        if (requestHeaders == null) {
+            throw unsupported("getRequestHeaders");
+        }
+        return requestHeaders;
     }
 
     @Override
