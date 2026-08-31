@@ -32,8 +32,11 @@ import org.junit.jupiter.api.Test;
  * attributes as declared.
  *
  * <p>Expected values are written out by hand from the fixture's own inserts and from the schedule
- * arithmetic: first due date 1 May 2026, monthly, so the period ending 30 April 2027 is the twelfth
- * period — eleven whole months elapsed from the first due date, plus one.
+ * arithmetic: first due date 1 May 2026, monthly, so twelve due dates fall strictly before the
+ * period end of 30 April 2027 and the period is the thirteenth. This paragraph previously said
+ * twelfth — "eleven whole months elapsed from the first due date, plus one" — which is the
+ * YearMonth truncation {@code PeriodId.elapsedPeriods} was rewritten to replace, and it counted the
+ * 1 April instalment as outstanding on 30 April. See {@code Periods.periodOrdinalComesFromTheSchedule}.
  */
 @Tag("live-db")
 class RemainingPortsLiveTest {
@@ -58,12 +61,42 @@ class RemainingPortsLiveTest {
         @Test
         @DisplayName("the ordinal is derived from the contract's schedule, not from a loop counter")
         void periodOrdinalComesFromTheSchedule() {
-            // First due 1 May 2026, monthly. YearMonth 2026-05 to 2027-04 is eleven months, so the
-            // period ending 30 April 2027 is ordinal 12. Derived by hand here and derived
-            // independently in the adapter — which is the point ContractPeriod's javadoc makes:
-            // "two independent derivations of one quantity is what makes ST-2 against the ledger a
-            // control instead of a tautology".
-            assertThat(period().periodOrdinal()).isEqualTo(12);
+            // Derived by hand from the fixture's own schedule anchor: disbursement 1 April 2026,
+            // first due date 1 May 2026, MONTHLY. So due date k is 1 May 2026 + (k−1) months:
+            //
+            //   k =  1  01/05/2026      k =  7  01/11/2026      k = 12  01/04/2027
+            //   k =  2  01/06/2026      k =  8  01/12/2026      k = 13  01/05/2027
+            //   ...                     ...
+            //
+            // The business date is the period end, 30 April 2027. Twelve due dates fall STRICTLY
+            // before it (k = 1..12, the last being 1 April 2027), so twelve periods have closed and
+            // the ordinal is thirteen. Stated as a window: 30 April 2027 lies in
+            // (dueDate(12) = 1 April 2027, dueDate(13) = 1 May 2027], which is period 13.
+            //
+            // THIS ASSERTION READ 12, AND THE 12 WAS WRONG. Its derivation was "YearMonth 2026-05
+            // to 2027-04 is eleven months, so the period ending 30 April 2027 is ordinal 12" — a
+            // truncation of both dates to YearMonth, which is exactly the implementation
+            // PeriodId.elapsedPeriods was rewritten to replace. Its javadoc names this defect: the
+            // truncation "counts a due date already passed within the month as not passed", so a
+            // contract whose instalment falls earlier in the month than the period end comes out one
+            // period short. Here the 1 April instalment has plainly been paid by 30 April, and the
+            // old rule counted it as outstanding.
+            //
+            // The consequence of leaving it at 12 would not have been a failing test. It would have
+            // been ST-2 red on every contract whose due day is not the 1st, on every period, for
+            // ever: ContractPipeline derives the accrual length from
+            // ContractTerms.dueDate(n−1) → dueDate(n) while the roll-forward derives it from the
+            // supplied vector's dates, and those two independent derivations are what make ST-2 a
+            // control rather than a tautology. An ordinal off by one makes them disagree.
+            //
+            // Note what this must NOT be derived from: the fixture's own cashflow_line for this
+            // period carries flow_date 30 April 2027 and sequence_no 12, and neither is the
+            // schedule. The ordinal comes from the anchor (JdbcContractPeriodSource.periodOrdinal
+            // reads first_due_date and the compounding basis); the flow row's date is the period's
+            // cash movement and its sequence_no is the LMS's own numbering, which the test below
+            // asserts is ignored. Deriving an expectation from the flow row instead of the anchor is
+            // how the stale 12 survived being written down twice.
+            assertThat(period().periodOrdinal()).isEqualTo(13);
         }
 
         @Test
