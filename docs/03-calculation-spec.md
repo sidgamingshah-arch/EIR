@@ -1110,7 +1110,36 @@ independence is the whole reason ST-2 is a control rather than a tautology.
 **None of the five defects is active, and saying why matters.** Nothing constructs `JdbcPorts` for a
 run, so they are latent — which is the honest reason they are recorded rather than patched in the
 same hour they were found. The engine's exit gate for this module is not "the tests pass"; it is a
-close driven through these ports, and that is the step that would fire all five.
+close driven through these ports.
+
+**That close has now been run, and it found a control gap none of the five reviews did.** With
+`eir-batch` wired to the JDBC ports, a 24-period loan closed at a **nil gross carrying amount** —
+₹528,407.32 settled in one period — while SL-2 balanced, ST-2 tied at nil deviation, and the run
+reported 0 breaches and 0 unaccounted contracts. The engine was faithful:
+`contract_version_schedule_anchor` declares `term_periods = 24` and `cashflow_line` holds one row, so
+the vector really did describe a loan maturing that period. **What is missing is any control comparing
+the two.** The anchor is read for the period ordinal, the flows are read from `cashflow_line`, and
+nothing asserts that a contract with twelve periods left has twelve flows ahead of it.
+
+| Finding | Family |
+|---|---|
+| A schedule short by 23 of 24 flows produces a full settlement that satisfies SL-2, ST-2 and the breach count | **the "reconciles perfectly" family, at a new level** — the same structure as a dropped contract, one level down: what is absent is absent from both sides |
+| A run stamped one of three policy kinds and closed without complaint, so a replay cannot resolve the fee rule set or the tier policy as then in force | control with no caller — nothing asserts a run stamped every kind it depends on |
+| Recognised interest of ₹1,070.38 reconciles to neither stored rate for a full period | **undiagnosed, and recorded as such** |
+
+**The third is left open deliberately and the reason is the same one the tier gate was left open
+for.** The implied one-period rate is 0.002025672 — roughly 0.18 of a period — and whether that is the
+accrual exponent, the journal's composition, or an interaction with the ordinal correction above has
+not been established. Guessing at it and adjusting a figure to match would be the worst available
+version of this fix, because the figure that would move is the one an auditor reads. It is written
+down as unexplained.
+
+**Why the flow-count control is not added in the same pass.** Adding it means either an
+internally-consistent 24-flow fixture — which changes figures asserted across three live test classes
+— or a new `InvariantId` and a pipeline-level assertion comparing `ContractTerms.termPeriods` against
+the vector. Both are real work with real blast radius, and the standing precedent in this document is
+that a finding of this size is recorded before it is patched. The one thing that would be wrong is to
+leave it unwritten.
 
 **And every one of the five earlier fixes is mutation-verified.** Reverting each guard fails the test that claims
 it; the headroom tie-break fails two different tests under two different mutations. That matters

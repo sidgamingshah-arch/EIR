@@ -472,9 +472,45 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   over a surface of forty — a control that read as coverage, which is why the inventory now comes from
   the registration and cannot drift from it.
 
-- **`eir-persistence-jdbc` builds and passes against a live cluster, and it carries five latent
-  defects that fire the moment anything wires it to a run.** Nothing does today — no module
-  constructs `JdbcPorts` — which is exactly why they are recorded here rather than fixed in a hurry.
+- **`eir-persistence-jdbc` is now wired to `eir-batch` and a close has been driven through it.**
+  `JdbcRunComposition` builds the `RunRequest`, the `PartitionGrainSource` (the
+  `product × entity` grain read from `contract`, not inferred from the id) and the
+  `ContractPipelineFactory` — a fresh `SolveAudit` per slice, since a shared one corrupted by
+  concurrent partitions quarantines *correct* contracts, and a shared routing registry, since two
+  registries are two answers to which reading governed a period. `BatchCloseLiveTest` runs it against
+  a real cluster with Spring Batch's own `JdbcJobRepository`, not an in-memory stand-in. **104 live
+  tests, 0 failures.** The dependency points from this module to `eir-batch` and the direction is
+  argued in its pom: `eir-batch` is in the default module list, so the reverse edge would put a
+  network-dependent artefact into every `mvn -o install`.
+
+  **And the first close it ran found something none of the tests did.** A 24-period loan closed at a
+  **nil gross carrying amount** — ₹528,407.32 settled in a single period — and *every control passed*:
+  SL-2 balanced at ₹529,477.70 debits against credits, ST-2 tied at nil deviation, 0 breaches, 0
+  unaccounted, population 2 / computed 1 / quarantined 1. The cause is that
+  `contract_version_schedule_anchor` says `term_periods = 24` while `cashflow_line` holds **one** row,
+  and the two are never compared: the anchor is read for the period *ordinal* and the flows are read
+  from `cashflow_line`, so the engine faithfully amortised a one-flow loan to zero. **Nothing in the
+  control set cross-checks the flow vector against the term the anchor declares** — which is the same
+  structural failure this document records for a dropped contract ("a run short by one contract
+  reconciles perfectly, because the contract is absent from both sides of every total"), arriving as a
+  schedule short by twenty-three flows. A partially-loaded schedule is the single most likely feed
+  defect in a real deployment, and it currently produces a full settlement that reconciles.
+
+  Two more from the same run. **Only one policy kind was stamped** — `ROUTING_TABLE` — where the
+  console path stamps three; the cluster carries no `FEE_RULE_SET` or `TIER_ASSIGNMENT` row, the run
+  resolved what existed, and nothing refused, so a replay cannot reconstruct two of the three "as then
+  in force". And the **recognised interest of ₹1,070.38 reconciles to neither stored rate** applied for
+  a full period (₹5,506.79 at the superseded 0.010421491800, ₹6,076.68 at the 0.011500000000 in force
+  at the corrected boundary). **That last one is undiagnosed and is recorded as such**, not explained:
+  the implied one-period rate is 0.002025672, about 0.18 of a period, and whether that is the accrual
+  exponent, the journal's composition or something else has not been established.
+
+- **The five latent defects the module's own review found have not fired, and the reason matters.**
+  The fixture is arranged so that none of them can: its cashflow line is dated the 30th so the
+  calendar-month window catches it, every stored solve carries `PERIODIC_INDEX`, there is no weekly
+  contract, and there is one book. The wiring above is what makes them reachable; exercising them
+  needs a fixture built to, which is the next step and not this one. Nothing constructs `JdbcPorts` in
+  a *production* path even now — only a test does.
   The module was reviewed adversarially after its first successful build, on the reasoning that code
   which has never executed has never had a single claim tested. Ranked by what they cost:
 

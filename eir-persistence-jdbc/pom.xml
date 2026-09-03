@@ -95,6 +95,26 @@
       <version>${project.version}</version>
     </dependency>
 
+    <!--
+      The batch runner, so that this module can carry the COMPOSITION of the two: a RunRequest whose
+      ports are JDBC, a PartitionGrainSource that reads the partition grain out of `contract`, and a
+      ContractPipelineFactory that hands each slice the JDBC period source.
+
+      The direction is deliberate and it is the lesser of two evils. eir-batch and this module are
+      both outermost in ADR-0001's inward-only graph, so an edge between them is a wart either way.
+      It cannot run the other way: eir-batch is in the default module list and this one is behind the
+      `jdbc` profile because the driver and Flyway are not guaranteed to be cached (ADR-0011), so
+      eir-batch depending on this module would put a network-dependent artefact into every
+      `mvn -o install`. The edge therefore points here, where the profile already contains it. A
+      composition-root module would be the clean answer and is not worth a tenth module for two
+      classes; if a second composition ever appears, that is the moment to make one.
+    -->
+    <dependency>
+      <groupId>com.crisil.eir</groupId>
+      <artifactId>eir-batch</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
     <dependency>
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
