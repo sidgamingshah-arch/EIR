@@ -121,24 +121,83 @@ public final class CatchUpCalculator {
 
         List<InvariantResult> invariants = new ArrayList<>();
         invariants.add(InvariantChecks.eirUnchangedAcrossCatchUp(originalEir, persistedEirAfterEvent));
+        // CU-2. Kept, and worth knowing what it is and is not.
+        //
+        // Both sides of this comparison are the SAME SUBTRACTION -- catchUp is defined three lines
+        // above as restated.minus(gcaBefore) -- one rounded to presentation scale and one not. So
+        // the only discrepancy CU-2 can ever report is a sub-paisa rounding residue between the
+        // working scale and the published one. That is a real thing to check and it is emphatically
+        // NOT a check on the restatement: a review demonstrated the point by replacing this whole
+        // present-value calculation with `Money restated = gcaBefore;` -- deleting the arithmetic
+        // outright -- and CU-1 and CU-2 both stayed green while a 91% write-down went through. No
+        // test can make CU-2 fail on a wrong restatement, because its two inputs are one expression.
+        //
+        // The identifier's own statement, "catch-up = PV(revised, original EIR) - GCA before", is
+        // the DEFINITION of the quantity, which is precisely why it read as coverage for so long.
+        // TR-1 below is the control it was mistaken for.
         invariants.add(InvariantResult.ofMoney(
             InvariantId.CU_2,
-            "catch-up ties the published balances: restated " + restated.atPresentationScale()
-                + " less carrying amount before " + gcaBefore.atPresentationScale(),
+            "catch-up ties the published balances at presentation scale: restated "
+                + restated.atPresentationScale() + " less carrying amount before "
+                + gcaBefore.atPresentationScale(),
             restated.atPresentationScale().minus(gcaBefore.atPresentationScale()),
             catchUp));
+        invariants.addAll(terminalCheck(originalEir, restated, revisedFlows, convention));
         return new CatchUpResult(
             originalEir, persistedEirAfterEvent, gcaBefore, restated, catchUp, List.copyOf(invariants));
+    }
+
+    /**
+     * TR-1 over the restatement: a <em>second, independent</em> derivation of the restated balance.
+     *
+     * <h2>Why this is not the tautology CU-2 is</h2>
+     *
+     * <p>{@link Discounting#presentValueMoney} computes a sum of discounted flows,
+     * {@code sum(CF_t / (1+r)^t)}. {@link AmortisationEngine#eirLeg} computes an iterative
+     * roll-forward, {@code B_k = B_(k-1) * (1+r)^dtau - CF_k}, and asserts the terminal balance is
+     * nil. The two agree only if they were given the same rate, the same vector and the same
+     * convention, and only if both arithmetics are right — so a wrong exponent, an inverted sign, a
+     * dropped flow, or the restatement and the roll being handed different vectors all show up here
+     * as a non-nil terminal balance. That is the same "two independent derivations of one quantity"
+     * pattern that makes ST-2 a control rather than a tautology.
+     *
+     * <p><b>It is asserted here rather than left to the caller, and that is the whole point.</b>
+     * {@link #rollForwardRestated} has existed since this class was written and its javadoc has
+     * always claimed "TR-1 is asserted" — and nothing in {@code eir-application} ever called it, so
+     * the claim was true of the method and false of the engine. A control a caller must remember to
+     * invoke is a control a caller forgets; folding it into {@code restate} means every restatement
+     * in the system carries it, including the ones nobody has written yet.
+     *
+     * <p><b>The cost, stated.</b> This rolls the whole revised vector forward on every modification
+     * event — O(remaining periods) of fractional powers per event. On a ten-million-contract close
+     * with events on four percent of the book that is roughly four hundred thousand extra rolls.
+     * Paid deliberately: the alternative is an unbounded restatement nothing checks, which is what
+     * the engine had.
+     *
+     * <p>Returns empty rather than throwing where the revised vector carries no future flow. An
+     * event whose revised schedule is empty is a data condition for the caller to quarantine, and a
+     * terminal-balance assertion over no flows would either divide by nothing or pass vacuously —
+     * the second being worse, since a vacuous pass under TR-1's identifier is the exact failure this
+     * method exists to end.
+     */
+    private static List<InvariantResult> terminalCheck(
+        Rate originalEir, Money restated, FlowVector revisedFlows, TimeConvention convention) {
+
+        if (revisedFlows.future().isEmpty()) {
+            return List.of();
+        }
+        return AmortisationEngine.eirLeg(restated, originalEir, revisedFlows, convention)
+            .invariants();
     }
 
     /**
      * Rolls the restated balance forward over the revised flows at the retained
      * EIR — the post-modification schedule of reference case 3.
      *
-     * <p>TR-1 is asserted: the restated balance <em>is</em> the present value of
-     * these flows at this rate, so it amortises to zero over them by construction,
-     * and a residue would mean the restatement and the roll-forward were given
-     * different vectors.
+     * <p>TR-1 is asserted, and {@link #restate} now asserts it too — see
+     * {@link #terminalCheck}. This method remains for a caller that wants the post-modification
+     * <em>rows</em> and not merely the invariant: reference case 3's schedule is read off them.
+     * The restatement's own TR-1 no longer depends on anybody calling this.
      */
     public static AmortisationResult rollForwardRestated(
         CatchUpResult restatement, FlowVector revisedFlows, TimeConvention convention) {
