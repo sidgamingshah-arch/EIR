@@ -1,7 +1,7 @@
 # 10 — Decision Register
 
-Every item in this repository that needs a human to decide something. Forty-six of them. Ten are on
-the critical path.
+Every item in this repository that needs a human to decide something. Forty-seven of them. Eleven are
+on the critical path.
 
 This document exists because sixteen of the seventeen open workstreams in [08](08-roadmap.md) are
 things code can close, and three are not. An engine cannot approve its own materiality threshold,
@@ -139,6 +139,17 @@ why a signed threshold would be the wrong instrument.
 | **If it is not decided** | A constant in `eir-policy` decides which instruments a statutory refusal catches. Its own javadoc says as much: "a policy default of one half, not a specification figure". Neither [03 § 10.3](03-calculation-spec.md#103-where-approximation-is-never-permitted) nor [Case 9](reference-cases/case-09-straight-line-vs-eir.md) publishes a number — they publish the mechanism and an absolute prohibition. The zero-coupon limb does not depend on the threshold at all, so the absolute part of FR-412 holds wherever it is set; the deep-discount limb *is* the threshold. Set too high, the shortfall is the Cambodia failure mode, measured on Case 9 at **81.0%** overstatement of year-one income. Set too low, the cost is Tier 2 measurement — which 03 § 10.2 already names as the consequence of a stale test. |
 | **Reference** | `EquivalenceTestSubject.DEEP_DISCOUNT_ACCRETION_SHARE` · [03 § 10.3](03-calculation-spec.md#103-where-approximation-is-never-permitted) · FR-412 · [Case 9](reference-cases/case-09-straight-line-vs-eir.md) · [the Board note](papers/deep-discount-threshold-board-note.md) |
 | **Critical path** | **Yes**, before the first Tier 3 population is measured. |
+
+### DR-06a — The catch-up materiality threshold, and the control that needs it
+
+| | |
+|---|---|
+| **Owner** | Sub-committee. No paper drafted yet; this row exists because the gap was found by running a close and must not wait for the paper to be visible. |
+| **The ask** | Approve the share of a contract's carrying amount above which a B5.4.6 catch-up restatement must **breach an invariant and block the close** until someone accepts it under four eyes. A figure, and whether it is one-sided (write-downs only) or symmetric. |
+| **If it is not decided** | **A catch-up of any size is recognised silently, and this is not hypothetical.** The first close driven through the JDBC ports restated a contract from ₹528,407.32 to ₹46,538.28 — a catch-up of **−₹481,869.04, 91% of the carrying amount, in one period** — because the revised flow vector held one of the twelve flows the term implied. Every control passed: CU-1 satisfied, CU-2 satisfied, SL-2 balanced, ST-2 tied, zero breaches. **CU-2 cannot catch it by construction**: `catchUp` is *defined* as `restated − gcaBefore` and CU-2 asserts that same subtraction, so the only thing it can ever report is a rounding residue ([03 § 9](03-calculation-spec.md#9-invariants)). Until a threshold exists there is no control anywhere in the engine that bounds a restatement's size. |
+| **Why the engine cannot default it** | The two obvious code-side answers are both wrong. Refusing a revised vector shorter than the remaining term **false-refuses every legitimate modification that shortens a schedule**, which is a large share of real reschedules. Picking a share in code repeats what `DEEP_DISCOUNT_ACCRETION_SHARE` is on this register *for*. What the engine can and should build without a decision is a second, independent derivation of the restated balance — that is a correctness control, not a materiality one, and it is tracked in [08](08-roadmap.md) rather than here. |
+| **Reference** | `CatchUpCalculator.restate` · `InvariantId.CU_2` · [03 § 9](03-calculation-spec.md#9-invariants) · B5.4.6 · FR-505 |
+| **Critical path** | **Yes**, before the first period in which a modification is processed — which is any period after go-live, not a later phase. |
 
 ### DR-07 — What "fully collateralised low-fee" means
 

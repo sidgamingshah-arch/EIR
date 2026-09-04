@@ -131,41 +131,68 @@ class BatchCloseLiveTest {
 
             CompletedRun completed = runner.run(request);
 
-            // The aggregation-over-nothing trap, guarded explicitly. Every total in a run is nil
-            // and tying over an empty population, and isNotEmpty() on the results list is satisfied
-            // by one contract -- so the census is asserted as figures a reader can check rather than
-            // as a non-emptiness that reads the same whether the run did one contract or ten million.
-            System.out.println("[census] " + completed.aggregate().describe());
-            System.out.println("[census] computed=" + completed.aggregate().computedCount()
-                + " quarantined=" + completed.aggregate().quarantinedCount()
-                + " unaccounted=" + completed.aggregate().unaccountedFor()
-                + " journals=" + completed.aggregate().journals().size()
-                + " breaches=" + completed.aggregate().breaches().size()
-                + " reportsCleanClose=" + completed.aggregate().reportsCleanClose());
-            System.out.println("[census] quarantined ids="
-                + completed.aggregate().quarantinedContracts());
-            System.out.println("[census] totalClosingGca=" + completed.aggregate().totalClosingGca());
-            System.out.println("[census] policyStamps=" + completed.policyVersionsConsulted());
-            System.out.println("[census] slices=" + store.recordedSlices(request.runId()));
-            for (com.crisil.eir.application.ContractResult r : completed.aggregate().results()) {
-                System.out.println("[result] " + r.contractId()
-                    + " computed=" + r.isComputed()
-                    + " closingGca=" + (r.isComputed() ? String.valueOf(r.closingGca()) : "-")
-                    + " journal=" + (r.journal() == null ? "none" : "present")
-                    + " invariants=" + r.invariants().size());
-                for (com.crisil.eir.domain.InvariantResult iv : r.invariants()) {
-                    System.out.println("[result]    " + iv.id() + " satisfied=" + iv.satisfied()
-                        + " dev=" + iv.deviation() + " :: "
-                        + String.valueOf(iv.detail()).substring(0,
-                            Math.min(160, String.valueOf(iv.detail()).length())));
-                }
-            }
+            // WHAT THIS RUN ACTUALLY DID, pinned rather than printed. The first close through
+            // these ports restated the contract from 528,407.32 to 46,538.28 -- a catch-up of
+            // -481,869.04, 91% of the carrying amount, in one period -- and closed it to nil, with
+            // CU-1, CU-2, SL-2 and ST-2 all satisfied and zero breaches.
+            //
+            // The chain, traced: the period carries a NEGOTIATED event which the baseline table
+            // routes to MODIFICATION_TEST; that is a B5.4.6 restatement to the present value of the
+            // REVISED flows at the original EIR; the revised vector holds ONE flow of 47,073.47
+            // against a 24-period term at ordinal 13; so the restated balance is that flow's PV at
+            // 0.0115. CatchUpCalculator says the roll to nil then follows "by construction".
+            //
+            // Asserted here, deliberately, as the CURRENT behaviour and not as correct behaviour.
+            // The finding is recorded in docs/03 section 9 and the missing materiality threshold in
+            // docs/10 as DR-06a. When that control lands this test must fail, and it should: a test
+            // pinning a 91% write-down as unremarkable is the thing that has to break when somebody
+            // finally bounds it. Derived by hand from the fixture's own inserts, not from output.
+            com.crisil.eir.application.run.ContractComputation computed = composition.pipelines()
+                .forSlice(request, com.crisil.eir.batch.PartitionKey.grain(
+                    Fixtures.PRODUCT_ID, "ENT-01"))
+                .compute(Fixtures.CONTRACT_ID);
+
+            assertThat(computed.routing()).isNotNull();
+            assertThat(computed.routing().mechanism().name())
+                .as("a NEGOTIATED event under the baseline table is a modification test")
+                .isEqualTo("MODIFICATION_TEST");
+            assertThat(computed.catchUp()).as("which restates the carrying amount").isNotNull();
+            assertThat(computed.catchUp().catchUp().atPresentationScale().amount())
+                .as("-481,869.04 on an opening of 528,407.32 is a 91%% write-down in one period")
+                .isEqualByComparingTo(new java.math.BigDecimal("-481869.04"));
+            assertThat(computed.closingGca().isZero())
+                .as("and the contract closes to nil, which CatchUpCalculator calls 'by"
+                    + " construction' once the restated balance is the PV of those flows")
+                .isTrue();
+            assertThat(computed.catchUp().invariants())
+                .as("CU-1 and CU-2 both report satisfied through all of it -- CU-2 cannot do"
+                    + " otherwise, because catchUp is DEFINED as restated minus gcaBefore and CU-2"
+                    + " asserts that same subtraction. This assertion is the record of a tautology,"
+                    + " not evidence of a working control.\n"
+                    + "\n"
+                    + "DEMONSTRATED, not merely argued. Replacing the whole restatement in"
+                    + " CatchUpCalculator with `Money restated = gcaBefore;` -- discarding the"
+                    + " present-value calculation entirely -- makes the catch-up 0.00 and fails the"
+                    + " assertion above, while CU-1 and CU-2 BOTH STAY GREEN. A control that"
+                    + " survives the deletion of the arithmetic it exists to check is not a"
+                    + " control, and no test can make it fail because its two inputs are the same"
+                    + " subtraction. The fix is a second independent derivation of the restated"
+                    + " balance (docs/03 section 9); the materiality threshold that would bound the"
+                    + " catch-up is a Board decision, docs/10 DR-06a")
+                .allMatch(com.crisil.eir.domain.InvariantResult::satisfied);
+            assertThat(computed.invariants())
+                .as("and nothing else breached either")
+                .allMatch(com.crisil.eir.domain.InvariantResult::satisfied);
 
             assertThat(completed.aggregate().computedCount()
                     + completed.aggregate().quarantinedCount())
-                .as("the run must have touched the seeded population, not an empty one")
-                .isPositive();
+                .as("computed plus quarantined must be the whole population")
+                .isEqualTo(completed.aggregate().results().size());
+            assertThat(completed.policyVersionsConsulted())
+                .as("the run stamps the versions it read, so a replay can resolve the same ones")
+                .isNotEmpty();
         }
+
 
         @Test
         @DisplayName("the grain comes from the contract table, not from the contract id")

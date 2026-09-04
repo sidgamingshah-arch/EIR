@@ -484,17 +484,43 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   network-dependent artefact into every `mvn -o install`.
 
   **And the first close it ran found something none of the tests did.** A 24-period loan closed at a
-  **nil gross carrying amount** — ₹528,407.32 settled in a single period — and *every control passed*:
-  SL-2 balanced at ₹529,477.70 debits against credits, ST-2 tied at nil deviation, 0 breaches, 0
-  unaccounted, population 2 / computed 1 / quarantined 1. The cause is that
-  `contract_version_schedule_anchor` says `term_periods = 24` while `cashflow_line` holds **one** row,
-  and the two are never compared: the anchor is read for the period *ordinal* and the flows are read
-  from `cashflow_line`, so the engine faithfully amortised a one-flow loan to zero. **Nothing in the
-  control set cross-checks the flow vector against the term the anchor declares** — which is the same
-  structural failure this document records for a dropped contract ("a run short by one contract
-  reconciles perfectly, because the contract is absent from both sides of every total"), arriving as a
-  schedule short by twenty-three flows. A partially-loaded schedule is the single most likely feed
-  defect in a real deployment, and it currently produces a full settlement that reconciles.
+  **nil gross carrying amount** with *every control passing*: SL-2 balanced at ₹529,477.70 debits
+  against credits, ST-2 tied at nil deviation, 0 breaches, 0 unaccounted, population 2 / computed 1 /
+  quarantined 1.
+
+  **The mechanism, traced rather than assumed** — an earlier version of this paragraph said the engine
+  "amortised a one-flow loan to zero" through the ordinary roll, and that was wrong. The period carries
+  a `NEGOTIATED` lifecycle event dated 2027-04-15, which the baseline table routes to
+  **`MODIFICATION_TEST`**. That performs a B5.4.6 catch-up restatement: the carrying amount becomes the
+  present value of the **revised** expected cash flows at the original EIR. The revised vector holds
+  **one** flow of ₹47,073.47, so the restated balance is its PV at 0.0115 — **₹46,538.28** — and the
+  catch-up is `46,538.28 − 528,407.32 =` **−₹481,869.04**. A **91% write-down of the carrying amount,
+  recognised in a single period.** The roll then closes it: 46,538.28 + 535.19 interest − 47,073.47
+  cash = nil. `CatchUpCalculator`'s own comment says the restated balance "amortises to zero over them
+  by construction", so nil is the *expected* outcome once the revised vector is what it is.
+
+  **Two control gaps, and the second is the serious one.** Nothing compares the revised vector against
+  the contract's remaining term — `ContractTerms.termPeriods` is 24 and the ordinal is 13, so twelve
+  flows should remain and one was supplied. And **CU-2 cannot detect it, because CU-2 asserts an
+  identity**: `catchUp` is *defined* in `CatchUpCalculator.restate` as `restated.minus(gcaBefore)`, and
+  CU-2 compares `restated − gcaBefore` against exactly that. The only discrepancy it can ever report is
+  a presentation-scale rounding residue. Its statement in `InvariantId` — "catch-up = PV(revised,
+  original EIR) − GCA before" — *is* the definition of the quantity, which is precisely why it reads as
+  a control. CU-1 was vacuous here too: it compares the original EIR to the persisted one and both were
+  0.0115.
+
+  So a 91% write-down went through with a green CU-1, a green CU-2, a balanced journal and a tying
+  ST-2. **A truncated revised vector is indistinguishable from a genuine final period**, and a
+  partially-loaded schedule is the likeliest feed defect in a real deployment.
+
+  **Why no control is added in the same pass.** The obvious one — bound the catch-up as a share of the
+  carrying amount and breach above it — needs a *threshold*, and a materiality threshold is a Board
+  decision, not something an engine author invents; it belongs in
+  [10](10-decision-register.md) beside `DEEP_DISCOUNT_ACCRETION_SHARE`. The naive alternative,
+  refusing a revised vector shorter than the remaining term, would **false-refuse every legitimate
+  modification that shortens a schedule**, which is a large share of real reschedules. What can be
+  built without a policy input is a second, independent derivation of the restated balance — the
+  pattern ST-2 already uses — and that is the scoped next step.
 
   Two more from the same run. **Only one policy kind was stamped** — `ROUTING_TABLE` — where the
   console path stamps three; the cluster carries no `FEE_RULE_SET` or `TIER_ASSIGNMENT` row, the run

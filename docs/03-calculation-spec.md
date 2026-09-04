@@ -1112,34 +1112,63 @@ run, so they are latent — which is the honest reason they are recorded rather 
 same hour they were found. The engine's exit gate for this module is not "the tests pass"; it is a
 close driven through these ports.
 
-**That close has now been run, and it found a control gap none of the five reviews did.** With
-`eir-batch` wired to the JDBC ports, a 24-period loan closed at a **nil gross carrying amount** —
-₹528,407.32 settled in one period — while SL-2 balanced, ST-2 tied at nil deviation, and the run
-reported 0 breaches and 0 unaccounted contracts. The engine was faithful:
-`contract_version_schedule_anchor` declares `term_periods = 24` and `cashflow_line` holds one row, so
-the vector really did describe a loan maturing that period. **What is missing is any control comparing
-the two.** The anchor is read for the period ordinal, the flows are read from `cashflow_line`, and
-nothing asserts that a contract with twelve periods left has twelve flows ahead of it.
+**That close has now been run, and it found a tautology that five review passes and 3,400 tests did
+not.** With `eir-batch` wired to the JDBC ports, a 24-period loan closed at a **nil gross carrying
+amount** while SL-2 balanced, ST-2 tied at nil deviation, CU-1 and CU-2 both reported satisfied, and
+the run reported 0 breaches and 0 unaccounted contracts.
+
+**The mechanism, traced rather than assumed** — a first reading of this attributed it to the ordinary
+roll over a one-flow schedule, and that was wrong. The period carries a `NEGOTIATED` event which the
+baseline table routes to `MODIFICATION_TEST`: a B5.4.6 catch-up restatement, where the carrying amount
+becomes the present value of the **revised** expected cash flows at the original EIR. The revised
+vector held **one** flow of ₹47,073.47 against a term of 24 periods at ordinal 13. So the restated
+balance was that flow's PV at 0.0115 — ₹46,538.28 — and the catch-up was **−₹481,869.04: a 91%
+write-down of the carrying amount in a single period.** The roll then closed the contract to nil, which
+`CatchUpCalculator` says happens "by construction" once the restated balance is the PV of those flows.
+
+**CU-2 asserts an identity.** In `CatchUpCalculator.restate`:
+
+```java
+Money catchUp = restated.minus(gcaBefore);      // the quantity is DEFINED here
+...
+InvariantResult.ofMoney(InvariantId.CU_2, "...",
+    restated.atPresentationScale().minus(gcaBefore.atPresentationScale()),  // expected
+    catchUp);                                                               // actual
+```
+
+The two sides are the same subtraction, one rounded and one not, so the **only** discrepancy CU-2 can
+ever report is a presentation-scale rounding residue. **This was demonstrated, not merely argued:**
+replacing the entire restatement with `Money restated = gcaBefore;` — deleting the present-value
+calculation outright — drives the catch-up to nil and **leaves CU-1 and CU-2 both green**. A control
+that survives the deletion of the arithmetic it exists to check is not a control, and no test can make
+it fail, because its two inputs are the same expression. It cannot detect a wrong restatement, a wrong
+revised vector, or a catch-up of any magnitude whatever. And its statement in `InvariantId` —
+"catch-up = PV(revised, original EIR) − GCA before" — *is* the definition of the quantity, which is
+exactly why it reads as coverage. CU-1 was vacuous on this run too: it compares the original EIR to the
+persisted one, and both were 0.0115.
 
 | Finding | Family |
 |---|---|
-| A schedule short by 23 of 24 flows produces a full settlement that satisfies SL-2, ST-2 and the breach count | **the "reconciles perfectly" family, at a new level** — the same structure as a dropped contract, one level down: what is absent is absent from both sides |
-| A run stamped one of three policy kinds and closed without complaint, so a replay cannot resolve the fee rule set or the tier policy as then in force | control with no caller — nothing asserts a run stamped every kind it depends on |
+| **CU-2 compares a quantity against its own definition**, so it reports satisfied through a 91% write-down | **control that cannot fail** — and unlike the earlier instances the id's own *statement* is the tautology, so reading the invariant list does not reveal it |
+| Nothing compares the **revised** flow vector against the contract's remaining term, so a truncated vector is indistinguishable from a genuine final period | the "reconciles perfectly" family, one level below a dropped contract |
+| A run stamped one of three policy kinds and closed without complaint, so a replay cannot resolve the fee rule set or the tier policy as then in force | control with no caller |
 | Recognised interest of ₹1,070.38 reconciles to neither stored rate for a full period | **undiagnosed, and recorded as such** |
 
-**The third is left open deliberately and the reason is the same one the tier gate was left open
-for.** The implied one-period rate is 0.002025672 — roughly 0.18 of a period — and whether that is the
-accrual exponent, the journal's composition, or an interaction with the ordinal correction above has
-not been established. Guessing at it and adjusting a figure to match would be the worst available
-version of this fix, because the figure that would move is the one an auditor reads. It is written
-down as unexplained.
+**The fourth is left open deliberately, for the reason the tier gate was.** The implied one-period rate
+is 0.002025672 — roughly 0.18 of a period. Whether that is the accrual exponent over the restated
+balance, the journal's composition, or an interaction with the ordinal correction above has not been
+established, and adjusting a figure to make it reconcile would move the number an auditor reads.
 
-**Why the flow-count control is not added in the same pass.** Adding it means either an
-internally-consistent 24-flow fixture — which changes figures asserted across three live test classes
-— or a new `InvariantId` and a pipeline-level assertion comparing `ContractTerms.termPeriods` against
-the vector. Both are real work with real blast radius, and the standing precedent in this document is
-that a finding of this size is recorded before it is patched. The one thing that would be wrong is to
-leave it unwritten.
+**Why no control is added in the same pass, as a design constraint rather than an excuse.** The obvious
+control — breach when the catch-up exceeds a material share of the carrying amount — needs a
+**threshold**, and a materiality threshold is a Board decision belonging in
+[10](10-decision-register.md) beside `DEEP_DISCOUNT_ACCRETION_SHARE`, not something an engine author
+invents. The naive alternative — refuse a revised vector shorter than the remaining term — would
+**false-refuse every legitimate modification that shortens a schedule**, which is a large share of real
+reschedules, and this document already records three controls that had to be argued back from exactly
+that kind of over-strictness. What *can* be built with no policy input is a **second independent
+derivation of the restated balance**, which is the pattern that makes ST-2 a control rather than a
+tautology. That is the scoped next step, and it is the fix CU-2 actually needs.
 
 **And every one of the five earlier fixes is mutation-verified.** Reverting each guard fails the test that claims
 it; the headroom tie-break fails two different tests under two different mutations. That matters
