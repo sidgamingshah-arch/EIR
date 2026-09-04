@@ -1159,16 +1159,41 @@ is 0.002025672 — roughly 0.18 of a period. Whether that is the accrual exponen
 balance, the journal's composition, or an interaction with the ordinal correction above has not been
 established, and adjusting a figure to make it reconcile would move the number an auditor reads.
 
-**Why no control is added in the same pass, as a design constraint rather than an excuse.** The obvious
-control — breach when the catch-up exceeds a material share of the carrying amount — needs a
-**threshold**, and a materiality threshold is a Board decision belonging in
-[10](10-decision-register.md) beside `DEEP_DISCOUNT_ACCRETION_SHARE`, not something an engine author
-invents. The naive alternative — refuse a revised vector shorter than the remaining term — would
-**false-refuse every legitimate modification that shortens a schedule**, which is a large share of real
-reschedules, and this document already records three controls that had to be argued back from exactly
-that kind of over-strictness. What *can* be built with no policy input is a **second independent
-derivation of the restated balance**, which is the pattern that makes ST-2 a control rather than a
-tautology. That is the scoped next step, and it is the fix CU-2 actually needs.
+**The fix CU-2 needed already existed and was never called.** `CatchUpCalculator.rollForwardRestated`
+has claimed "TR-1 is asserted" in its javadoc since the class was written, and nothing in
+`eir-application` ever called it — so the claim was true of the method and false of the engine. That is
+the **fourth** control-with-no-caller in this programme. TR-1 is the second independent derivation:
+`Discounting.presentValueMoney` sums discounted flows, `AmortisationEngine.eirLeg` iterates
+`B_k = B_(k−1)·(1+r)^Δτ − CF_k` and asserts the terminal balance is nil. They agree only if both
+arithmetics are right and both were handed the same rate, vector and convention. It is now folded into
+`restate` itself rather than left to callers, because a control a caller must remember to invoke is a
+control a caller forgets — which is the defect being fixed.
+
+**What TR-1 buys, and what it does not, worked by hand rather than claimed.** The mutation CU-2 slept
+through is now caught: `restated = gcaBefore` rolled over reference case 3's flows leaves a terminal
+residue instead of nil. But **TR-1 passes on the 91% write-down**, and it must — 46,538.28 × 1.0115 −
+47,073.47 is nil, because the restatement and the roll consume the *same* truncated vector and
+therefore agree with each other. TR-1 detects an inconsistency **between two derivations**; it cannot
+detect a wrong input to both. A test pins that boundary deliberately
+(`terminalBalanceCannotCatchATruncatedVector`) so nobody later reads TR-1 as more than it is.
+
+**And the fix reproduced the defect it was fixing, which is the most useful thing in this entry.** The
+first version of its tests asserted that TR-1 was *present* and *satisfied* — and a mutation replacing
+the whole terminal check with `List.of(InvariantResult.pass(InvariantId.TR_1, "vacuous"))` **left all
+three green**. A vacuous pass under a real identifier, inside the change that existed to end vacuous
+passes. The tests now assert that TR-1's detail carries the roll's own period count ("after 18
+periods", "after 1 periods"), which only the evaluator can produce after actually walking the vector.
+Three mutations are now caught: the wiring removed, the check made vacuous, and the roll performed at
+the wrong rate. **The standing mitigation earned its place again — the first mutation run is what
+revealed the fix was worthless, not review and not the 1,211 tests that passed around it.**
+
+**Bounding the magnitude is still not done, as a design constraint rather than an excuse.** Breaching
+when the catch-up exceeds a material share of the carrying amount needs a **threshold**, and a
+materiality threshold is a Board decision belonging in [10](10-decision-register.md) beside
+`DEEP_DISCOUNT_ACCRETION_SHARE`. The naive alternative — refuse a revised vector shorter than the
+remaining term — would **false-refuse every legitimate modification that shortens a schedule**, which
+is a large share of real reschedules, and this document already records three controls argued back from
+exactly that over-strictness.
 
 **And every one of the five earlier fixes is mutation-verified.** Reverting each guard fails the test that claims
 it; the headroom tie-break fails two different tests under two different mutations. That matters

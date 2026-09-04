@@ -326,6 +326,118 @@ class CatchUpCalculatorTest {
         assertThat(runs.get(1).restatedGca().amount()).isEqualByComparingTo(runs.get(0).restatedGca().amount());
     }
 
+    @Test
+    @DisplayName("TR-1 is asserted by restate itself, so no caller can omit the one real check")
+    void restateAssertsTheTerminalBalance() {
+        // The finding this test exists for. CatchUpCalculator.rollForwardRestated has claimed
+        // "TR-1 is asserted" in its javadoc since this class was written, and NOTHING in
+        // eir-application ever called it -- so the claim was true of the method and false of the
+        // engine. A close driven through the JDBC ports published a restatement carrying CU-1 and
+        // CU-2 only. TR-1 is now folded into restate, which is the difference between a control and
+        // an available control.
+        CatchUpResult restatement =
+            CatchUpCalculator.restate(CASE1_EIR, GCA_AT_MONTH_12, case3RevisedFlows(), MONTHLY);
+
+        assertThat(restatement.invariants())
+            .extracting(InvariantResult::id)
+            .as("every restatement carries all three, including the ones nobody has written yet")
+            .contains(InvariantId.CU_1, InvariantId.CU_2, InvariantId.TR_1);
+        InvariantResult terminal = invariant(restatement, InvariantId.TR_1);
+        assertThat(terminal.satisfied())
+            .as("reference case 3's restatement amortises to nil over its own revised flows")
+            .isTrue();
+
+        // AND THE RESULT MUST COME FROM THE EVALUATOR, not be fabricated. This assertion exists
+        // because the first version of these tests did not have it, and a mutation proved them
+        // worthless: replacing the whole terminal check with
+        // `List.of(InvariantResult.pass(InvariantId.TR_1, "vacuous"))` left all three green. A
+        // vacuous pass under a real identifier is the precise defect this change set out to end, so
+        // reproducing it inside the fix and not noticing would have been the worst outcome available.
+        //
+        // AmortisationEngine.roll is the only thing that phrases TR-1 this way, and it can only
+        // phrase it after walking the vector -- so the period count in the detail is evidence that
+        // the roll actually happened. Reference case 3's revised schedule is 18 periods.
+        assertThat(terminal.detail())
+            .as("the detail carries the roll's own period count, which a fabricated pass cannot")
+            .contains("terminal EIR-leg carrying amount after 18 periods");
+    }
+
+    @Test
+    @DisplayName("TR-1 catches a restatement CU-2 cannot: a balance that is not the flows' PV")
+    void terminalBalanceCatchesAWrongRestatement() {
+        // WHY THIS IS NOT THE TAUTOLOGY CU-2 IS. CU-2 compares restated - gcaBefore against
+        // catchUp, and catchUp is DEFINED as restated - gcaBefore, so it can only ever report a
+        // sub-paisa rounding residue. A review proved that by replacing the whole present-value
+        // calculation with `restated = gcaBefore` -- deleting the arithmetic -- and CU-1 and CU-2
+        // both stayed green.
+        //
+        // TR-1 is a SECOND, INDEPENDENT derivation: presentValueMoney sums discounted flows, while
+        // AmortisationEngine.eirLeg iterates B*(1+r)^dtau - CF and asserts the terminal balance is
+        // nil. The two agree only if both arithmetics are right and both were handed the same rate,
+        // vector and convention.
+        //
+        // Performed here the way that mutation would be seen from outside: restate a balance that
+        // is NOT the present value of the flows, by handing it a carrying amount and then rolling
+        // that same carrying amount forward. Derived by hand from reference case 3's own figures:
+        // the true restated balance is 527,779.90, so rolling 528,407.32 forward over the revised
+        // flows instead must leave a terminal residue of 528,407.32 - 527,779.90 = 627.42 accreted
+        // over the remaining 18 periods -- decidedly not nil, whatever its exact size.
+        FlowVector revised = case3RevisedFlows();
+        AmortisationResult wrong =
+            AmortisationEngine.eirLeg(GCA_AT_MONTH_12, CASE1_EIR, revised, MONTHLY);
+
+        InvariantResult terminal = wrong.invariants().stream()
+            .filter(entry -> entry.id() == InvariantId.TR_1)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("eirLeg must assert TR-1"));
+        assertThat(terminal.satisfied())
+            .as("a balance that is not the PV of these flows does not amortise to nil, and TR-1"
+                + " is the only control in the restatement that can say so")
+            .isFalse();
+        assertThat(wrong.terminalBalance().atPresentationScale().amount())
+            .as("and the residue is the restatement error itself, accreted over 18 periods")
+            .isNotEqualByComparingTo(bd("0.00"));
+    }
+
+    @Test
+    @DisplayName("TR-1 does NOT catch a truncated revised vector, and that boundary is the point")
+    void terminalBalanceCannotCatchATruncatedVector() {
+        // The honest limit of the fix above, pinned so nobody reads TR-1 as more than it is.
+        //
+        // A close through the JDBC ports restated a contract from 528,407.32 to 46,538.28 -- a 91%
+        // write-down in one period -- because the revised vector held one flow where the term
+        // implied twelve. TR-1 passes on that, and it must: the restatement and the roll-forward
+        // consume the SAME truncated vector, so they agree with each other. TR-1 detects an
+        // inconsistency between two derivations; it cannot detect a wrong input to both.
+        //
+        // Reproduced on reference case 3's own numbers: keep only the FIRST revised flow, restate
+        // to its present value, and TR-1 is satisfied while the carrying amount collapses.
+        FlowVector full = case3RevisedFlows();
+        FlowVector truncated = FlowVector.of(
+            full.anchorDate(), full.currency(), List.of(full.future().get(0)));
+
+        CatchUpResult restatement =
+            CatchUpCalculator.restate(CASE1_EIR, GCA_AT_MONTH_12, truncated, MONTHLY);
+
+        InvariantResult truncatedTerminal = invariant(restatement, InvariantId.TR_1);
+        assertThat(truncatedTerminal.satisfied())
+            .as("satisfied, because one flow's PV does amortise to nil over that one flow")
+            .isTrue();
+        assertThat(truncatedTerminal.detail())
+            .as("and it is the real evaluator saying so over a ONE-period roll, not a fabrication")
+            .contains("terminal EIR-leg carrying amount after 1 periods");
+        assertThat(invariant(restatement, InvariantId.CU_2).satisfied())
+            .as("and CU-2 too, as ever")
+            .isTrue();
+        assertThat(restatement.restatedGca().atPresentationScale().amount())
+            .as("while the carrying amount collapses to a single instalment's present value")
+            .isLessThan(bd("40000.00"));
+        assertThat(restatement.isCharge())
+            .as("a write-down of most of the balance, with every invariant green -- which is why"
+                + " the materiality threshold is docs/10 DR-06a and not a code default")
+            .isTrue();
+    }
+
     private static InvariantResult invariant(CatchUpResult result, InvariantId id) {
         return result.invariants().stream()
             .filter(entry -> entry.id() == id)
