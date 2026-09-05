@@ -531,12 +531,28 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   the implied one-period rate is 0.002025672, about 0.18 of a period, and whether that is the accrual
   exponent, the journal's composition or something else has not been established.
 
-- **The five latent defects the module's own review found have not fired, and the reason matters.**
-  The fixture is arranged so that none of them can: its cashflow line is dated the 30th so the
-  calendar-month window catches it, every stored solve carries `PERIODIC_INDEX`, there is no weekly
-  contract, and there is one book. The wiring above is what makes them reachable; exercising them
-  needs a fixture built to, which is the next step and not this one. Nothing constructs `JdbcPorts` in
-  a *production* path even now — only a test does.
+- **All five latent defects are now exercised against a live cluster, and every one is confirmed.**
+  `LatentDefectsLiveTest` drives each on data that trips it, seeded into a **second database** — one
+  of the five is a missing book predicate, and putting a second book into the shared fixture would
+  turn every other live test red for a defect already recorded, which is true and useless. **112 live
+  tests, 0 failures.** Every assertion pins *current* behaviour, not correct behaviour: several should
+  change, and when they do these tests must fail and be rewritten.
+
+  | Defect | What the live cluster showed |
+  |---|---|
+  | RC-1 compares a field against itself | **Confirmed, and it is the worst of the five because it needs no unusual data at all.** A single `UPDATE cbs_billed_interest SET billed_interest = 99999.99` moves **both** legs together — the engine leg through `OpeningState.contractualInterestBilled`, the CBS leg through the feed port. No value of that column can separate them, so RC-1's deviation is structurally nil |
+  | `SELECT_POPULATION` ignores the book | **Confirmed, and symmetric.** A `MAIN` run enumerates the `IGAAP` contract and an `IGAAP` run enumerates the `MAIN` ones. Worse than the enumeration: the foreign contract has no `MAIN`-book balance, so it is quarantined under FR-905 with a message about a *missing opening state* — an operator reads "no state recorded" for a contract that is simply not theirs |
+  | The rate is wrapped without its convention | **Confirmed, and it does not refuse.** A `MONTHLY` schedule with an `ACTUAL_DATE` solve yields a rate at 12 periods a year while the stored convention implies 1, and `periodFor` **throws nothing** — the contradiction travels into the roll-forward, where a refusal (if any) names an arithmetic precondition rather than the two disagreeing columns somebody has to go and fix |
+  | The flow window is the calendar month | **Confirmed, and sharper than expected.** A flow dated 2027-05-15 filed under period 202704 — legal, since **nothing in V1 ties `flow_date` to `period_id`, though `period_id` is the partition key** — is absent from its own period's vector. What is substituted is not emptiness but a **synthetic zero-amount boundary flow**, which is indistinguishable from a genuinely payment-free period and passes every check. An empty vector might have been refused downstream; a nil flow is not |
+  | A weekly contract yields several boundaries | **Confirmed.** Four April instalments come back as four flows in one period's vector, so the pipeline receives four accrual boundaries and refuses `roll.periods() != 1` — reinstating one layer up exactly the abort `CompoundingBasis.stepOf` was rewritten to prevent |
+
+  **A sixth finding, from the schema rather than the adapters:** `cashflow_line.period_id` is the
+  range partition key and **no constraint requires it to agree with `flow_date`**. A feed that computed
+  the period wrongly files an economically-real flow into a partition whose window excludes it, and
+  both the row and the totals look ordinary. Every other period column in V1 and V2 is shape-checked;
+  this pairing is not checked at all.
+
+  Nothing constructs `JdbcPorts` in a *production* path even now — only tests do.
   The module was reviewed adversarially after its first successful build, on the reasoning that code
   which has never executed has never had a single claim tested. Ranked by what they cost:
 

@@ -136,7 +136,7 @@ final class Fixtures {
         }
     }
 
-    private static String[] statements() {
+    static String[] statements() {
         return new String[] {
             // ---- taxonomy and identities ---------------------------------------------------
             """
