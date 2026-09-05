@@ -78,9 +78,8 @@ public record ContractualLegInterest(String contractId, int periodId, Money cont
      * is named for the leg it usually describes, and on this leg the figure is contractual
      * interest. The neutral accessor exists precisely so that a reader of this line is not told the
      * wrong thing about which rate produced it.
-     */
-    /**
-     * The period's contractual interest, at the scale it was billed.
+     *
+     * <h2>The period's contractual interest, at the scale it was billed</h2>
      *
      * <p><b>The reduction to presentation scale happens here, and placing it took two wrong
      * answers first.</b> The two systems being reconciled differ structurally: the engine accrues
@@ -122,6 +121,34 @@ public record ContractualLegInterest(String contractId, int periodId, Money cont
         // place it can go.
         return new ContractualLegInterest(
             contractId, periodId, row.interestAccrued().atPresentationScale());
+    }
+
+    /**
+     * As {@link #fromContractualLeg}, from a single period's accrual rather than a whole leg.
+     *
+     * <p><b>Why this exists rather than a call to {@code atPresentationScale()} at the call
+     * site.</b> A period close rolling one contract forward holds the contractual accretion as one
+     * {@link Money} — it computed {@code openingContractual x ((1+r)^n - 1)} for this period and
+     * has no {@link AmortisationResult} to hand over. Without a named route here, that caller
+     * reduces the figure itself, and the billed-in-paise rule then lives in two places. This
+     * repository has a defect family for exactly that shape: one rule in two places eventually
+     * gives two answers, because only one of them gets amended.
+     *
+     * <p>So the reduction stays in this class, applied identically by both factories, and the call
+     * site reads as what it is doing — handing over an engine accrual to be expressed at the scale
+     * the borrower was billed at. The canonical constructor still does not reduce; see
+     * {@link #fromContractualLeg}'s closing paragraph for why that distinction is deliberate.
+     *
+     * @param accrual the period's contractual-rate accrual at working precision, from the engine's
+     *                own derivation and <em>not</em> from the core banking feed. Passing the CBS
+     *                figure here reconciles a field against itself and produces a control that
+     *                cannot fail — the defect this factory's caller was written to fix.
+     */
+    public static ContractualLegInterest fromEngineAccrual(
+        String contractId, int periodId, Money accrual) {
+        Objects.requireNonNull(accrual, "accrual");
+        // The same single reduction fromContractualLeg applies, at the same boundary.
+        return new ContractualLegInterest(contractId, periodId, accrual.atPresentationScale());
     }
 
     /** The figure as it is published, at the currency's minor units. */

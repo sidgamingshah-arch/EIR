@@ -701,7 +701,8 @@ class ContractPipelineTest {
             assertThatIllegalStateException()
                 .isThrownBy(() -> new ContractComputation(
                     clean.contractId(), clean.eirBefore(), clean.eirAfter(), clean.openingGca(),
-                    clean.closingGca(), clean.row(), clean.decomposition(), clean.suspense(),
+                    clean.closingGca(), clean.row(), clean.contractualInterest(),
+                    clean.decomposition(), clean.suspense(),
                     null, null, null, 1, clean.journal(), clean.invariants()))
                 .withMessageContaining("carried no event at all")
                 .withMessageContaining("10M-contract target");

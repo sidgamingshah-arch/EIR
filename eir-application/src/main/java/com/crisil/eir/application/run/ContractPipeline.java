@@ -17,6 +17,7 @@ import com.crisil.eir.calc.solver.SolveResult;
 import com.crisil.eir.domain.InvariantResult;
 import com.crisil.eir.domain.Mechanism;
 import com.crisil.eir.domain.Money;
+import com.crisil.eir.domain.Precision;
 import com.crisil.eir.domain.Rate;
 import com.crisil.eir.domain.TimeConvention;
 import com.crisil.eir.gl.journal.JournalEntry;
@@ -248,8 +249,28 @@ public final class ContractPipeline {
         }
         AmortisationRow row = roll.rows().getFirst();
 
+        // ---- The CONTRACTUAL leg, rolled independently of the EIR leg ---------------------------
+        //
+        // RC-1's engine side, and the reason it is computed here rather than read. The invariant
+        // compares what the ENGINE says the borrower was contractually charged against what the CBS
+        // says it billed, and ContractualLegInterest's javadoc names the mis-wiring precisely:
+        // "taking the CBS instead of the contractual leg is the single most plausible mis-wiring in
+        // this control". It had been made -- EirService built the engine leg from
+        // OpeningState.contractualInterestBilled, which IS the CBS figure by design ("what the
+        // borrower was billed, from the CBS"), so both sides of RC-1 came from one column of one
+        // row and its deviation was structurally nil. Demonstrated on a live cluster: one UPDATE of
+        // cbs_billed_interest moved both legs together.
+        //
+        // Nothing in the month-end run computed a contractual leg, which is why that field was the
+        // only thing available to reach for. It is computable from what this method already holds:
+        // the contractual-leg balance brought forward and the contract's own contractual rate, over
+        // the same accrual exponent the EIR leg used. AmortisationEngine.segment rather than
+        // contractualLeg() because the leg starts from the balance carried forward, not from par,
+        // and makes no terminal claim -- the contractual leg's residue is real (FR-804).
+        Money contractualInterest = contractualLegInterest(state, period, scheduleExponentFor(state, period));
+
         // ---- Decompose, and suppress where the stage says so -----------------------------------
-        BigDecimal scheduleExponent = scheduleAccrualExponent(state.terms(), period);
+        BigDecimal scheduleExponent = scheduleExponentFor(state, period);
         Stage3Decomposition decomposition = Stage3Decomposition.forAccrualPeriod(
             base, state.allowance(), eirAfter, state.contractualInterestBilled(), state.stage(),
             scheduleExponent);
@@ -267,8 +288,8 @@ public final class ContractPipeline {
             PeriodJournal.of(request, period, row, decomposition, suspense, catchUp);
 
         return new ContractComputation(
-            contractId, eirBefore, eirAfter, base, row.closingGca(), row, decomposition, suspense,
-            reconciliation, decision, catchUp,
+            contractId, eirBefore, eirAfter, base, row.closingGca(), row, contractualInterest,
+            decomposition, suspense, reconciliation, decision, catchUp,
             solves.solveCountFor(contractId) - solvesBefore, journal,
             assertions(journal, row, decomposition, reconciliation, catchUp));
     }
@@ -353,6 +374,65 @@ public final class ContractPipeline {
     }
 
     /** The B5.4.6 branch: restate the carrying amount at the ORIGINAL rate, which does not move. */
+    /**
+     * The accrual exponent from the contract's own schedule, memo-free.
+     *
+     * <p>Extracted only so the contractual roll and the decomposition provably use the SAME
+     * exponent. Two independent derivations of one quantity is the pattern that makes ST-2 a
+     * control; two independent derivations of the ACCRUAL LENGTH is just a way for them to
+     * disagree.
+     */
+    private static BigDecimal scheduleExponentFor(
+        ContractStateSource.OpeningState state, ContractPeriod period) {
+        return scheduleAccrualExponent(state.terms(), period);
+    }
+
+    /**
+     * Interest at the CONTRACTUAL rate on the contractual-leg balance, for the period.
+     *
+     * <p>RC-1's engine side, and genuinely a second derivation: a different rate on a different
+     * balance from the EIR leg, so the two can disagree and RC-1 can fail. Before this the engine
+     * leg was {@code OpeningState.contractualInterestBilled} — the CBS figure by design — so both
+     * sides of RC-1 were one column of one row. Demonstrated on a live cluster: one
+     * {@code UPDATE cbs_billed_interest} moved both legs together.
+     *
+     * <h2>Computed directly rather than rolled through the engine, and the reason is a real guard</h2>
+     *
+     * <p>The first version called {@link AmortisationEngine#segment}, and it threw for every
+     * {@code ACTUAL_DATE} contract: "rate compounds 12 times a year but convention
+     * ACTUAL_DATE(ACT/365F) implies 1". That guard is right and the call was wrong. Under actual
+     * dating the EIR is an annual-effective rate and the roll is measured in years, whereas
+     * {@code ContractTerms.contractualRate} is stated at the <em>schedule's</em> periodicity — the
+     * two are not interchangeable, which is exactly what the engine refuses.
+     *
+     * <p>{@link #scheduleAccrualExponent} is already measured in that same schedule periodicity —
+     * {@code ContractTerms.dueDate(n−1)} to {@code dueDate(n)} — so the contractual rate and this
+     * exponent are the matched pair, and it is the pair {@code Stage3Decomposition.forAccrualPeriod}
+     * is given for the same reason. Accreting them directly is therefore not a shortcut around the
+     * engine; it is the only pairing that is dimensionally correct.
+     *
+     * <p><b>No terminal assertion, and none is wanted.</b> The contractual leg carries the billed
+     * schedule's residue and that residue is real: where the rounding policy is
+     * {@code LMS_AUTHORITATIVE} the schedule is what the core banking system actually billed, which
+     * is the only way this leg reconciles to the CBS every month (FR-804).
+     *
+     * <p>Nil where the contract carries no contractual-leg balance forward — a contract recognised
+     * this period has none. Nil is the right engine leg there rather than a refusal: RC-1 then
+     * compares nil against whatever the CBS billed, which is a comparison that can fail, and
+     * failing is the point.
+     */
+    private static Money contractualLegInterest(
+        ContractStateSource.OpeningState state, ContractPeriod period, BigDecimal exponent) {
+
+        Money opening = state.openingContractual();
+        if (opening.isZero()) {
+            return Money.zero(opening.currency());
+        }
+        BigDecimal accretion = Precision.onePlusPow(
+            state.terms().contractualRate().periodic(), exponent).subtract(BigDecimal.ONE);
+        return opening.times(accretion);
+    }
+
     private CatchUpResult restate(
         Rate eirBefore, Money base, PeriodEvent event, ContractPeriod period) {
         // The rate is passed twice — as the rate the restatement discounts at and as the rate the

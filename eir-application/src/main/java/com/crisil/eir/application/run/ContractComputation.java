@@ -45,6 +45,14 @@ import java.util.Objects;
  *                       re-solved it
  * @param openingGca     the balance the period accrued on — restated where a catch-up ran
  * @param closingGca     the balance carried out
+ * @param contractualInterest interest at the CONTRACTUAL rate on the contractual-leg balance for
+ *                       this period — RC-1's engine side, rolled independently of the EIR leg.
+ *                       <b>Not the CBS figure.</b> {@code ContractualLegInterest}'s javadoc calls
+ *                       taking the CBS instead of the contractual leg "the single most plausible
+ *                       mis-wiring in this control", and it had been made: {@code EirService} built
+ *                       the engine leg from {@code OpeningState.contractualInterestBilled}, which is
+ *                       the CBS figure by design, so both sides of RC-1 came from one column of one
+ *                       row and no value of it could make the control fail
  * @param row            the single accrual boundary the period covers
  * @param decomposition  the period's three-way interest decomposition, at every stage
  * @param suspense       the period's interest-in-suspense movement
@@ -63,6 +71,7 @@ public record ContractComputation(
     Money openingGca,
     Money closingGca,
     AmortisationRow row,
+    Money contractualInterest,
     Stage3Decomposition decomposition,
     SuspenseLedger suspense,
     Stage3Reconciliation reconciliation,

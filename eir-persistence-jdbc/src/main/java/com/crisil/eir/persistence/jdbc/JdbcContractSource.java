@@ -62,6 +62,31 @@ public final class JdbcContractSource extends JdbcAdapter implements ContractSou
      * rows can still produce at an earlier boundary. Two ids for one contract would make FR-905's
      * "every contract is either computed or quarantined" count wrong in the direction nobody checks.
      */
+    /**
+     * The population, scoped to the book this adapter was constructed for.
+     *
+     * <p><b>{@code c.book_id = ?} was missing, and its absence was confirmed against a live
+     * cluster.</b> This class held a {@code bookId}, validated it, and never put it in the
+     * predicate, so a run of book {@code MAIN} enumerated every book's contracts. FR-109 is the
+     * reason that matters: the same facility is measured on the ACPIR basis, on IGAAP and on a tax
+     * basis, and V1's {@code UNIQUE (entity_id, book_id, source_system_ref)} exists precisely so it
+     * can appear once per book. Every balance read is scoped by book and the population was not.
+     *
+     * <p>The consequence was worse than the over-enumeration. A contract from another book has no
+     * balance in this one, so FR-905 quarantined it with a message about a missing opening state —
+     * and an operator reads "no state recorded" for a contract that is fully recorded in the book
+     * it belongs to. The finding presents as a data-quality problem in the master, which is the
+     * wrong desk and the wrong remedy.
+     *
+     * <p>{@code book_id} is on {@code contract} (V1 § CONTRACT) and indexed as
+     * {@code contract_entity_book_ix (entity_id, book_id)}, so the predicate is served by an index
+     * rather than filtering a whole-table scan.
+     *
+     * <p>Bound LAST, after both temporal pairs, because {@link Params} binds sequentially and the
+     * two {@code %s} fragments each take two placeholders. Placing it after them in the SQL and
+     * after them in the binding is what keeps those two facts checkable against each other by
+     * reading down the page.
+     */
     static final String SELECT_POPULATION = """
         SELECT DISTINCT c.contract_id
           FROM contract c
@@ -70,6 +95,7 @@ public final class JdbcContractSource extends JdbcAdapter implements ContractSou
          WHERE c.measurement_category <> 'FVTPL'
            AND %s
            AND %s
+           AND c.book_id = ?
          ORDER BY c.contract_id
         """.formatted(TemporalReads.businessTime("cv"), TemporalReads.systemTime("cv"));
 
@@ -90,7 +116,8 @@ public final class JdbcContractSource extends JdbcAdapter implements ContractSou
 
             new Params(statement)
                 .businessTime(boundary.businessAsOf())
-                .systemTime(boundary.recordedAsAt());
+                .systemTime(boundary.recordedAsAt())
+                .text(bookId());
 
             try (ResultSet rs = statement.executeQuery()) {
                 while (rs.next()) {
@@ -99,8 +126,8 @@ public final class JdbcContractSource extends JdbcAdapter implements ContractSou
             }
         } catch (SQLException e) {
             throw new PersistenceFailure(
-                "could not enumerate the population as at " + boundary.recordedAsAt()
-                    + " for period end " + boundary.businessAsOf(), e);
+                "could not enumerate the population of book " + bookId() + " as at "
+                    + boundary.recordedAsAt() + " for period end " + boundary.businessAsOf(), e);
         }
         return List.copyOf(ids);
     }

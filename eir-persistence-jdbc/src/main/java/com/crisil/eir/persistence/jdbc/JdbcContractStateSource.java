@@ -108,27 +108,6 @@ public final class JdbcContractStateSource extends JdbcAdapter implements Contra
            AND sa.period_id = ?
            AND %s
         """.formatted(TemporalReads.recordedNoLaterThan("sa", "received_at"));
-
-    /**
-     * Binds: contract id, {@code recordedAsAt}, {@code recordedAsAt} (the supersession subquery),
-     * {@code businessAsOf}.
-     */
-    static final String SELECT_RATE_IN_FORCE = """
-        SELECT e.rate_periodic
-          FROM eir_computation e
-         WHERE e.contract_id = ?
-           AND e.status = 'SOLVED'
-           AND e.recorded_at <= ?
-           AND (e.superseded_by IS NULL
-                OR NOT EXISTS (SELECT 1
-                                 FROM eir_computation s
-                                WHERE s.computation_id = e.superseded_by
-                                  AND s.recorded_at <= ?))
-           AND e.computed_as_of <= ?
-         ORDER BY e.computed_as_of DESC, e.recorded_at DESC, e.computation_id DESC
-         LIMIT 1
-        """;
-
     /** Binds: contract id, period id, {@link Params#systemTime}. */
     static final String SELECT_BILLED = """
         SELECT f.billed_interest
@@ -177,7 +156,17 @@ public final class JdbcContractStateSource extends JdbcAdapter implements Contra
                 return Optional.empty();
             }
 
-            Rate eir = readRateInForce(connection, contractId, boundary, terms.periodsPerYear());
+            // The rate AND the convention it was struck under, from ONE row of ONE solve.
+            // These used to be read by two classes from two identical queries, and the rate was
+            // wrapped at the schedule's periodicity rather than the convention's -- so an
+            // ACTUAL_DATE solve on a monthly contract met AmortisationEngine's first guard as
+            // "rate compounds 12 times a year but convention ACTUAL_DATE(ACT/365F) implies 1"
+            // and aborted the whole run on an IllegalArgumentException FR-905 does not catch.
+            // SolvedRateReader's javadoc carries the argument.
+            SolvedRateReader.Solve solve = SolvedRateReader.inForce(
+                connection, contractId, boundary.recordedAsAt(), boundary.businessAsOf(),
+                terms.periodsPerYear(), terms.terms().dayCount());
+            Rate eir = solve == null ? null : solve.rate();
 
             return Optional.of(new OpeningState(
                 terms.terms(),
@@ -270,21 +259,6 @@ public final class JdbcContractStateSource extends JdbcAdapter implements Contra
                 .systemTime(boundary.recordedAsAt());
             try (ResultSet rs = statement.executeQuery()) {
                 return rs.next() ? Rows.money(rs, "billed_interest", currency) : null;
-            }
-        }
-    }
-
-    private Rate readRateInForce(Connection connection, String contractId, AsAtBoundary boundary,
-        int periodsPerYear) throws SQLException {
-
-        try (PreparedStatement statement = connection.prepareStatement(SELECT_RATE_IN_FORCE)) {
-            new Params(statement)
-                .contractId(contractId)
-                .instant(boundary.recordedAsAt())
-                .instant(boundary.recordedAsAt())
-                .date(boundary.businessAsOf());
-            try (ResultSet rs = statement.executeQuery()) {
-                return rs.next() ? Rows.rateOrNull(rs, "rate_periodic", periodsPerYear) : null;
             }
         }
     }

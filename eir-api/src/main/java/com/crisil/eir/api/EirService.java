@@ -806,13 +806,47 @@ public final class EirService {
     private List<ContractualLegInterest> contractualLegLines(Completed completed, int periodId) {
         List<ContractualLegInterest> lines = new ArrayList<>();
         for (ContractResult result : completed.aggregate().results()) {
-            if (result.isComputed()) {
-                lines.add(new ContractualLegInterest(result.contractId(), periodId,
-                    book.holding(result.contractId())
-                        .orElseThrow()
-                        .state()
-                        .contractualInterestBilled()));
+            if (!result.isComputed()) {
+                continue;
             }
+            // THE ENGINE'S OWN CONTRACTUAL LEG, from the computation. This method used to read
+            // Book.Holding.state().contractualInterestBilled(), which is the CBS figure by design --
+            // ContractStateSource.OpeningState documents it as "what the borrower was billed, from
+            // the CBS". So RC-1's engine leg and its CBS leg were one figure, and the invariant
+            // compared a field against itself: its deviation was structurally nil whatever the data.
+            //
+            // ContractualLegInterest's own javadoc predicted this exact wiring -- "taking the CBS
+            // instead of the contractual leg is the single most plausible mis-wiring in this
+            // control" -- and it was made anyway, because nothing in the month-end run computed a
+            // contractual leg and that field was the only figure available to reach for.
+            // ContractPipeline now computes one (ContractComputation.contractualInterest), rolled at
+            // the contractual rate on the contractual-leg balance, so the two sides of RC-1 are two
+            // derivations and the control can fail.
+            //
+            // Confirmed on a live cluster before the fix: a single
+            // UPDATE cbs_billed_interest SET billed_interest = 99999.99
+            // moved BOTH legs together, so no value of that column could produce a break.
+            ContractComputation computation = completed.computations().get(result.contractId());
+            if (computation == null) {
+                // A computed result with no working papers is an engine defect, not a data
+                // condition: RunAggregate and the computation map are filled by the same loop. A
+                // silent skip here would drop the contract from RC-1's engine side only, which
+                // presents as a one-sided CBS line worth the whole of that contract's interest --
+                // the shape of break that gets attributed to the feed.
+                throw new IllegalStateException(
+                    "contract " + result.contractId() + " is computed in the aggregate and absent"
+                        + " from the run's computations; RC-1's engine leg cannot be built for it,"
+                        + " and omitting it would report a one-sided CBS line instead");
+            }
+            // fromEngineAccrual, not the canonical constructor: the engine accrues at working
+            // precision and the CBS bills in paise, so the two sides differ by sub-paise on every
+            // contract unless the accrual is expressed at the scale it was billed. That rule lives
+            // in ContractualLegInterest and is applied identically by all three of its factories;
+            // reducing the figure here instead would put it in a second place. Measured on the seed
+            // book: 529,815.61 x 0.01 = 5,298.1561 against the CBS's 5,298.16, a gap of 0.0039 per
+            // contract that turned RC-1 red on all three with nothing wrong in the data.
+            lines.add(ContractualLegInterest.fromEngineAccrual(
+                result.contractId(), periodId, computation.contractualInterest()));
         }
         return List.copyOf(lines);
     }

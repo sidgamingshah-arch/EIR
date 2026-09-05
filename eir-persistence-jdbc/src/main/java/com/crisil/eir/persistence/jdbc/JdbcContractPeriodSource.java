@@ -150,22 +150,6 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
          ORDER BY le.event_date, le.sequence_within_date
         """.formatted(TemporalReads.systemTime("le"));
 
-    /** Binds: contract id, {@code recordedAsAt}, {@code recordedAsAt}, {@code businessAsOf}. */
-    static final String SELECT_SOLVED_CONVENTION = """
-        SELECT e.convention
-          FROM eir_computation e
-         WHERE e.contract_id = ?
-           AND e.status = 'SOLVED'
-           AND e.recorded_at <= ?
-           AND (e.superseded_by IS NULL
-                OR NOT EXISTS (SELECT 1
-                                 FROM eir_computation s
-                                WHERE s.computation_id = e.superseded_by
-                                  AND s.recorded_at <= ?))
-           AND e.computed_as_of <= ?
-         ORDER BY e.computed_as_of DESC, e.recorded_at DESC, e.computation_id DESC
-         LIMIT 1
-        """;
 
     public JdbcContractPeriodSource(DataSource dataSource) {
         this(dataSource, DEFAULT_BOOK);
@@ -494,30 +478,17 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
     private TimeConvention convention(Connection connection, String contractId,
         AsAtBoundary boundary, ContractTermsReader.Row terms) throws SQLException {
 
-        String stored = null;
-        try (PreparedStatement statement = connection.prepareStatement(SELECT_SOLVED_CONVENTION)) {
-            new Params(statement)
-                .contractId(contractId)
-                .instant(boundary.recordedAsAt())
-                .instant(boundary.recordedAsAt())
-                .date(boundary.businessAsOf());
-            try (ResultSet rs = statement.executeQuery()) {
-                if (rs.next()) {
-                    stored = Rows.text(rs, "convention");
-                }
-            }
-        }
-        if (stored == null || "ACTUAL_DATE".equals(stored)) {
-            return new TimeConvention.ActualDate(terms.terms().dayCount());
-        }
-        if ("PERIODIC_INDEX".equals(stored)) {
-            return new TimeConvention.PeriodicIndex(terms.periodsPerYear());
-        }
-        throw new PersistenceFailure(
-            "eir_computation.convention '" + stored + "' is neither PERIODIC_INDEX nor ACTUAL_DATE,"
-                + " which V1's eir_computation_convention_ck admits. The convention decides how"
-                + " every discount exponent is built, so it cannot be defaulted for a contract that"
-                + " has a solved rate");
+        // One reader for the whole solve, shared with JdbcContractStateSource. This method used to
+        // run its own copy of the "which solve is in force" query -- byte-identical to that class's
+        // SELECT_RATE_IN_FORCE -- and return only the convention, while the other returned only the
+        // rate and wrapped it at the schedule's periodicity. See SolvedRateReader's javadoc for
+        // what that pairing did to an ACTUAL_DATE solve.
+        SolvedRateReader.Solve solve = SolvedRateReader.inForce(
+            connection, contractId, boundary.recordedAsAt(), boundary.businessAsOf(),
+            terms.periodsPerYear(), terms.terms().dayCount());
+        return solve == null
+            ? new TimeConvention.ActualDate(terms.terms().dayCount())
+            : solve.convention();
     }
 
     /**

@@ -250,11 +250,18 @@ public final class ReconciliationReportsModule implements ApiModule {
             .array("contracts", contracts)
             .obj("population", population(published.get().aggregate()))
             .strings("caveats", withPopulationCaveat(published.get().aggregate(), List.of(
-                "RC-1's AMOUNT leg cannot disagree on this book, and its PRESENCE leg can. The"
-                    + " engine's contractual leg and the CBS feed both read"
-                    + " OpeningState.contractualInterestBilled, so two figures for one contract are"
-                    + " the same figure twice; a production CoreBankingFeed is an extract from the"
-                    + " core banking system and then the amounts can differ too.",
+                "RC-1's two legs are now two derivations, so the AMOUNT leg can disagree. The"
+                    + " engine's side is ContractPipeline's own contractual accretion (the"
+                    + " contractual rate on the contractual-leg balance) and the CBS side is the"
+                    + " feed. Until recently both read OpeningState.contractualInterestBilled --"
+                    + " the CBS figure -- so the amount leg was a field compared against itself"
+                    + " and its deviation was nil whatever the data.",
+                "What the AMOUNT leg still cannot see is a difference below half a paise per"
+                    + " contract. The engine accrues at 28 significant digits and the CBS bills in"
+                    + " paise, so the accrual is expressed at the billed scale once, on the way in"
+                    + " (ContractualLegInterest.fromEngineAccrual). That is a rule accounting for a"
+                    + " structural difference, not a tolerance on the residue: nothing rounds after"
+                    + " the subtraction, so a genuine 0.0047 is reported in full.",
                 "The CBS side is scoped to the whole population rather than to what the engine"
                     + " computed, and that is the only reason a dropped contract is visible here at"
                     + " all: a feed scoped to the engine's own output makes a shortfall invisible"

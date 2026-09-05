@@ -4,7 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.crisil.eir.api.EirServer;
 import com.crisil.eir.api.EirService;
+import com.crisil.eir.api.store.Book;
 import com.crisil.eir.api.store.Seed;
+import com.crisil.eir.application.port.ContractStateSource;
+import com.crisil.eir.domain.Money;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -91,6 +94,21 @@ class ReconciliationReportsModuleTest {
     @AfterEach
     void stop() {
         server.stop();
+    }
+
+    /**
+     * Replaces the running server with one over a different book, on a fresh port.
+     *
+     * <p>The book is fixed at construction — {@code EirService} takes it and the run reads it — so
+     * a test that needs a perturbed input replaces the server rather than mutating one in flight.
+     * Restarting is also the honest shape: a book whose CBS feed changed mid-run is a condition
+     * this system does not model, and simulating it would test something no deployment does.
+     */
+    private void restartOn(Book book) throws IOException {
+        server.stop();
+        server = new EirServer(0, new EirService(book));
+        server.start();
+        base = "http://localhost:" + server.port();
     }
 
     private record Response(int status, String body) {
@@ -333,6 +351,78 @@ class ReconciliationReportsModuleTest {
     @DisplayName("RC-1: the contractual leg against core banking")
     class ContractualLegToCbs {
 
+        /**
+         * <b>The proof that RC-1's amount leg can fail at all.</b>
+         *
+         * <p>This control was built with both of its legs reading one field. {@code OpeningState}
+         * documents {@code contractualInterestBilled} as "what the borrower was billed, from the
+         * CBS", the {@code CoreBankingFeed} reads it because that is its job, and the engine's leg
+         * used to read it too because nothing in the month-end run computed a contractual accrual.
+         * Two figures for one contract were the same figure twice, so the deviation was nil for
+         * every value that column could hold. Confirmed against a live cluster before the fix: a
+         * single {@code UPDATE cbs_billed_interest SET billed_interest = 99999.99} moved both legs
+         * together.
+         *
+         * <p>So this test moves the CBS figure and nothing else, and requires that exactly one leg
+         * follows it. It is the mutation this repository's convention demands for every published
+         * invariant — name the input that makes the control fail and construct it — and it is the
+         * mutation that would have caught the original wiring on the day it was written.
+         *
+         * <h2>The derivation</h2>
+         *
+         * <p>C-0001's engine leg is its own: {@code openingContractual x contractual rate} =
+         * 529,815.61 x 0.01 = <b>5,298.1561</b>, expressed at the scale the borrower was billed
+         * (paise, once, on the way in) = <b>5,298.16</b>. The CBS figure is replaced with
+         * <b>6,000.00</b>, a break of 5,298.16 - 6,000.00 = <b>-701.84</b>: negative because this
+         * package signs every difference engine-minus-CBS, so a negative figure means the borrower
+         * was billed more than the engine projected.
+         *
+         * <p>C-0002 is untouched and must stay tied at 5,298.16 both ways. That matters as much as
+         * the break: a change that moved every line would show a control responding to the book
+         * rather than to the contract whose input moved.
+         */
+        @Test
+        @DisplayName("moving the CBS figure alone breaks exactly one line — RC-1 can fail")
+        void movingTheCbsFigureAloneBreaksOneLine() throws IOException {
+            Book perturbed = Seed.book();
+            Book.Holding original = perturbed.holding("C-0001").orElseThrow();
+            ContractStateSource.OpeningState state = original.state();
+            // Only contractualInterestBilled moves. openingContractual — which the engine's own
+            // leg accrues on — is left exactly as the seed has it, so the engine's figure is
+            // unchanged by construction and any movement in it is this test failing, not passing.
+            perturbed.put(Book.Holding.onFile(
+                original.contractId(), original.productId(), original.entityId(),
+                original.description(),
+                new ContractStateSource.OpeningState(
+                    state.terms(), state.eir(), state.openingGca(), state.openingContractual(),
+                    state.stage(), state.allowance(), state.eclEngineVersion(),
+                    Money.inr("6000.00")),
+                original.period()));
+
+            restartOn(perturbed);
+            rollThePeriodForward();
+
+            Response response = get(CBS);
+
+            assertThat(response.status()).isEqualTo(200);
+            assertThat(response.body())
+                .as("RC-1 must go red on an amount, not only on a presence break")
+                .contains("\"id\":\"RC-1\"")
+                .contains("\"satisfied\":false");
+            assertThat(response.body())
+                .as("the engine's leg is derived from openingContractual and must NOT follow the"
+                    + " CBS column; if it does, the two legs are still one figure")
+                .contains("\"contractId\":\"C-0001\",\"engineContractualInterest\":\"5298.16\","
+                    + "\"cbsBilledInterest\":\"6000.00\",\"presence\":\"BOTH\","
+                    + "\"difference\":\"-701.84\"");
+            assertThat(response.body())
+                .as("C-0002's input did not move, so its line must still tie — a control that"
+                    + " reddened every line would be responding to the book, not the contract")
+                .contains("\"contractId\":\"C-0002\",\"engineContractualInterest\":\"5298.16\","
+                    + "\"cbsBilledInterest\":\"5298.16\",\"presence\":\"BOTH\","
+                    + "\"difference\":\"0.00\"");
+        }
+
         @Test
         @DisplayName("a contract the CBS billed and the engine never projected is a presence break")
         void thePresenceBreakIsRedByTheWholeBilledAmount() throws IOException {
@@ -378,18 +468,43 @@ class ReconciliationReportsModuleTest {
                 .contains("\"totalCbsBilledInterest\":\"15894.48\"");
         }
 
+        /**
+         * <b>What this test used to assert, and why the change is the point.</b> It required the
+         * report to carry the caveat "AMOUNT leg cannot disagree on this book / PRESENCE leg can",
+         * which was the honest label while both legs read one field. The label was correct and the
+         * control it described was not, and a caveat is not a substitute for a working control —
+         * it is what a system says instead of fixing one. Now that the engine derives its own leg
+         * ({@code movingTheCbsFigureAloneBreaksOneLine} proves it can break), the old text would
+         * be a false statement about a control that works, so the report must no longer carry it.
+         *
+         * <p>The remaining limit is real and narrower, and the report must still disclose it: the
+         * engine accrues at 28 significant digits and the CBS bills in paise, so a difference
+         * below half a paise per contract is absorbed by the rule that expresses the accrual at
+         * the billed scale. Asserting the absence of the old claim as well as the presence of the
+         * new one, because a report that carried both would be telling an operator two things.
+         */
         @Test
-        @DisplayName("the amount leg is labelled as one that cannot disagree on this book")
-        void theAmountLegIsLabelled() throws IOException {
+        @DisplayName("the report discloses the sub-paise limit and no longer claims the amount"
+            + " leg cannot disagree")
+        void theAmountLegsRemainingLimitIsLabelled() throws IOException {
             rollThePeriodForward();
 
             Response response = get(CBS);
 
             assertThat(response.body())
-                .as("both sides read OpeningState.contractualInterestBilled here, so an amount"
-                    + " break is not representable and a reader must be told which leg is real")
-                .contains("AMOUNT leg cannot disagree on this book")
-                .contains("PRESENCE leg can");
+                .as("the amount leg works now; a caveat saying otherwise would send an operator"
+                    + " to investigate the feed for a break the engine had genuinely found")
+                .doesNotContain("AMOUNT leg cannot disagree on this book");
+            assertThat(response.body())
+                .as("the leg that replaced it must be named, or a reader cannot tell whether the"
+                    + " engine's figure is a derivation or a second read of the feed")
+                .contains("RC-1's two legs are now two derivations")
+                .contains("ContractPipeline's own contractual accretion");
+            assertThat(response.body())
+                .as("03 § 5.7 allows a rule accounting for a structural difference and forbids a"
+                    + " tolerance on the residue; which of the two this is must be on the report")
+                .contains("cannot see is a difference below half a paise per contract")
+                .contains("not a tolerance on the residue");
         }
 
         @Test

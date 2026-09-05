@@ -90,23 +90,44 @@ class PortQueryTemporalCoverageTest {
         }
 
         @Test
-        @DisplayName("the two solve queries walk the supersession chain, not superseded_by IS NULL")
+        @DisplayName("the one solve query walks the supersession chain, not superseded_by IS NULL")
         void solveQueriesWalkTheSupersessionChain() {
             // eir_computation has no superseded_at; V1 gives it a forward pointer. Filtering on
             // `superseded_by IS NULL` alone would return today's belief at every boundary — the
             // exact defect this module exists to remove — so the visible solve is one whose
-            // SUPERSEDING row was not yet recorded. Both queries that read a solve must do this.
-            assertThat(JdbcContractStateSource.SELECT_RATE_IN_FORCE)
-                .as("the rate in force must be resolved through the supersession chain")
+            // SUPERSEDING row was not yet recorded.
+            //
+            // This test used to make the same three assertions TWICE, against
+            // JdbcContractStateSource.SELECT_RATE_IN_FORCE and
+            // JdbcContractPeriodSource.SELECT_SOLVED_CONVENTION, and noted that "both queries that
+            // read a solve must do this". They were byte-identical in predicate and selected two
+            // columns of the same row, and reading them apart is what let the rate be wrapped at a
+            // periodicity the convention contradicted. There is now one query.
+            assertThat(SolvedRateReader.SELECT_SOLVE_IN_FORCE)
+                .as("the solve in force must be resolved through the supersession chain")
                 .contains("NOT EXISTS")
                 .contains("s.computation_id = e.superseded_by")
                 .contains("s.recorded_at <= ?");
-            assertThat(JdbcContractPeriodSource.SELECT_SOLVED_CONVENTION)
-                .as("the stored convention must be resolved through the same chain, or the"
-                    + " amortisation would use a convention the rate was not solved under")
-                .contains("NOT EXISTS")
-                .contains("s.computation_id = e.superseded_by")
-                .contains("s.recorded_at <= ?");
+        }
+
+        @Test
+        @DisplayName("the rate and its convention come from one row, so they cannot disagree")
+        void theRateAndItsConventionAreOneRead() {
+            // The structural half of the fix, asserted on the SQL because it is a property of the
+            // query rather than of any one result: both columns are projected by one SELECT, so
+            // there is no boundary at which a planner, an unstable ordering or a later edit can
+            // pair a rate from one solve with a convention from another.
+            assertThat(SolvedRateReader.SELECT_SOLVE_IN_FORCE)
+                .as("one SELECT must project both, or the pairing is reconstructed by the caller")
+                .contains("e.rate_periodic")
+                .contains("e.convention");
+            assertThat(SolvedRateReader.SELECT_SOLVE_IN_FORCE)
+                .as("LIMIT 1 needs a TOTAL ordering or a same-day re-solve makes the chosen row"
+                    + " arbitrary, and a replay would then reproduce a different rate with"
+                    + " nothing in the data to explain it")
+                .contains("ORDER BY e.computed_as_of DESC, e.recorded_at DESC,"
+                    + " e.computation_id DESC")
+                .contains("LIMIT 1");
         }
 
         @Test
