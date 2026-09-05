@@ -12,7 +12,16 @@ package com.crisil.eir.persistence.jdbc;
  * present but unreadable was not. A product tagged {@code REPRICING_SHORTCUT} — which V1 admits, and
  * keeps coherent with {@code product_b544_implies_next_repricing_ck}, so a bank that has made the
  * B5.4.4 election has real products carrying it — made {@code openingState} throw, and every
- * contract on that product aborted the run.
+ * contract on that product was quarantined with a stack trace where a diagnosis belonged.
+ *
+ * <p><b>Not "aborted the run", which this javadoc said until it was checked.</b>
+ * {@code FailureIsolation.isolate} catches every {@code RuntimeException} and rethrows only a
+ * run-level {@code InvariantBreachException}, so any exception escaping a reader is filed against
+ * that contract and the loop continues. The distinction this class draws is therefore not
+ * abort-versus-quarantine — both quarantine — but between a quarantine the reader produced
+ * <em>deliberately</em>, with {@code openingState} returning empty and the pipeline's own message
+ * naming the boundary it could not find a balance at, and one produced by an exception nobody
+ * intended. The first is a queue entry somebody can work; the second is a stack trace.
  *
  * <p>That is the same class of failure as returning {@code Optional.empty()} on a dropped connection,
  * only in the other direction: one is a data condition reported as an outage, this was an outage

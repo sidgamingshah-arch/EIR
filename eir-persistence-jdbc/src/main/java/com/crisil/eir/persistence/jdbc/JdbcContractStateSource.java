@@ -160,8 +160,11 @@ public final class JdbcContractStateSource extends JdbcAdapter implements Contra
             // These used to be read by two classes from two identical queries, and the rate was
             // wrapped at the schedule's periodicity rather than the convention's -- so an
             // ACTUAL_DATE solve on a monthly contract met AmortisationEngine's first guard as
-            // "rate compounds 12 times a year but convention ACTUAL_DATE(ACT/365F) implies 1"
-            // and aborted the whole run on an IllegalArgumentException FR-905 does not catch.
+            // "rate compounds 12 times a year but convention ACTUAL_DATE(ACT/365F) implies 1".
+            // FR-905's barrier DOES catch that (it catches every RuntimeException bar a run-level
+            // invariant breach), so the cost was not an abort but every actual-date contract
+            // quarantined every period, blocking the close with a queue entry naming an
+            // arithmetic precondition rather than the two disagreeing columns.
             // SolvedRateReader's javadoc carries the argument.
             SolvedRateReader.Solve solve = SolvedRateReader.inForce(
                 connection, contractId, boundary.recordedAsAt(), boundary.businessAsOf(),

@@ -235,19 +235,41 @@ public final class ContractPipeline {
         // recognition decision on the same figures, never a different roll-forward.
         AmortisationResult roll = AmortisationEngine.segment(
             base, eirAfter, period.periodFlows(), period.convention());
-        if (roll.periods() != 1) {
-            // The decomposition, the suspense movement and the reconciliation are all statements
-            // about ONE accrual period, so a vector that produced two boundaries would have them
-            // describing the first while the balance moved by both. AmortisationEngine's javadoc
-            // names the fix: the projector declares the boundaries, and a caller wanting a row per
-            // accounting period puts a zero-amount flow on each period date.
-            throw new IllegalStateException(
-                "contract " + contractId + " period " + period.periodOrdinal() + " produced "
-                    + roll.periods() + " accrual boundaries from its vector; the month-end loop"
-                    + " computes exactly one, and a period decomposed over one boundary while its"
-                    + " balance moved over several would tie nowhere");
-        }
-        AmortisationRow row = roll.rows().getFirst();
+        // ONE published movement per contract per accounting period, however many accrual
+        // boundaries the contract's own calendar puts inside it.
+        //
+        // This used to refuse roll.periods() != 1 outright, and the reason it gave was sound: the
+        // decomposition, the suspense movement and the reconciliation are all statements about the
+        // period, so a vector that produced two boundaries would have them describing the first
+        // while the balance moved by both. But refusing is the wrong remedy, and it cost the two
+        // frequencies CompoundingBasis.stepOf goes to explicit trouble to support -- a WEEKLY
+        // facility has four accrual boundaries in an accounting month and a FORTNIGHTLY one has
+        // two, so the refusal stepOf was written to avoid reappeared one layer up. Confirmed on a
+        // live cluster: four April instalments came back as four flows in one period's vector.
+        //
+        // What it cost, stated accurately, because the surrounding documentation had it wrong and
+        // this comment repeated it once: NOT an abort. FailureIsolation.isolate catches every
+        // RuntimeException and rethrows only a run-level InvariantBreachException, so the throw
+        // below was filed as a quarantine and the run completed -- FailureIsolationTest shows
+        // exactly that for an IllegalStateException. The cost was that every weekly and
+        // fortnightly loan in the book was quarantined every period, which blocks the close
+        // (RunAggregate refuses while quarantined exceptions are unresolved) and hands an operator
+        // an arithmetic precondition to work instead of a schedule frequency to support.
+        //
+        // The answer is to give those three consumers a row that describes ALL the boundaries.
+        // asOneAccrualPeriod does that by telescoping -- first opening, last closing, both columns
+        // and the accrual exponent summed at working precision -- and AmortisationRow's own
+        // constructor re-checks the roll-forward identity on the result. The rows stay on `roll`,
+        // so FR-808's trace can still show the four weekly accruals behind one monthly figure.
+        //
+        // One incidental change, stated because it is a change and not a fix: the row now carries
+        // period.periodOrdinal() -- the contract's ordinal on its own schedule, 13 for a month-13
+        // contract -- where it used to carry whatever AmortisationEngine.segment numbered a fresh
+        // segment's first row, which is 1. Nothing in eir-api, eir-gl or eir-batch reads
+        // AmortisationRow.period(), so this is unobserved downstream; it is nonetheless the right
+        // way round, because a published movement's ordinal should name the period it describes and
+        // "1" named nothing on a seasoned contract.
+        AmortisationRow row = roll.asOneAccrualPeriod(period.periodOrdinal());
 
         // ---- The CONTRACTUAL leg, rolled independently of the EIR leg ---------------------------
         //

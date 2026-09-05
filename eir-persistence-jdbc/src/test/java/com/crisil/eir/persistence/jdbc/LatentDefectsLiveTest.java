@@ -5,9 +5,11 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 
 import com.crisil.eir.application.port.AsAtBoundary;
 import com.crisil.eir.application.port.ContractStateSource;
+import com.crisil.eir.application.run.ContractComputation;
+import com.crisil.eir.application.run.ContractPeriod;
+import com.crisil.eir.batch.PartitionKey;
 import com.crisil.eir.domain.TimeConvention;
 import com.crisil.eir.policy.reconciliation.CbsBilledInterest;
-import com.crisil.eir.application.run.ContractPeriod;
 import java.math.BigDecimal;
 import java.util.List;
 import javax.sql.DataSource;
@@ -262,9 +264,11 @@ class LatentDefectsLiveTest {
             // The assertion that matters, and the one the old version could not make: the two
             // ports hand the pipeline a PAIR, and AmortisationEngine.roll refuses a rate
             // compounding n times a year under a convention implying m != n -- "an annual
-            // effective rate rolled on period ordinals, or the reverse". That refusal is an
-            // IllegalArgumentException, which is NOT a data condition and NOT caught by FR-905's
-            // per-contract barrier, so one contract used to abort the whole run.
+            // effective rate rolled on period ordinals, or the reverse". FR-905's barrier DOES
+            // catch that -- isolate() catches every RuntimeException and rethrows only a run-level
+            // InvariantBreachException -- so the cost was not an abort: every actual-date contract
+            // was quarantined every period, which blocks the close and puts an arithmetic
+            // precondition in the queue where a "two columns disagree" diagnosis belonged.
             //
             // Comparing the two ports' answers directly is the check, because it is the pair the
             // engine guards, and neither port alone can be inspected for it.
@@ -333,48 +337,59 @@ class LatentDefectsLiveTest {
     }
 
     @Nested
-    @DisplayName("4. the flow window is the calendar month, not the accrual period")
+    @DisplayName("4. a misfiled flow is refused rather than silently dropped (FIXED)")
     class FlowWindowIsTheCalendarMonth {
 
-        @Test
-        @DisplayName("a flow filed under 202704 and dated in May is invisible to that period")
-        void aMisfiledFlowVanishes() {
-            // Legal data: nothing in V1 ties cashflow_line.flow_date to cashflow_line.period_id,
-            // although period_id is the table's PARTITION KEY. So a feed that computed the period
-            // wrongly files an economically-real flow into a partition whose window excludes it.
-            ContractPeriod period =
-                main.periods().periodFor(LatentDefectFixture.MISFILED_FLOW_ID, NOW);
+        // ============================================================ what this class used to say
+        //
+        // aMisfiledFlowVanishes asserted that periodFor RETURNED a period for this contract, whose
+        // vector held "one substituted boundary flow, not the scheduled instalment" -- a synthetic
+        // zero-amount flow dated at the period end while a real 47,073.47 instalment sat in the
+        // table. Its own comment named why that was the sharper finding: "an empty vector might
+        // have been refused somewhere downstream, whereas a zero-amount flow is indistinguishable
+        // from a genuinely payment-free period and passes every check."
+        //
+        // That is now refused at the read. What has NOT changed is the schema: nothing in V1 ties
+        // cashflow_line.flow_date to cashflow_line.period_id, although period_id is the partition
+        // key, so the row is still insertable -- which is why theRowIsPresentInTheTable below is
+        // kept exactly as it was. The guard is a read-side diagnosis, not the constraint; see
+        // FlowVectorReader.SELECT_MISFILED_LINES for why the obvious CHECK would be wrong (it
+        // hard-codes the Gregorian assumption that readPeriodDates deliberately refuses to make).
 
-            // NOT empty -- and what is there is the finding. FlowVectorReader.boundaryOnly
-            // substitutes a SYNTHETIC ZERO-AMOUNT flow at the period end, so the pipeline receives
-            // a well-formed vector describing a period in which nothing was due. The real
-            // 47,073.47 instalment is in the table, dated inside the contract's life, and absent
-            // from the only vector that would have carried it.
-            //
-            // This is a sharper demonstration than an empty vector would have been: an empty
-            // vector might have been refused somewhere downstream, whereas a zero-amount flow is
-            // indistinguishable from a genuinely payment-free period and passes every check.
-            assertThat(period.periodFlows().future())
-                .as("one substituted boundary flow, not the scheduled instalment")
-                .singleElement()
-                .satisfies(flow -> {
-                    assertThat(flow.amount().isZero())
-                        .as("a zero-amount synthetic flow stands in for a 47,073.47 instalment")
-                        .isTrue();
-                    assertThat(flow.date().toString())
-                        .as("dated at the period end, which is the boundary and not the schedule")
-                        .isEqualTo("2027-04-30");
-                });
-            assertThat(period.periodFlows().anchorDate())
-                .as("anchored at the accounting period's start, read from accounting_period")
-                .isEqualTo(java.time.LocalDate.of(2027, 4, 1));
+        @Test
+        @DisplayName("the contract is quarantined with both axes named, not given a nil vector")
+        void aMisfiledFlowVanishes() {
+            // periodFor is non-optional -- "a source that cannot answer at all is a defect in the
+            // source" -- so the refusal is an exception, and it is a ContractDataCondition so that
+            // FR-905's barrier files it against THIS contract and the run continues.
+            Throwable refusal = catchThrowable(
+                () -> main.periods().periodFor(LatentDefectFixture.MISFILED_FLOW_ID, NOW));
+
+            assertThat(refusal)
+                .as("computing on a vector known to be short publishes a payment-free period over"
+                    + " a real instalment, which no downstream check can catch")
+                .isInstanceOf(ContractDataCondition.class);
+            // Both axes and the window, because "a flow is missing" is not a diagnosis. Whoever
+            // works this queue entry has to find one row in a partitioned table, and the row is
+            // identified by the pair that disagrees.
+            assertThat(refusal)
+                .hasMessageContaining("dated 2027-05-15")
+                .hasMessageContaining("filed under period 202704")
+                .hasMessageContaining("47073.47");
+            assertThat(refusal)
+                .as("and the window it fell between, or the reader cannot tell which of the two"
+                    + " axes is the wrong one")
+                .hasMessageContaining("2027-04-01")
+                .hasMessageContaining("2027-04-30");
         }
 
         @Test
-        @DisplayName("the row really is there, so the emptiness above is the window and not the data")
+        @DisplayName("the row really is there, so the refusal above is the window and not the data")
         void theRowIsPresentInTheTable() throws Exception {
             // Without this, the assertion above would pass just as well if the insert had failed --
-            // which is the shape of vacuous test this repository keeps finding.
+            // which is the shape of vacuous test this repository keeps finding. Kept verbatim from
+            // when this class recorded the defect: the schema still admits the row, and that is
+            // the sixth finding, still open.
             try (var connection = dataSource.getConnection();
                  var statement = connection.createStatement();
                  var rs = statement.executeQuery(
@@ -388,11 +403,68 @@ class LatentDefectsLiveTest {
                     .isEqualByComparingTo(new BigDecimal("47073.470000"));
             }
         }
+
+        /**
+         * <b>A flow dated exactly on the period's start date is not refused, and this test exists
+         * because a mutation showed nothing checked that.</b>
+         *
+         * <p>Changing the guard's lower date comparison from {@code <} to {@code <=} left the
+         * entire live suite green — 117 tests — so the strictness the query's javadoc argues for
+         * was an unverified assertion about a shape no fixture carried. It carries one now.
+         *
+         * <p>What it protects: the read window is half-open, {@code (start, end]}, so this flow is
+         * not returned for period 202704 and by the "matched by no window" reasoning would look
+         * lost. But under this fixture's calendar (202704 runs 2027-04-01 to 2027-04-30) no
+         * adjacent period would claim it either, so filing it here is the only thing a feed could
+         * sensibly do. Refusing it would quarantine every monthly loan due on the first of the
+         * month — the whole book, for a boundary convention nobody has settled. The convention
+         * question is recorded rather than decided inside a validation query.
+         */
+        @Test
+        @DisplayName("a flow dated on the period start date is left alone, not refused")
+        void aFlowOnTheBoundaryDateIsNotRefused() {
+            assertThat(catchThrowable(
+                () -> main.periods().periodFor(LatentDefectFixture.BOUNDARY_FLOW_ID, NOW)))
+                .as("the guard must not decide the half-open-window boundary question by"
+                    + " quarantining every contract that sits on it")
+                .isNull();
+        }
+
+        @Test
+        @DisplayName("a correctly filed contract is not refused by the new guard")
+        void aWellFiledContractIsUntouched() {
+            // The half that makes the guard usable rather than merely strict. A predicate written
+            // slightly wrong -- NOT BETWEEN inverted, or the period bounds swapped -- would refuse
+            // every contract in the book, and every other assertion in this class would still
+            // pass because they all expect refusals. Asserted on the weekly contract, which has
+            // four flows across four different dates inside one period and is therefore the
+            // hardest correctly-filed case for a period predicate to get right.
+            assertThat(catchThrowable(
+                () -> main.periods().periodFor(LatentDefectFixture.WEEKLY_ID, NOW)))
+                .as("four correctly filed flows in one period must pass the misfiling guard")
+                .isNull();
+        }
     }
 
     @Nested
-    @DisplayName("5. a weekly contract yields several accrual boundaries in one period")
+    @DisplayName("5. a weekly contract's several boundaries are ONE published period (FIXED)")
     class WeeklyContract {
+
+        // ============================================================ what this class used to say
+        //
+        // weeklyGivesFourFlows asserted the port's four flows and recorded that the pipeline then
+        // refused them: "the refusal moved rather than went: AmortisationEngine.boundaries produces
+        // one boundary per distinct discounting exponent, and ContractPipeline refuses
+        // roll.periods() != 1."
+        //
+        // The port assertion was correct and is kept verbatim -- four instalments inside one
+        // accounting month is what a weekly schedule IS, and the adapter reading them is the
+        // adapter working. What has changed is the layer above: ContractPipeline now summarises
+        // several accrual periods into the one movement a close publishes, through
+        // AmortisationResult.asOneAccrualPeriod. So a second test is added for the half that used
+        // to refuse -- which quarantined the contract rather than aborting the run, FR-905's
+        // barrier catching the IllegalStateException like any other; the effect was that every
+        // weekly and fortnightly loan in the book was unclosable, not that the run died.
 
         @Test
         @DisplayName("four April instalments come back as four flows in one period's vector")
@@ -400,9 +472,7 @@ class LatentDefectsLiveTest {
             // WEEKLY is one of the eight values V1's compounding_basis check admits, and
             // CompoundingBasis.stepOf goes to explicit trouble to support it -- its javadoc says an
             // earlier version refusing it meant "a ten-million-contract close dying on the first
-            // weekly loan rather than quarantining it under FR-905". The refusal moved rather than
-            // went: AmortisationEngine.boundaries produces one boundary per distinct discounting
-            // exponent, and ContractPipeline refuses roll.periods() != 1.
+            // weekly loan rather than quarantining it under FR-905".
             ContractPeriod period = main.periods().periodFor(LatentDefectFixture.WEEKLY_ID, NOW);
 
             assertThat(period.periodFlows().future())
@@ -412,6 +482,50 @@ class LatentDefectsLiveTest {
             assertThat(period.periodFlows().future())
                 .extracting(flow -> flow.date().toString())
                 .containsExactly("2027-04-07", "2027-04-14", "2027-04-21", "2027-04-28");
+        }
+
+        @Test
+        @DisplayName("the pipeline computes it as one movement instead of refusing it")
+        void thePipelineSummarisesRatherThanRefusing() {
+            // The end-to-end half, and it has to be end-to-end: the summation is unit-tested in
+            // eir-calc against hand-derived figures (AmortisationResultCollapseTest), but what
+            // failed here was the WIRING -- a refusal in ContractPipeline that no amount of
+            // correct arithmetic below it would have reached.
+            JdbcRunComposition composition = new JdbcRunComposition(dataSource, Fixtures.BOOK_ID);
+            ContractComputation computation = composition.pipelines()
+                .forSlice(
+                    composition.requestFor("RUN-WEEKLY-01", Fixtures.PERIOD_ID, NOW),
+                    PartitionKey.grain(Fixtures.PRODUCT_ID, "ENT-01"))
+                .compute(LatentDefectFixture.WEEKLY_ID);
+
+            // ONE row. Before the fix this call threw IllegalStateException -- "produced 4 accrual
+            // boundaries from its vector; the month-end loop computes exactly one" -- and FR-905's
+            // barrier filed it as a quarantine, so every weekly loan in the book landed in the
+            // exception queue every period and the close could not be signed. Reaching this line
+            // at all is the fix.
+            assertThat(computation.row().period())
+                .as("stamped with the ACCOUNTING period's ordinal, which the pipeline passes in,"
+                    + " rather than with any of the four accrual boundaries' own ordinals")
+                .isEqualTo(main.periods()
+                    .periodFor(LatentDefectFixture.WEEKLY_ID, NOW).periodOrdinal());
+            assertThat(computation.row().accrualExponent())
+                .as("elapsed accrual time for the whole month: four weekly periods summed. The"
+                    + " last boundary's exponent alone would report one week of accrual for a"
+                    + " month, understating the interest by roughly three quarters")
+                .isEqualByComparingTo(new BigDecimal("4"));
+            // The roll-forward identity on the published row, which is what makes the summary
+            // safe to post: AmortisationRow's constructor enforces it, so this is asserting that
+            // the row the close will publish is the row the engine built rather than a figure
+            // assembled alongside it.
+            assertThat(computation.row().openingGca()
+                .plus(computation.row().interestAccrued())
+                .minus(computation.row().cashReceived()))
+                .as("opening + interest - cash = closing, on the collapsed month")
+                .isEqualTo(computation.row().closingGca());
+            assertThat(computation.row().closingGca())
+                .as("and the closing the pipeline publishes must be the closing the contract"
+                    + " reached, which is what ContractComputation carries separately")
+                .isEqualTo(computation.closingGca());
         }
     }
 }

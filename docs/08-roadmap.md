@@ -542,28 +542,46 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   |---|---|
   | RC-1 compares a field against itself | **Confirmed, then FIXED.** A single `UPDATE cbs_billed_interest SET billed_interest = 99999.99` moved **both** legs together — the engine leg through `OpeningState.contractualInterestBilled`, the CBS leg through the feed port — so no value of that column could separate them. The defect was one line in `EirService.contractualLegLines`, not in this module: both ports carry the CBS figure *by design*, and treating one of them as the engine's answer is what made it a field against itself. `ContractPipeline` now derives the leg (`openingContractual` at the contractual rate) and `EirService` consumes it through `ContractualLegInterest.fromEngineAccrual`. **The fix exposed a second, real difference:** the engine accrues at 28 significant digits and the CBS bills in paise, so on the seed book 529,815.61 × 0.01 = 5,298.1561 against a billed 5,298.16 — 0.0039 per contract, red on every line. Resolved where 03 § 5.7 requires, by a rule at the boundary rather than a tolerance on the residue |
   | `SELECT_POPULATION` ignores the book | **Confirmed, then FIXED.** A `MAIN` run enumerated the `IGAAP` contract and an `IGAAP` run the `MAIN` ones. Worse than the enumeration: the foreign contract has no `MAIN`-book balance, so it was quarantined under FR-905 with a message about a *missing opening state* — an operator read "no state recorded" for a contract that is simply not theirs. `AND c.book_id = ?` added, bound from `bookId()` and served by `contract_entity_book_ix`. Asserted from **both** books, because a predicate bound to a constant passes the `MAIN` test alone — mutation-verified exactly so |
-  | The rate is wrapped without its convention | **Confirmed, then FIXED.** A `MONTHLY` schedule with an `ACTUAL_DATE` solve yielded a rate at 12 periods a year while the stored convention implies 1, and `periodFor` **threw nothing** — the contradiction travelled into `AmortisationEngine.roll`, whose refusal is an `IllegalArgumentException` FR-905's per-contract barrier does not catch, so **one contract aborted the whole run**. The two columns were read by two byte-identical queries in two classes; they are now one `SolvedRateReader.SELECT_SOLVE_IN_FORCE` returning the pair from one row, and the rate is wrapped at `convention.periodsPerYear()`. The engine's guard is therefore **structurally unfailable on this path** — no value of either column can make the pair disagree, because only one is consulted for the periodicity. The unrecognised-convention branch became a `ContractDataCondition` (quarantine, not abort); it has **no live test and cannot have one**, because `eir_computation_convention_ck` refuses the INSERT — so the test asserts the constraint instead of the branch it makes unreachable |
-  | The flow window is the calendar month | **Confirmed, and sharper than expected.** A flow dated 2027-05-15 filed under period 202704 — legal, since **nothing in V1 ties `flow_date` to `period_id`, though `period_id` is the partition key** — is absent from its own period's vector. What is substituted is not emptiness but a **synthetic zero-amount boundary flow**, which is indistinguishable from a genuinely payment-free period and passes every check. An empty vector might have been refused downstream; a nil flow is not |
-  | A weekly contract yields several boundaries | **Confirmed.** Four April instalments come back as four flows in one period's vector, so the pipeline receives four accrual boundaries and refuses `roll.periods() != 1` — reinstating one layer up exactly the abort `CompoundingBasis.stepOf` was rewritten to prevent
+  | The rate is wrapped without its convention | **Confirmed, then FIXED.** A `MONTHLY` schedule with an `ACTUAL_DATE` solve yielded a rate at 12 periods a year while the stored convention implies 1, and `periodFor` **threw nothing** — the contradiction travelled into `AmortisationEngine.roll`, whose refusal is an `IllegalArgumentException`. **FR-905's barrier does catch that** — `FailureIsolation.isolate` catches every `RuntimeException` and rethrows only a run-level `InvariantBreachException` (SL-1, PF-1, DT-1), as `FailureIsolationTest` demonstrates — so the cost was never an abort. It was that **every actual-date contract was quarantined every period**, which blocks the close while their exceptions are unresolved and puts an arithmetic precondition in the queue where a "these two columns disagree" diagnosis belonged. The two columns were read by two byte-identical queries in two classes; they are now one `SolvedRateReader.SELECT_SOLVE_IN_FORCE` returning the pair from one row, and the rate is wrapped at `convention.periodsPerYear()`. The engine's guard is therefore **structurally unfailable on this path** — no value of either column can make the pair disagree, because only one is consulted for the periodicity. The unrecognised-convention branch became a `ContractDataCondition` (quarantine, not abort); it has **no live test and cannot have one**, because `eir_computation_convention_ck` refuses the INSERT — so the test asserts the constraint instead of the branch it makes unreachable |
+  | The flow window is the calendar month | **Confirmed, then FIXED as a diagnosis rather than as a constraint.** A flow dated 2027-05-15 filed under period 202704 — legal, since **nothing in V1 ties `flow_date` to `period_id`, though `period_id` is the partition key** — was absent from its own period's vector, and what was substituted was not emptiness but a **synthetic zero-amount boundary flow**, indistinguishable from a genuinely payment-free period. `FlowVectorReader.refuseMisfiledLines` now quarantines the contract with both axes and the window named. It is a read-side guard and **not** the schema constraint the sixth finding asks for: the obvious `CHECK` hard-codes the Gregorian assumption `readPeriodDates` deliberately refuses to make, and the correct constraint compares `flow_date` against the `accounting_period` row, which is a trigger and a decision about calendars |
+  | A weekly contract yields several boundaries | **Confirmed, then FIXED.** Four April instalments come back as four flows in one period's vector, so the pipeline received four accrual boundaries and refused `roll.periods() != 1`. `AmortisationResult.asOneAccrualPeriod` now summarises them into the one movement a close publishes — first opening, last closing, both columns and the accrual exponent summed at working precision, with `AmortisationRow`'s constructor re-checking the roll-forward identity. **One accounting period may contain several accrual periods**, which is what a weekly schedule means; the rows survive on the result for FR-808's trace
 
-  **Three of the five are fixed and mutation-verified; two remain, and they are one change rather
-  than two.** The flow window and the weekly contract are the same defect seen from two sides: this
-  module reads the vector over the *accounting* period (`accounting_period.period_start_date` →
-  `period_end_date`) while `ContractPipeline` defines accrual period *n* as
-  `(dueDate(n−1), dueDate(n)]`. Where a contract's instalment falls outside the accounting month
-  those windows disagree and a synthetic nil flow is substituted; where several instalments fall
-  inside it they disagree in the other direction and `roll.periods() != 1` aborts. Fixing either
-  alone would leave the other, because both follow from one window mismatch.
+  **All five are fixed and every fix is mutation-verified** — the implementation reverted to the
+  defect and the intended assertion confirmed to fail. Two of those mutations earned their keep by
+  finding gaps in the *tests* rather than in the code: a book predicate bound to a constant is caught
+  only by the assertion made from the *other* book, and the misfiling guard's boundary strictness
+  turned out to be untested until a fixture was added for the one date it protects.
 
-  The refusal's own comment names the intended remedy — "the projector declares the boundaries, and
-  a caller wanting a row per accounting period puts a zero-amount flow on each period date" — but
-  that remedy is for the *aligned* case. A weekly contract genuinely accrues four times inside one
-  accounting month, and the correct treatment is that **one accounting period may contain several
-  accrual periods**, with the period's published movement being their sum: opening from the first
-  row, closing from the last, interest and cash summed. The roll-forward identity survives that
-  summation, so the invariants hold. It is nonetheless a change to the shared per-contract pipeline
-  affecting every contract in the book, not an adapter fix, which is why it is scoped separately
-  from the three above rather than bundled with them. |
+  **Two corrections to what this document and this module's comments said, both about blast radius
+  rather than about the defects.** They are recorded rather than quietly edited, because the wrong
+  version was repeated into five files before anybody checked it.
+
+  1. **These defects quarantine contracts; they do not abort runs.** Items 3 and 5 below said an
+     `ACTUAL_DATE` solve or a weekly contract "aborts rather than quarantines", and
+     `CompoundingBasis.stepOf`'s javadoc described "a ten-million-contract close dying on the first
+     weekly loan". But `ContractPeriodSource.periodFor` is called from inside
+     `ContractPipeline.compute`, which `MonthEndRun` runs through `FailureIsolation.runBatch`;
+     `isolate` catches every `RuntimeException` and rethrows only a run-level
+     `InvariantBreachException` (SL-1, PF-1, DT-1), which `FailureIsolationTest` demonstrates
+     directly for an `IllegalStateException`. The run completes. The real cost is that a whole
+     product segment or measurement basis is quarantined *every period*, the close then refuses
+     while those exceptions are unresolved, and the queue entry names an arithmetic precondition
+     instead of the thing somebody has to fix — harder to diagnose than an abort, and easily
+     mistaken for a data-quality backlog.
+  2. **Finding 1 was not in this module at all.** Both JDBC ports carry the CBS figure *by design*;
+     the field-against-itself was one line in `EirService` treating one of them as the engine's
+     answer. This module's live tests for it were true observations pointed at a wrong conclusion.
+
+  **A seventh finding, opened by the fix to the second one.** The read window is half-open,
+  `(period_start_date, period_end_date]`, and this repository's two fixtures disagree about whether
+  adjacent accounting periods share a boundary date: `eir-api`'s `Seed` runs 202805 from 2028-04-30
+  to 2028-05-31, so a period's start *is* the previous period's end, while the JDBC live fixture runs
+  202704 from 2027-04-01 to 2027-04-30, so it is not. Under the second convention **a flow dated
+  exactly on a period start is returned by no period's read at all.** The misfiling guard
+  deliberately excludes that one date rather than deciding the question — refusing it would
+  quarantine every monthly loan due on the first of the month — and
+  `LatentDefectFixture.BOUNDARY_FLOW_ID` pins that exclusion so the choice cannot be reversed
+  silently. **Somebody has to settle which convention the ledger calendar uses.**
 
   **A sixth finding, from the schema rather than the adapters:** `cashflow_line.period_id` is the
   range partition key and **no constraint requires it to agree with `flow_date`**. A feed that computed
@@ -589,10 +607,12 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
      instalment falls outside the calendar month the vector comes back empty and a zero-amount
      boundary flow is substituted, so the roll-forward applies no cash while the cash book reports
      the receipt.
-  3. **A weekly or fortnightly contract aborts the run.** Several flow dates inside one accounting
+  3. **A weekly or fortnightly contract is quarantined every period.** Several flow dates inside one accounting
      month produce several accrual boundaries, and `ContractPipeline` refuses `roll.periods() != 1`.
      `CompoundingBasis.stepOf` goes to explicit trouble to support those two frequencies precisely so
-     they are *not* refused, and the refusal reappears one layer up.
+     they are *not* refused, and the refusal reappears one layer up. It quarantines rather than
+     aborting — see the correction under item 5 — so the effect is that every weekly and fortnightly
+     loan in the book is unclosable, not that the run dies.
   4. **`SELECT_POPULATION` ignores the book.** `JdbcContractSource` is handed a `bookId`, stores it,
      and never puts it in the population query — so a run of book `MAIN` enumerates the IGAAP and tax
      contracts of the same facility (FR-109's parallel books). `JdbcCoreBankingFeed` and
@@ -600,8 +620,12 @@ ADR-0010 makes `eir-batch` a one-pom change when there is something for it to ru
   5. **The rate is wrapped without consulting its convention.** `readRateInForce` builds
      `Rate.periodic(value, periodsPerYear)` unconditionally, ignoring `eir_computation.convention` —
      the column the period source reads for the same solve. `AmortisationEngine.roll` refuses the
-     mismatched pair outright, so an `ACTUAL_DATE` solve on a monthly contract aborts rather than
-     quarantines.
+     mismatched pair outright, so an `ACTUAL_DATE` solve on a monthly contract is quarantined with a
+     message about an arithmetic precondition. **Corrected:** this item and item 3 originally said
+     such a contract "aborts rather than quarantines". That was wrong, and it was repeated into
+     several comments before being checked. `FailureIsolation.isolate` catches every
+     `RuntimeException` and rethrows only a run-level `InvariantBreachException`, so the run
+     completes. The defects are real; the blast radius was overstated.
 
   **And the review found what the live suite cannot prove, which matters more than the count.** The
   suite has no skip mechanism anywhere — verified, zero uses of `assumeTrue`, `Assumptions`,

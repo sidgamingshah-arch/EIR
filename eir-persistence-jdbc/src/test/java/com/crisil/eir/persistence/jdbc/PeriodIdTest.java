@@ -269,7 +269,8 @@ class PeriodIdTest {
             // the CONTRACT's schedule need not be, and V1's contract_version_compounding_basis_ck
             // admits WEEKLY and FORTNIGHTLY — daily-wage microfinance and KCC collection. The old
             // int months-per-period argument had no value for either: 0 is not a step and 1 is a
-            // different schedule, which is why a weekly contract used to abort the run.
+            // different schedule, which is why every weekly contract used to be quarantined (not,
+            // as this comment once said, why the run aborted -- see CompoundingBasis.stepOf).
             //
             // Weekly due dates from 30 April 2027, counted in days because seven days is an exact
             // calendar step: 30 Apr, 7 May (April has 30 days, so 30 + 7 lands on the 7th), 14 May,

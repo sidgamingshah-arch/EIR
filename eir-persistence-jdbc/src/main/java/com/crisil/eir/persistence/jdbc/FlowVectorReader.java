@@ -111,7 +111,149 @@ final class FlowVectorReader {
          ORDER BY l.flow_date, l.sequence_no
         """;
 
+    /**
+     * Flows dated inside a window whose {@code period_id} puts them outside it.
+     *
+     * <p><b>Why a second query rather than dropping the {@code period_id} predicate from the
+     * first.</b> {@link #SELECT_LINES} bounds both axes: the dates because the window is a date
+     * range, and {@code period_id} because {@code cashflow_line} is range-partitioned on it (04
+     * § 4) and a predicate on {@code flow_date} alone prunes nothing. At the measured per-contract
+     * cost in {@code tools/load-harness/RESULTS.md} that pruning is not optional on a
+     * ten-million-contract book.
+     *
+     * <p>But bounding both axes means a row whose two axes <em>disagree</em> is invisible to every
+     * period — dated in May, filed under April, matched by neither window. Nothing in V1 forbids
+     * it: {@code period_id} is the partition key and <b>no constraint requires it to agree with
+     * {@code flow_date}</b>, which is a finding recorded against the schema in its own right. And
+     * the consequence was not an empty vector but a worse thing: {@link #boundaryOnly} substitutes
+     * a synthetic zero-amount flow, so the pipeline received a well-formed vector describing a
+     * period in which nothing was due, while a real instalment sat in the table. A nil flow is
+     * indistinguishable from a genuinely payment-free period and passes every downstream check.
+     *
+     * <p>So the pruning stays and this asks the complementary question. It is cheap because it is
+     * bounded by {@code schedule_id} — one contract's own lines, an index lookup rather than a
+     * scan — and it runs once per contract per period, alongside a read that was already
+     * happening. It cannot be folded into {@link #SELECT_LINES}, because the whole point is to
+     * look where that query is not allowed to.
+     *
+     * <p>A schema constraint would be better still and is <b>deliberately not</b> what this is. The
+     * obvious {@code CHECK (period_id = year*100 + month of flow_date)} hard-codes the Gregorian
+     * assumption into the schema, and {@code JdbcContractPeriodSource.readPeriodDates} goes to
+     * explicit trouble NOT to assume it — under a 4-4-5 or 52/53-week calendar a period ends in the
+     * following month and such a CHECK would refuse correct data. The correct constraint compares
+     * {@code flow_date} against the {@code accounting_period} row for {@code period_id}, which
+     * references a second table and is a trigger rather than a CHECK. That is a migration and a
+     * decision about calendars; this is the read-side guard that makes the condition visible
+     * meanwhile, and it is stated as such rather than as the fix.
+     *
+     * <h2>Both directions of disagreement, and the one case left alone on purpose</h2>
+     *
+     * <p>A row can disagree with itself two ways, and both lose the flow:
+     *
+     * <ul>
+     *   <li><b>Dated inside this window, filed under another period.</b> {@link #SELECT_LINES}
+     *       bounds {@code period_id}, so this period does not see it; and the period it is filed
+     *       under does not see it either, because that period's date window excludes it.</li>
+     *   <li><b>Filed under this period, dated outside this window.</b> The mirror image, and the
+     *       one the live fixture carries — dated 2027-05-15, filed under 202704. Reading period
+     *       202704 matches the partition and fails the date bound; reading 202705 matches the date
+     *       and fails the partition bound. Matched by neither.</li>
+     * </ul>
+     *
+     * <p>The first draft of this query had only the first case, which is the direction that reads
+     * naturally from the defect's description and is <em>not</em> the direction the fixture
+     * exhibits. It found nothing and the test that expected a refusal failed, which is the test
+     * doing its job.
+     *
+     * <p><b>The second clause is strict at both ends, and that is deliberate rather than tidy.</b>
+     * It asks for {@code flow_date < start OR flow_date > end} — strictly outside the
+     * <em>closed</em> window — while the read uses the half-open {@code (start, end]}. The gap
+     * between them is exactly one date: a flow dated on {@code period_start_date} and filed under
+     * that period. The read will not return it, so on the reasoning above it is "lost" — but
+     * whether it is <em>misfiled</em> depends on whether adjacent periods share a boundary date,
+     * and this repository's two fixtures disagree: {@code eir-api}'s {@code Seed} runs period
+     * 202805 from 2028-04-30 to 2028-05-31, so a period's start IS the previous period's end,
+     * while the live fixture runs 202704 from 2027-04-01 to 2027-04-30, so it is not. Under the
+     * first convention a flow on the start date belongs to the previous period and filing it here
+     * is an error; under the second there is no previous period that would claim it and filing it
+     * here is the only sensible thing a feed could do.
+     *
+     * <p>So that one date is excluded. A guard that refused it would quarantine every monthly loan
+     * due on the first of the month under the live fixture's calendar — the whole book, for a
+     * convention question nobody has settled. The half-open read boundary against a calendar whose
+     * periods do not abut is a real question and it is recorded as one; it is not something to
+     * decide silently inside a validation query.
+     *
+     * <p>Binds: schedule id, anchor date, upper date, lower period id, upper period id,
+     * lower period id, upper period id, anchor date, upper date.
+     */
+    static final String SELECT_MISFILED_LINES = """
+        SELECT l.flow_date,
+               l.period_id,
+               l.amount
+          FROM cashflow_line l
+         WHERE l.schedule_id = ?
+           AND ((l.flow_date > ?
+                 AND l.flow_date <= ?
+                 AND l.period_id NOT BETWEEN ? AND ?)
+             OR (l.period_id BETWEEN ? AND ?
+                 AND (l.flow_date < ? OR l.flow_date > ?)))
+         ORDER BY l.flow_date, l.sequence_no
+        """;
+
     private FlowVectorReader() {
+    }
+
+    /**
+     * Refuses a schedule carrying a flow whose date and period disagree.
+     *
+     * <p>A {@link ContractDataCondition}, so FR-905's barrier quarantines <em>this contract</em>
+     * and the close reports it with a reason an operator can act on — the message names the row,
+     * both of its axes and the window it fell between, because "a flow is missing" is not a
+     * diagnosis and "period_id 202704 on a flow dated 2027-05-15" is. The alternative shapes are
+     * both worse: silently including the flow would move an instalment into a period the ledger
+     * has closed, and reading on regardless is the current behaviour this replaces — a synthetic
+     * nil boundary flow that publishes a payment-free period over a real instalment.
+     *
+     * <p>Called on the period read, before the vector is used, so that no computation happens on a
+     * vector known to be short. See {@link #SELECT_MISFILED_LINES} for why this cannot be one
+     * query with the read it accompanies.
+     */
+    static void refuseMisfiledLines(Connection connection, String scheduleId,
+        LocalDate anchor, LocalDate upperInclusive) throws SQLException {
+
+        try (PreparedStatement statement = connection.prepareStatement(SELECT_MISFILED_LINES)) {
+            statement.setObject(1, java.util.UUID.fromString(scheduleId));
+            // Clause one: dated inside the window, filed outside the period range.
+            statement.setObject(2, anchor, java.sql.Types.DATE);
+            statement.setObject(3, upperInclusive, java.sql.Types.DATE);
+            statement.setInt(4, PeriodId.of(anchor));
+            statement.setInt(5, PeriodId.of(upperInclusive));
+            // Clause two: filed inside the period range, dated strictly outside the window. The
+            // same four values in the other order, and the date comparisons are strict at both
+            // ends -- see the query's javadoc for the single date that exclusion protects.
+            statement.setInt(6, PeriodId.of(anchor));
+            statement.setInt(7, PeriodId.of(upperInclusive));
+            statement.setObject(8, anchor, java.sql.Types.DATE);
+            statement.setObject(9, upperInclusive, java.sql.Types.DATE);
+
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return;
+                }
+                throw new ContractDataCondition(
+                    "cash flow schedule " + scheduleId + " carries a flow dated "
+                        + Rows.date(rs, "flow_date") + " for " + rs.getBigDecimal("amount")
+                        + " filed under period " + rs.getInt("period_id") + ", which is outside"
+                        + " the period being read (" + anchor + " exclusive to " + upperInclusive
+                        + " inclusive, periods " + PeriodId.of(anchor) + " to "
+                        + PeriodId.of(upperInclusive) + "). period_id is the partition key and"
+                        + " nothing in V1 requires it to agree with flow_date, so this flow is"
+                        + " matched by no period's window at all: reading on would substitute a"
+                        + " zero-amount boundary flow and publish a period in which nothing was"
+                        + " due while the instalment sits in the table");
+            }
+        }
     }
 
     /** The schedule the amortisation reads, or null where the version has none. */

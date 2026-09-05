@@ -84,9 +84,10 @@ class VocabularyMappingTest {
             // refused, and the reason is a defect that was actually hit, recorded in stepOf's
             // javadoc: the old method could only answer in whole calendar months, so it refused
             // the two frequencies that are not measured in months at all, and a weekly contract
-            // "resolved a perfectly good openingState and then aborted the whole run inside
-            // ContractPeriodSource: a ten-million-contract close dying on the first weekly loan
-            // rather than quarantining it under FR-905".
+            // "resolved a perfectly good openingState and [was] then refused inside
+            // ContractPeriodSource". That javadoc used to say the run died rather than
+            // quarantining under FR-905; it does not, and the claim has been corrected there --
+            // the barrier catches it and every weekly loan was quarantined instead.
             //
             // So the old expectation was an artefact of the return type, not a fact about weekly
             // contracts. Weekly and fortnightly retail collection is ordinary — daily-wage-earner
@@ -129,8 +130,8 @@ class VocabularyMappingTest {
             // it is the count a seasonal facility is conventionally reported on, which
             // CompoundingBasis records as "the least misleading available answer". Asserting it
             // matters because if this accessor began to throw too, a seasonal contract would fail
-            // before openingState could answer, and it would abort the run instead of being
-            // quarantined — the same defect as the weekly one above, on a different value.
+            // before openingState could answer, and would be quarantined with a vocabulary error
+            // instead of measured — the same defect as the weekly one above, on a different value.
             assertThat(CompoundingBasis.periodsPerYear("SEASONAL")).isEqualTo(12);
             assertThat(CompoundingBasis.periodsPerYear("CUSTOM")).isEqualTo(12);
         }

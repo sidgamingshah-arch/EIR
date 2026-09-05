@@ -151,6 +151,17 @@ why a signed threshold would be the wrong instrument.
 | **Reference** | `CatchUpCalculator.restate` · `InvariantId.CU_2` · [03 § 9](03-calculation-spec.md#9-invariants) · B5.4.6 · FR-505 |
 | **Critical path** | **Yes**, before the first period in which a modification is processed — which is any period after go-live, not a later phase. |
 
+### DR-06b — The accounting-period boundary convention: do adjacent periods share a date?
+
+| | |
+|---|---|
+| **Owner** | Financial control, with the ledger calendar owner. A one-line answer, but it has to be *the* answer. |
+| **The ask** | State whether `accounting_period.period_start_date` is the **previous** period's `period_end_date` (periods abut and share a boundary date) or the **day after** it (periods are disjoint). One convention, applied to every period the ledger opens. |
+| **If it is not decided** | **A flow dated exactly on a period start date is returned by no period's read at all.** Every flow window in `eir-persistence-jdbc` is half-open, `(period_start_date, period_end_date]` — deliberately, because a closed window would count a boundary flow in two periods and double-recognise it. Under the abutting convention that is exactly right: the flow belongs to the previous period, whose window ends on that date. Under the disjoint convention it belongs to *neither*, and the loss is silent — `FlowVectorReader.boundaryOnly` substitutes a synthetic zero-amount flow, so the period reads as payment-free while the instalment sits in the table. **This repository currently contains both conventions**: `eir-api`'s `Seed` runs period 202805 from 2028-04-30 to 2028-05-31 (abutting), and the JDBC live fixture runs 202704 from 2027-04-01 to 2027-04-30 (disjoint). A monthly loan due on the first of the month is the shape that falls through, and that is not a rare shape. |
+| **Why the engine cannot default it** | It could pick one, and picking wrongly is worse than asking. Widening the window to `[start, end]` double-counts every boundary flow under the abutting convention — recognising one instalment in two periods, which SL-1 would report as a break nobody could explain. Narrowing the calendar in a migration rewrites the ledger's own period table, which is the bank's record and not the engine's. And the misfiling guard added for the flow-window finding (`FlowVectorReader.refuseMisfiledLines`) deliberately **excludes** this one date rather than deciding it: refusing it would quarantine every monthly loan due on the 1st. `LatentDefectFixture.BOUNDARY_FLOW_ID` pins that exclusion so it cannot be reversed without a test failing. |
+| **Reference** | `FlowVectorReader.SELECT_MISFILED_LINES` · `JdbcContractPeriodSource.readPeriodDates` · `LatentDefectFixture.BOUNDARY_FLOW_ID` · [08](08-roadmap.md) seventh finding · 04 § 4 |
+| **Critical path** | **Yes**, before the first close. It decides whether a class of ordinary contracts recognises its instalments at all. |
+
 ### DR-07 — What "fully collateralised low-fee" means
 
 | | |

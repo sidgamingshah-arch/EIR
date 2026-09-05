@@ -76,3 +76,37 @@ of `NUMERIC(24,6)` needs the headroom.
 `period_balance_p202712` is bounded `FROM (202712) TO (202801)`, which is the December-to-January roll
 handled correctly: `202713` is not a month, and `PeriodId`'s javadoc is written about exactly that
 non-contiguity.
+
+## The five reviewed defects, and where each one turned out to live
+
+The module was reviewed adversarially after its first successful build, on the reasoning that code
+which has never executed has never had a single claim tested. Five defects were found, then
+exercised against a live cluster (`LatentDefectsLiveTest`), then fixed. Each fix was
+mutation-verified: the implementation reverted to the defect and the intended assertion confirmed to
+fail. `LatentDefectsLiveTest`'s classes were **inverted rather than deleted** — each keeps the
+finding, the argument and the input that trips it, and flips what it requires of the code.
+
+| Defect | Where the fix went |
+|---|---|
+| RC-1 compares a field against itself | **Not this module.** Both ports carry the CBS figure by design; `EirService` was treating one of them as the *engine's* answer. `ContractPipeline` now derives the contractual leg and `ContractualLegInterest.fromEngineAccrual` expresses it at the scale the borrower was billed |
+| `SELECT_POPULATION` ignores the book | `JdbcContractSource` — `AND c.book_id = ?`, bound from `bookId()`, served by `contract_entity_book_ix` |
+| The rate is wrapped without its convention | `SolvedRateReader` — one query returning the rate **and** the convention from one row, with the rate wrapped at `convention.periodsPerYear()`. Replaces two byte-identical queries in two classes |
+| The flow window is the calendar month | `FlowVectorReader.refuseMisfiledLines` — a read-side diagnosis, **not** the schema constraint the sixth finding asks for |
+| A weekly contract yields several boundaries | `AmortisationResult.asOneAccrualPeriod` in `eir-calc` — one accounting period may contain several accrual periods, summed |
+
+Two things worth knowing before reading the comments in this module:
+
+1. **None of these aborted a run.** Several comments here said they did, and the claim was repeated
+   into five files before anybody checked it. `FailureIsolation.isolate` catches every
+   `RuntimeException` and rethrows only a run-level `InvariantBreachException` (SL-1, PF-1, DT-1),
+   which `FailureIsolationTest` demonstrates directly. They quarantine contracts. The cost is that a
+   whole product segment or measurement basis is quarantined every period, blocking the close with a
+   queue entry that names an arithmetic precondition rather than the thing to fix — harder to
+   diagnose than an abort, and easily mistaken for a data-quality backlog.
+2. **Two findings remain open and neither is code.** The sixth — nothing ties
+   `cashflow_line.period_id` to its `flow_date`, though `period_id` is the partition key — needs a
+   trigger comparing the date against `accounting_period`, not the obvious `CHECK`, which would
+   hard-code the Gregorian assumption `readPeriodDates` deliberately refuses to make. The seventh is
+   [DR-06b](../docs/10-decision-register.md): the flow window is half-open, and this repository's two
+   fixtures disagree about whether adjacent accounting periods share a boundary date. Under one of
+   them a flow dated exactly on a period start is returned by no period's read at all.

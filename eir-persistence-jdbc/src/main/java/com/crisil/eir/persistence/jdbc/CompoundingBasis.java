@@ -64,10 +64,26 @@ public final class CompoundingBasis {
      * daily-wage-earner microfinance loan or a KCC harvest-cycle facility — and V1's
      * {@code contract_version_compounding_basis_ck} admits both. An earlier version of this class
      * offered only a months-per-period answer and refused those two, which meant a weekly contract
-     * resolved a perfectly good {@code openingState} and then aborted the whole run inside
-     * {@code ContractPeriodSource}: a ten-million-contract close dying on the first weekly loan
-     * rather than quarantining it under FR-905. Seven days is an exact calendar step and needs no
-     * month arithmetic, so there is no reason to refuse it.
+     * resolved a perfectly good {@code openingState} and was then refused inside
+     * {@code ContractPeriodSource}. Seven days is an exact calendar step and needs no month
+     * arithmetic, so there is no reason to refuse it.
+     *
+     * <p><b>Correction to what this javadoc used to claim.</b> It said the refusal meant "a
+     * ten-million-contract close dying on the first weekly loan rather than quarantining it under
+     * FR-905", and that sentence was repeated into several other comments in this module before
+     * anybody checked it. It is wrong. {@code ContractPeriodSource.periodFor} is called from
+     * inside {@code ContractPipeline.compute}, which {@code MonthEndRun} runs through
+     * {@code FailureIsolation.runBatch}; {@code isolate} catches every {@code RuntimeException}
+     * and rethrows only a run-level {@code InvariantBreachException} (SL-1, PF-1, DT-1), as
+     * {@code FailureIsolationTest} demonstrates for an {@code IllegalStateException}. So the run
+     * completed and the weekly loan was quarantined.
+     *
+     * <p>The cost was still real and is worth stating correctly, because it is the kind that
+     * hides: <b>every weekly and fortnightly contract in the book quarantined every period</b>,
+     * the close then refused while their exceptions were unresolved, and the queue entry named a
+     * month-arithmetic precondition rather than a schedule frequency the system was supposed to
+     * support. A whole product segment unclosable reads as a data-quality backlog, which is harder
+     * to diagnose than a close that dies outright.
      *
      * <p>{@code SEASONAL} and {@code CUSTOM} are still refused, and that refusal is real rather than
      * a gap: a schedule sized to a harvest has periods of unequal length <em>by construction</em>, so

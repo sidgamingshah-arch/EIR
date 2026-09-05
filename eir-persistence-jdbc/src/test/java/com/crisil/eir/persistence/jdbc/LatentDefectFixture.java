@@ -21,6 +21,8 @@ import javax.sql.DataSource;
  *       <td>{@code SELECT_POPULATION} carries no book predicate</td></tr>
  *   <tr><td>{@link #ACTUAL_DATE_ID}</td><td>MONTHLY schedule, solve stored ACTUAL_DATE</td>
  *       <td>{@code readRateInForce} ignores {@code eir_computation.convention}</td></tr>
+ *   <tr><td>{@link #BOUNDARY_FLOW_ID}</td><td>flow dated 2027-04-01, ON period 202704's start
+ *       date, filed under 202704 — the shape the misfiling guard must NOT refuse</td></tr>
  *   <tr><td>{@link #MISFILED_FLOW_ID}</td><td>flow dated 2027-05-15 filed under period 202704</td>
  *       <td>the flow window is the calendar month, so the vector comes back empty</td></tr>
  *   <tr><td>{@link #WEEKLY_ID}</td><td>WEEKLY schedule, four flows inside April</td>
@@ -49,6 +51,27 @@ final class LatentDefectFixture {
     static final String MISFILED_VERSION = "dddddddd-0022-4000-8000-000000000022";
     static final String MISFILED_SOLVE = "dddddddd-0023-4000-8000-000000000023";
     static final String MISFILED_SCHEDULE = "dddddddd-0024-4000-8000-000000000024";
+
+    /**
+     * A flow dated exactly on {@code period_start_date} and filed under that period.
+     *
+     * <p><b>The case the misfiling guard must NOT refuse</b>, and it is here because a mutation
+     * proved nothing tested it: making the guard's date comparison {@code <=} instead of
+     * {@code <} left the whole live suite green, so the strictness that protects this shape was an
+     * unverified claim.
+     *
+     * <p>The read window is half-open, {@code (start, end]}, so a flow dated on the start date is
+     * not returned for this period. Whether that makes it <em>misfiled</em> depends on whether
+     * adjacent periods share a boundary date, and this repository's two fixtures disagree — see
+     * {@code FlowVectorReader.SELECT_MISFILED_LINES}. Under the live fixture's calendar (202704
+     * runs 2027-04-01 to 2027-04-30) there is no adjacent period that would claim it, so filing it
+     * here is the only sensible thing a feed could do, and refusing it would quarantine every
+     * monthly loan due on the first of the month.
+     */
+    static final String BOUNDARY_FLOW_ID = "dddddddd-0041-4000-8000-000000000041";
+    static final String BOUNDARY_VERSION = "dddddddd-0042-4000-8000-000000000042";
+    static final String BOUNDARY_SOLVE = "dddddddd-0043-4000-8000-000000000043";
+    static final String BOUNDARY_SCHEDULE = "dddddddd-0044-4000-8000-000000000044";
 
     /** WEEKLY schedule with four instalments inside one accounting month. */
     static final String WEEKLY_ID = "dddddddd-0031-4000-8000-000000000031";
@@ -123,6 +146,20 @@ final class LatentDefectFixture {
         sql.add(stage(MISFILED_FLOW_ID));
         sql.add(billed(MISFILED_FLOW_ID, "5298.160000"));
         sql.add(balance(MISFILED_FLOW_ID, MISFILED_SOLVE));
+
+        // ---- a flow dated exactly on period 202704's start date (2027-04-01) and filed under
+        // 202704. The read window is (start, end], so it is not returned -- but it is NOT misfiled
+        // under this calendar, and the guard must leave it alone. See BOUNDARY_FLOW_ID.
+        sql.add(contract(BOUNDARY_FLOW_ID, "CBS-CONTRACT-BOUNDARY", Fixtures.BOOK_ID));
+        sql.add(version(BOUNDARY_VERSION, BOUNDARY_FLOW_ID, "MONTHLY"));
+        sql.add(anchor(BOUNDARY_VERSION, "2026-05-01", 24));
+        sql.add(schedule(BOUNDARY_SCHEDULE, BOUNDARY_VERSION));
+        sql.add(line(BOUNDARY_SCHEDULE, BOUNDARY_FLOW_ID, "2027-04-01", 202704, 12,
+            "47073.470000"));
+        sql.add(solve(BOUNDARY_SOLVE, BOUNDARY_FLOW_ID, "PERIODIC_INDEX"));
+        sql.add(stage(BOUNDARY_FLOW_ID));
+        sql.add(billed(BOUNDARY_FLOW_ID, "5298.160000"));
+        sql.add(balance(BOUNDARY_FLOW_ID, BOUNDARY_SOLVE));
 
         // ---- WEEKLY, four instalments inside April 2027. V1 admits WEEKLY and CompoundingBasis
         // goes to explicit trouble to support it, so this is an ordinary retail microfinance shape.

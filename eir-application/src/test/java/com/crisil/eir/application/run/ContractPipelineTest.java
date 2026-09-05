@@ -666,8 +666,41 @@ class ContractPipelineTest {
                 .withMessageContaining("neither the SPPI gate nor the fee classification");
         }
 
+        /**
+         * <b>Moved out of {@code Refusals} in spirit, kept here so the history is visible.</b>
+         *
+         * <p>This test required {@code compute} to throw {@code IllegalStateException} with
+         * "produced 2 accrual boundaries". {@code ContractPipeline} now summarises several accrual
+         * periods into the one movement a close publishes, so it must not throw — and the figures
+         * it produces are what this asserts instead.
+         *
+         * <h2>Where the expected figures come from</h2>
+         *
+         * <p><b>Not from running this code.</b> Reference case 1's periodic EIR is published as
+         * {@code 0.010421491800} and the opening GCA at month 13 as {@code 528,407.32}, with an EMI
+         * of {@code 47,073.47}. Two flows one month apart give two accrual periods at exponent 1
+         * each, computed independently at 28 significant digits (ADR-0002's working precision):
+         *
+         * <ul>
+         *   <li>Period 1 interest = 528,407.32 x 0.010421491800 =
+         *       <b>5,506.79255243997600</b> — which is the figure {@code docs/03}'s reference case
+         *       already publishes for this contract at this month, so the derivation is checked
+         *       against the repository's own published value rather than only against itself.</li>
+         *   <li>Period 1 closing = 528,407.32 + 5,506.79255243997600 - 47,073.47 =
+         *       <b>486,840.64255243997600</b>.</li>
+         *   <li>Period 2 interest = 486,840.64255243997600 x 0.010421491800 =
+         *       <b>5,073.605764266984279876196800</b>.</li>
+         *   <li>Period 2 closing = <b>444,840.7783167069602798761968</b>.</li>
+         *   <li><b>Interest summed</b> = <b>10,580.39831670696027987619680</b>, presented
+         *       <b>10,580.40</b>. Note it is not 2 x 5,506.79: the EMI in period 1 reduces the
+         *       balance period 2 accrues on, so a test that expected twice the first period would
+         *       pass on an implementation that multiplied instead of summing.</li>
+         *   <li><b>Cash summed</b> = 2 x 47,073.47 = <b>94,146.94</b> exactly.</li>
+         *   <li><b>Accrual exponent</b> = 1 + 1 = <b>2</b>.</li>
+         * </ul>
+         */
         @Test
-        @DisplayName("a period vector producing two accrual boundaries")
+        @DisplayName("a period vector producing two accrual boundaries is summarised, not refused")
         void twoBoundaries() {
             com.crisil.eir.domain.FlowVector twoBoundaries =
                 com.crisil.eir.domain.FlowVector.of(
@@ -685,9 +718,34 @@ class ContractPipelineTest {
             RunFixtures.Harness harness = RunFixtures.harness(
                 "C-0011", RunFixtures.performingState(), period, RunFixtures.EXPLODING_SOLVER);
 
-            assertThatIllegalStateException()
-                .isThrownBy(() -> harness.pipeline().compute("C-0011"))
-                .withMessageContaining("produced 2 accrual boundaries");
+            ContractComputation computed = harness.pipeline().compute("C-0011");
+
+            assertThat(computed.row().period())
+                .as("the accounting period's ordinal, which the pipeline passes in")
+                .isEqualTo(13);
+            assertThat(computed.row().openingGca().amount())
+                .as("the FIRST accrual period's opening, because that is where the month started")
+                .isEqualByComparingTo(new java.math.BigDecimal("528407.32"));
+            assertThat(computed.row().interestAccrued().amount())
+                .as("the two periods summed at working precision -- NOT 2 x 5,506.79, because the"
+                    + " period-1 EMI reduces the balance period 2 accrues on")
+                .isEqualByComparingTo(
+                    new java.math.BigDecimal("10580.39831670696027987619680"));
+            assertThat(computed.row().cashReceived().amount())
+                .as("both instalments")
+                .isEqualByComparingTo(new java.math.BigDecimal("94146.94"));
+            assertThat(computed.row().closingGca().amount())
+                .as("the SECOND accrual period's closing, reached by summing the movements")
+                .isEqualByComparingTo(
+                    new java.math.BigDecimal("444840.7783167069602798761968"));
+            assertThat(computed.row().accrualExponent())
+                .as("elapsed accrual time summed: two monthly periods are two of them, and the"
+                    + " last row's exponent alone would report one month for two months' accrual")
+                .isEqualByComparingTo(new java.math.BigDecimal("2"));
+            assertThat(computed.closingGca())
+                .as("and the computation publishes that same closing, so the row the close reads"
+                    + " and the balance it carries forward are one figure")
+                .isEqualTo(computed.row().closingGca());
         }
 
         @Test

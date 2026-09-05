@@ -15,7 +15,7 @@ import java.util.Objects;
  *
  * <h2>Why these two columns cannot be read separately</h2>
  *
- * <p><b>They were, and it aborted runs.</b> {@code JdbcContractStateSource} wrapped
+ * <p><b>They were, and it quarantined contracts.</b> {@code JdbcContractStateSource} wrapped
  * {@code eir_computation.rate_periodic} as {@code Rate.periodic(value, terms.periodsPerYear())} —
  * the periodicity from the contract's schedule — while {@code JdbcContractPeriodSource} read
  * {@code eir_computation.convention} from the same solve and built a {@link TimeConvention} from
@@ -26,10 +26,22 @@ import java.util.Objects;
  * fixture stores {@code PERIODIC_INDEX} on every solve. For an {@code ACTUAL_DATE} solve the
  * convention implies <b>1</b> period a year — the rate is annual effective, and
  * {@code TimeConvention.ActualDate} says so — while a monthly contract's terms imply 12. The engine
- * then threw {@code IllegalArgumentException}, which is not a data condition and not caught by
- * FR-905's per-contract barrier: <b>one contract with an actual-date solve aborted the whole
- * run</b>, and the message named an arithmetic precondition rather than the two disagreeing
- * columns somebody has to go and reconcile.
+ * then threw {@code IllegalArgumentException}.
+ *
+ * <p><b>What that cost, stated accurately.</b> It does <em>not</em> abort the run.
+ * {@code FailureIsolation.isolate} catches every {@code RuntimeException} and rethrows only for a
+ * run-level {@code InvariantBreachException} (SL-1, PF-1, DT-1), so the contract is quarantined and
+ * the loop continues — {@code FailureIsolationTest} demonstrates exactly that for an
+ * {@code IllegalStateException}. An earlier note in this repository said the run aborted; that was
+ * read from prose rather than checked, and it is wrong.
+ *
+ * <p>The real cost is narrower and still serious: <b>every contract solved on actual dates is
+ * quarantined every period</b>, the close gate then refuses the close while their exceptions are
+ * unresolved ("N contract(s) were quarantined and their exceptions are unresolved"), and the queue
+ * entry an operator works names an arithmetic precondition instead of the two disagreeing columns
+ * somebody has to go and reconcile. A whole measurement basis is unclosable with a misleading
+ * diagnosis, which is worse to diagnose than an abort and easier to mistake for a data-quality
+ * backlog.
  *
  * <p>The fix is not a validation. Validating a pair that two readers construct independently leaves
  * the pair constructible, and a later reader adds a third route. Here the rate is wrapped with
@@ -152,9 +164,13 @@ final class SolvedRateReader {
      * <p>A value V1's {@code eir_computation_convention_ck} does not admit is a
      * {@link ContractDataCondition} rather than a {@link PersistenceFailure}: it is one row that
      * cannot be interpreted, so FR-905 quarantines that contract and the close reports it, instead
-     * of an outage-shaped abort. This is the change of kind the finding asked for — the previous
-     * code raised a bare {@code PersistenceFailure} here, which the state source's catch does not
-     * convert, so a single unrecognised value stopped every contract in the run.
+     * of a bare {@code PersistenceFailure}, which the state source's catch does not convert into
+     * an absence. Both kinds are ultimately caught by FR-905's barrier and both quarantine the
+     * contract, so this is not the difference between an abort and a quarantine — it is the
+     * difference between a quarantine the state source produced deliberately, with
+     * {@code openingState} returning empty and the pipeline's own message naming the boundary, and
+     * one produced by an exception escaping a reader. The first is a diagnosis; the second is a
+     * stack trace in a queue entry.
      */
     private static TimeConvention conventionOf(String stored, int termPeriodsPerYear,
         com.crisil.eir.domain.DayCountConvention dayCount) {

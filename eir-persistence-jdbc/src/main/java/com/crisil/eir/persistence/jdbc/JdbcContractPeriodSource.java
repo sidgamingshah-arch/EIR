@@ -190,6 +190,14 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
                         + " solve to a rate for a contract with no remaining flows");
             }
 
+            // Before reading the vector, not after: a flow whose period_id disagrees with its
+            // flow_date is matched by no period's window, and the vector would come back short
+            // with a synthetic nil boundary flow standing in for a real instalment. Quarantining
+            // the contract is the honest answer; computing on a vector known to be incomplete is
+            // not. See FlowVectorReader.SELECT_MISFILED_LINES for why this is a second query and
+            // why it is not a schema CHECK.
+            FlowVectorReader.refuseMisfiledLines(connection, scheduleId, dates.start(),
+                dates.end());
             FlowVector inPeriod = FlowVectorReader.read(connection, scheduleId, currency,
                 dates.start(), dates.end());
             FlowVector periodFlows = inPeriod.future().isEmpty()
@@ -442,7 +450,7 @@ public final class JdbcContractPeriodSource extends JdbcAdapter implements Contr
         // would solve the rate against one month of a twenty-year contract. The bound is left off
         // rather than set to the maturity date, because ContractTerms.maturityDate() needs
         // period-anniversary arithmetic that WEEKLY and FORTNIGHTLY schedules do not have — and a
-        // weekly-collection loan must not abort the run on its way past this line.
+        // weekly-collection loan must not be quarantined on its way past this line.
         FlowVector revised = FlowVectorReader.readRemaining(
             connection, scheduleId, currency, eventDate);
         if (revised.future().isEmpty()) {

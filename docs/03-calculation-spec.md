@@ -1092,11 +1092,49 @@ programme, and the shapes are the familiar ones:
 |---|---|
 | `JdbcCoreBankingFeed` and `JdbcContractStateSource` read the same `cbs_billed_interest` row under the same predicate, so under the JDBC wiring **both sides of RC-1 come from one column of one table** and its deviation is identically nil | control that cannot fail — the literal "field against itself" its own port javadoc warns of |
 | The flow vector is read over the accounting calendar month while `ContractPipeline` defines the accrual period as `(dueDate(n−1), dueDate(n)]`; a contract whose instalment falls outside the month gets an empty vector and a zero-amount boundary flow | one rule, two places, with two answers |
-| A weekly or fortnightly contract yields several accrual boundaries in one month and `ContractPipeline` refuses `roll.periods() != 1` — reinstating, one layer up, exactly the abort `CompoundingBasis.stepOf` was rewritten to prevent | a refusal moved rather than removed |
+| A weekly or fortnightly contract yields several accrual boundaries in one month and `ContractPipeline` refuses `roll.periods() != 1` — reinstating, one layer up, exactly the refusal `CompoundingBasis.stepOf` was rewritten to prevent | a refusal moved rather than removed |
 | `SELECT_POPULATION` ignores the `bookId` the adapter holds, so a run of one book enumerates FR-109's parallel books | asymmetric guard: the population is unscoped while the balances are scoped |
 | `readRateInForce` wraps the stored rate without consulting `eir_computation.convention`, which the period source reads for the same solve | one rule, two places |
 | The live suite's **business-time predicate is behaviourally unfailable** — deletable from both queries with no test failing — while its system-time predicate is genuinely exercised against a superseded version | control that cannot fail, on one axis of two |
 | The flow vector has **no decision-time axis at all**, undeclared, while the module declares two other such gaps honestly in javadoc | a gap named nowhere, in a module built to close exactly this |
+
+**All five of the ranked findings above are now fixed, and each fix was mutation-verified** — the
+implementation reverted to the defect and the intended assertion confirmed to fail. Two of those
+mutations found gaps in the *tests* rather than the code, which is the point of running them: a book
+predicate bound to a constant is caught only by the assertion made from the *other* book, and the
+misfiling guard's boundary strictness was untested until a fixture was added for the one date it
+protects.
+
+Three of them changed the reading of the finding as much as the code:
+
+- **RC-1's field-against-itself was not in `eir-persistence-jdbc` at all.** Both ports carry the CBS
+  figure *by design* — `OpeningState` documents the field as "what the borrower was billed, from the
+  CBS" — and the defect was one line in `EirService` treating one of them as the *engine's* answer.
+  Fixing it exposed a second, real difference the old wiring had concealed: the engine accrues at 28
+  significant digits and the CBS bills in paise, so the two sides differ by sub-paise on every
+  contract. That is resolved where § 5.7 requires — a rule at the boundary where an accrual *becomes*
+  a billed figure, not a tolerance on the residue — so nothing rounds after the subtraction and a
+  genuine residue is still reported in full.
+- **The flow window and the weekly contract were one defect, not two,** both following from the
+  window mismatch this table names. The remedy is that **one accounting period may contain several
+  accrual periods**, summed: `AmortisationResult.asOneAccrualPeriod` telescopes them into the one
+  movement a close publishes, and the rows survive for FR-808's trace. A weekly facility accruing
+  four times in a month is not an error to refuse; it is what a weekly schedule means.
+- **None of these defects aborted a run,** which this table and several comments implied. They
+  quarantine contracts: `FailureIsolation.isolate` catches every `RuntimeException` and rethrows only
+  a run-level `InvariantBreachException`. The cost is a whole product segment or measurement basis
+  quarantined every period, blocking the close with a queue entry that names an arithmetic
+  precondition instead of the thing to fix — harder to diagnose than an abort, and easily mistaken
+  for a data-quality backlog. Recorded in [08](08-roadmap.md) as a correction rather than edited
+  away, because the wrong version was repeated into five files before anybody checked it.
+
+The **sixth** finding (no constraint tying `cashflow_line.period_id` to `flow_date`) remains open:
+the fix added is a read-side diagnosis that quarantines the contract with both axes named, not the
+schema constraint, because the obvious `CHECK` would hard-code a Gregorian assumption
+`readPeriodDates` deliberately refuses to make. A **seventh** was opened by that work and is now
+[DR-06b](10-decision-register.md): the read window is half-open and this repository's two fixtures
+disagree about whether adjacent accounting periods share a boundary date, so under one of them a flow
+dated exactly on a period start is returned by no period's read at all.
 
 **The one the live suite caught by itself is the one worth dwelling on.** `RemainingPortsLiveTest`
 expected period ordinal 12 where the engine derives 13, and the engine is right. The test's
